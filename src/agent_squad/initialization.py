@@ -9,7 +9,8 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
-import tempfile
+
+from .storage import atomic_write as _atomic_write
 
 
 SCHEMA_VERSION = 1
@@ -216,6 +217,7 @@ class GitWorktree:
 
     root: Path
     common_directory: Path
+    git_directory: Path
     local_exclude_path: Path
 
 
@@ -228,6 +230,16 @@ class InitializationResult:
     git_exclude_path: Path
     configuration_created: bool
     git_exclude_updated: bool
+
+
+@dataclass(frozen=True)
+class InitializedRepository:
+    """An initialized worktree and its validated local configuration."""
+
+    worktree: GitWorktree
+    control_root: Path
+    configuration_path: Path
+    configuration: Configuration
 
 
 def default_review_worktree_root() -> Path:
@@ -301,7 +313,7 @@ def discover_git_worktree(start: Path) -> GitWorktree:
             f"current path is not a directory: {working_directory}"
         )
 
-    inside_result = _run_git(
+    inside_result = run_git(
         working_directory,
         "rev-parse",
         "--is-inside-work-tree",
@@ -322,7 +334,10 @@ def discover_git_worktree(start: Path) -> GitWorktree:
 
     root = _git_path(working_directory, "--show-toplevel")
     common_directory = _git_path(working_directory, "--git-common-dir")
-    if not root.is_dir() or not common_directory.is_dir():
+    git_directory = _git_path(working_directory, "--git-dir")
+    if not all(
+        path.is_dir() for path in (root, common_directory, git_directory)
+    ):
         raise RepositoryError(
             "Git returned repository paths that do not exist; inspect the "
             "worktree and retry initialization"
@@ -331,6 +346,7 @@ def discover_git_worktree(start: Path) -> GitWorktree:
     return GitWorktree(
         root=root,
         common_directory=common_directory,
+        git_directory=git_directory,
         local_exclude_path=common_directory / "info" / "exclude",
     )
 
@@ -401,6 +417,34 @@ def initialize_repository(
         git_exclude_path=exclude_path,
         configuration_created=configuration_created,
         git_exclude_updated=exclude_needs_update,
+    )
+
+
+def load_initialized_repository(start: Path) -> InitializedRepository:
+    """Discover an initialized worktree and validate its configuration."""
+
+    worktree = discover_git_worktree(start)
+    control_root = worktree.root / CONTROL_DIRECTORY_NAME
+    configuration_path = control_root / CONFIGURATION_FILE_NAME
+
+    if not control_root.exists() and not control_root.is_symlink():
+        raise InitializationError(
+            "Agent Squad is not initialized in this worktree; run "
+            "agent-squad init first"
+        )
+    _validate_control_root(control_root)
+    if not _validate_configuration_path(configuration_path):
+        raise InitializationError(
+            "Agent Squad configuration is missing; run agent-squad init "
+            "to create it"
+        )
+    configuration = load_configuration(configuration_path)
+    _validate_review_worktree_root(configuration, worktree.root)
+    return InitializedRepository(
+        worktree=worktree,
+        control_root=control_root,
+        configuration_path=configuration_path,
+        configuration=configuration,
     )
 
 
@@ -579,7 +623,7 @@ def _encode_configuration(configuration: Configuration) -> bytes:
     return f"{text}\n".encode("utf-8")
 
 
-def _run_git(
+def run_git(
     working_directory: Path,
     *arguments: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -604,7 +648,7 @@ def _run_git(
 
 
 def _git_path(working_directory: Path, argument: str) -> Path:
-    result = _run_git(working_directory, "rev-parse", argument)
+    result = run_git(working_directory, "rev-parse", argument)
     if result.returncode != 0:
         detail = result.stderr.strip() or "unknown Git error"
         raise RepositoryError(f"git rev-parse {argument} failed: {detail}")
@@ -693,30 +737,6 @@ def _file_mode(path: Path) -> int:
     if not path.exists():
         return 0o644
     return stat.S_IMODE(path.stat().st_mode)
-
-
-def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_path.chmod(mode)
-            temporary_file.write(content)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        temporary_path.replace(path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def _rollback_created_paths(created_paths: list[Path]) -> list[str]:
