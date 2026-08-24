@@ -42,8 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_init(_arguments: argparse.Namespace) -> int:
     result = initialize_repository(Path.cwd())
-    configuration_action = "created" if result.configuration_created else "validated"
-    exclusion_action = "updated" if result.git_exclude_updated else "already configured"
+    configuration_action = (
+        "created" if result.configuration_created else "validated"
+    )
+    exclusion_action = (
+        "updated" if result.git_exclude_updated else "already configured"
+    )
 
     print(f"Initialized Agent Squad in {result.repository_root}")
     print(f"Configuration {configuration_action}: {result.configuration_path}")

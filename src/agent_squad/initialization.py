@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import stat
 import subprocess
 import tempfile
@@ -20,8 +20,6 @@ LOCAL_EXCLUDE_PATTERNS = (
     f"{CONTROL_DIRECTORY_NAME}/",
     f"{REVIEW_DIRECTORY_NAME}/",
 )
-SUPPORTED_AGENT_KINDS = frozenset(("claude", "codex"))
-AGENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class AgentSquadError(Exception):
@@ -40,19 +38,26 @@ class InitializationError(AgentSquadError):
     """Raised when validated initialization cannot be completed safely."""
 
 
+class AgentKind(StrEnum):
+    """Supported installed agent harnesses."""
+
+    CLAUDE = "claude"
+    CODEX = "codex"
+
+
 @dataclass(frozen=True)
 class ImplementerConfiguration:
     """Configured identity and harness kind for the Implementer."""
 
     agent_name: str
-    kind: str
+    kind: AgentKind
 
 
 @dataclass(frozen=True)
 class ReviewerConfiguration:
     """Configured Reviewer harness and native start arguments."""
 
-    kind: str
+    kind: AgentKind
     start_args: tuple[str, ...]
 
 
@@ -106,11 +111,6 @@ class Configuration:
             implementer_data["agent_name"],
             "configuration.implementer.agent_name",
         )
-        if not AGENT_NAME_PATTERN.fullmatch(implementer_name):
-            raise ConfigurationError(
-                "configuration.implementer.agent_name must match "
-                "[a-z][a-z0-9_-]{0,31}"
-            )
         implementer_kind = _require_agent_kind(
             implementer_data["kind"], "configuration.implementer.kind"
         )
@@ -131,14 +131,13 @@ class Configuration:
         start_args = _require_string_list(
             start_args_value,
             "configuration.reviewer.start_args",
-            allow_empty_strings=False,
         )
 
         base_ref = _require_string(data["base_ref"], "configuration.base_ref")
         if base_ref != base_ref.strip() or "\x00" in base_ref:
             raise ConfigurationError(
-                "configuration.base_ref must not contain surrounding whitespace "
-                "or null bytes"
+                "configuration.base_ref must not contain surrounding "
+                "whitespace or null bytes"
             )
 
         review_root_text = _require_string(
@@ -147,7 +146,8 @@ class Configuration:
         )
         if "\x00" in review_root_text:
             raise ConfigurationError(
-                "configuration.review_worktree_root must not contain null bytes"
+                "configuration.review_worktree_root must not contain "
+                "null bytes"
             )
         review_root = Path(review_root_text).expanduser()
         if not review_root.is_absolute():
@@ -158,13 +158,13 @@ class Configuration:
         review_limit = data["max_completed_change_reviews"]
         if type(review_limit) is not int or review_limit < 1:
             raise ConfigurationError(
-                "configuration.max_completed_change_reviews must be a positive integer"
+                "configuration.max_completed_change_reviews must be a "
+                "positive integer"
             )
 
         generated_paths = _require_string_list(
             data.get("allowed_generated_paths", []),
             "configuration.allowed_generated_paths",
-            allow_empty_strings=False,
         )
         _validate_generated_paths(generated_paths)
 
@@ -225,15 +225,16 @@ class InitializationResult:
 
 
 def default_review_worktree_root() -> Path:
-    """Return the machine-local default root for disposable review worktrees."""
+    """Return the default root for disposable review worktrees."""
 
+    default_data_home = Path.home() / ".local" / "share"
     configured_data_home = os.environ.get("XDG_DATA_HOME")
     if configured_data_home:
         data_home = Path(configured_data_home).expanduser()
         if not data_home.is_absolute():
-            data_home = Path.home() / ".local" / "share"
+            data_home = default_data_home
     else:
-        data_home = Path.home() / ".local" / "share"
+        data_home = default_data_home
     return (data_home / "agent-squad" / "worktrees").resolve(strict=False)
 
 
@@ -283,9 +284,15 @@ def discover_git_worktree(start: Path) -> GitWorktree:
 
     working_directory = start.resolve(strict=False)
     if not working_directory.is_dir():
-        raise RepositoryError(f"current path is not a directory: {working_directory}")
+        raise RepositoryError(
+            f"current path is not a directory: {working_directory}"
+        )
 
-    inside_result = _run_git(working_directory, "rev-parse", "--is-inside-work-tree")
+    inside_result = _run_git(
+        working_directory,
+        "rev-parse",
+        "--is-inside-work-tree",
+    )
     if inside_result.returncode != 0 or inside_result.stdout.strip() != "true":
         detail = inside_result.stderr.strip()
         suffix = f" Git reported: {detail}" if detail else ""
@@ -298,8 +305,8 @@ def discover_git_worktree(start: Path) -> GitWorktree:
     common_directory = _git_path(working_directory, "--git-common-dir")
     if not root.is_dir() or not common_directory.is_dir():
         raise RepositoryError(
-            "Git returned repository paths that do not exist; inspect the worktree "
-            "and retry initialization"
+            "Git returned repository paths that do not exist; inspect the "
+            "worktree and retry initialization"
         )
 
     return GitWorktree(
@@ -314,7 +321,7 @@ def initialize_repository(
     *,
     review_worktree_root: Path | None = None,
 ) -> InitializationResult:
-    """Create or validate local Agent Squad configuration and Git exclusions."""
+    """Create or validate local configuration and Git exclusions."""
 
     worktree = discover_git_worktree(start)
     control_root = worktree.root / CONTROL_DIRECTORY_NAME
@@ -323,45 +330,43 @@ def initialize_repository(
     _validate_control_root(control_root)
     configuration_exists = _validate_configuration_path(configuration_path)
     if configuration_exists:
-        load_configuration(configuration_path)
+        configuration = load_configuration(configuration_path)
         configuration_bytes = None
     else:
         review_root = review_worktree_root or default_review_worktree_root()
         configuration = default_configuration(review_root)
         configuration_bytes = _encode_configuration(configuration)
+    _validate_review_worktree_root(configuration, worktree.root)
 
     exclude_path = worktree.local_exclude_path
     original_exclude = _read_local_exclude(exclude_path)
     updated_exclude = _add_local_exclude_patterns(original_exclude)
     exclude_needs_update = updated_exclude != original_exclude
 
-    control_root_created = False
+    created_paths: list[Path] = []
     configuration_created = False
-    info_directory_created = False
     try:
         if not control_root.exists():
             control_root.mkdir(mode=0o700)
-            control_root_created = True
+            created_paths.append(control_root)
 
         if configuration_bytes is not None:
             _atomic_write(configuration_path, configuration_bytes, mode=0o600)
             configuration_created = True
+            created_paths.append(configuration_path)
 
         if exclude_needs_update:
             info_directory = exclude_path.parent
             if not info_directory.exists():
                 info_directory.mkdir(mode=0o755)
-                info_directory_created = True
-            _atomic_write(exclude_path, updated_exclude, mode=_file_mode(exclude_path))
+                created_paths.append(info_directory)
+            _atomic_write(
+                exclude_path,
+                updated_exclude,
+                mode=_file_mode(exclude_path),
+            )
     except OSError as error:
-        rollback_errors = _rollback_initialization(
-            control_root=control_root,
-            configuration_path=configuration_path,
-            configuration_created=configuration_created,
-            control_root_created=control_root_created,
-            info_directory=exclude_path.parent,
-            info_directory_created=info_directory_created,
-        )
+        rollback_errors = _rollback_created_paths(created_paths)
         rollback_note = (
             " Rollback also encountered: " + "; ".join(rollback_errors)
             if rollback_errors
@@ -414,28 +419,33 @@ def _require_string(value: object, path: str) -> str:
     return value
 
 
-def _require_agent_kind(value: object, path: str) -> str:
+def _require_agent_kind(value: object, path: str) -> AgentKind:
     kind = _require_string(value, path)
-    if kind not in SUPPORTED_AGENT_KINDS:
-        supported = ", ".join(sorted(SUPPORTED_AGENT_KINDS))
-        raise ConfigurationError(f"{path} must be one of: {supported}")
-    return kind
+    try:
+        return AgentKind(kind)
+    except ValueError:
+        supported = ", ".join(member.value for member in AgentKind)
+        raise ConfigurationError(
+            f"{path} must be one of: {supported}"
+        ) from None
 
 
 def _require_string_list(
     value: object,
     path: str,
-    *,
-    allow_empty_strings: bool,
 ) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise ConfigurationError(f"{path} must be a JSON array of strings")
     strings: list[str] = []
     for index, item in enumerate(value):
-        if not isinstance(item, str) or (not item and not allow_empty_strings):
-            raise ConfigurationError(f"{path}[{index}] must be a non-empty string")
+        if not isinstance(item, str) or not item:
+            raise ConfigurationError(
+                f"{path}[{index}] must be a non-empty string"
+            )
         if "\x00" in item:
-            raise ConfigurationError(f"{path}[{index}] must not contain null bytes")
+            raise ConfigurationError(
+                f"{path}[{index}] must not contain null bytes"
+            )
         strings.append(item)
     return tuple(strings)
 
@@ -456,17 +466,37 @@ def _validate_generated_paths(paths: tuple[str, ...]) -> None:
             )
         if parsed in seen:
             raise ConfigurationError(
-                "configuration.allowed_generated_paths contains duplicate path: "
-                f"{value}"
+                "configuration.allowed_generated_paths contains duplicate "
+                f"path: {value}"
             )
         seen.add(parsed)
+
+
+def _validate_review_worktree_root(
+    configuration: Configuration,
+    implementation_root: Path,
+) -> None:
+    canonical_implementation_root = implementation_root.resolve(strict=False)
+    canonical_review_root = configuration.review_worktree_root.resolve(
+        strict=False
+    )
+    if (
+        canonical_review_root == canonical_implementation_root
+        or canonical_implementation_root in canonical_review_root.parents
+    ):
+        raise ConfigurationError(
+            "configuration.review_worktree_root must be outside the "
+            "implementation worktree"
+        )
 
 
 class _DuplicateKeyError(ValueError):
     pass
 
 
-def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def _object_without_duplicates(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -511,7 +541,9 @@ def _git_path(working_directory: Path, argument: str) -> Path:
         raise RepositoryError(f"git rev-parse {argument} failed: {detail}")
     raw_path = result.stdout.rstrip("\r\n")
     if not raw_path:
-        raise RepositoryError(f"git rev-parse {argument} returned an empty path")
+        raise RepositoryError(
+            f"git rev-parse {argument} returned an empty path"
+        )
     path = Path(raw_path)
     if not path.is_absolute():
         path = working_directory / path
@@ -521,8 +553,8 @@ def _git_path(working_directory: Path, argument: str) -> Path:
 def _validate_control_root(control_root: Path) -> None:
     if control_root.is_symlink():
         raise InitializationError(
-            f"{control_root} is a symbolic link; the canonical control root must "
-            "be a repository directory"
+            f"{control_root} is a symbolic link; the canonical control root "
+            "must be a repository directory"
         )
     if control_root.exists() and not control_root.is_dir():
         raise InitializationError(f"{control_root} must be a directory")
@@ -531,19 +563,23 @@ def _validate_control_root(control_root: Path) -> None:
 def _validate_configuration_path(configuration_path: Path) -> bool:
     if configuration_path.is_symlink():
         raise InitializationError(
-            f"{configuration_path} is a symbolic link; refusing to read or overwrite it"
+            f"{configuration_path} is a symbolic link; refusing to read or "
+            "overwrite it"
         )
     if not configuration_path.exists():
         return False
     if not configuration_path.is_file():
-        raise InitializationError(f"{configuration_path} must be a regular file")
+        raise InitializationError(
+            f"{configuration_path} must be a regular file"
+        )
     return True
 
 
 def _read_local_exclude(path: Path) -> bytes:
     if path.is_symlink():
         raise InitializationError(
-            f"{path} is a symbolic link; refusing to replace Git's local exclude"
+            f"{path} is a symbolic link; refusing to replace Git's local "
+            "exclude"
         )
     if path.exists() and not path.is_file():
         raise InitializationError(
@@ -614,29 +650,14 @@ def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
                 pass
 
 
-def _rollback_initialization(
-    *,
-    control_root: Path,
-    configuration_path: Path,
-    configuration_created: bool,
-    control_root_created: bool,
-    info_directory: Path,
-    info_directory_created: bool,
-) -> list[str]:
+def _rollback_created_paths(created_paths: list[Path]) -> list[str]:
     errors: list[str] = []
-    if configuration_created:
+    for path in reversed(created_paths):
         try:
-            configuration_path.unlink(missing_ok=True)
+            if path.is_symlink() or not path.is_dir():
+                path.unlink(missing_ok=True)
+            else:
+                path.rmdir()
         except OSError as error:
-            errors.append(f"could not remove new configuration: {error}")
-    if control_root_created:
-        try:
-            control_root.rmdir()
-        except OSError as error:
-            errors.append(f"could not remove new control directory: {error}")
-    if info_directory_created:
-        try:
-            info_directory.rmdir()
-        except OSError as error:
-            errors.append(f"could not remove new Git info directory: {error}")
+            errors.append(f"could not remove newly created {path}: {error}")
     return errors
