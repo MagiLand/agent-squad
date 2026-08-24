@@ -45,6 +45,30 @@ def _failing_exclude_write(
 
 
 class InitCommandTests(unittest.TestCase):
+    def _assert_reinit_rejects_review_root(
+        self,
+        repository: Path,
+        *,
+        data_home: Path,
+        review_root: Path,
+        expected_message: str,
+    ) -> None:
+        first = run_cli(repository, "init", data_home=data_home)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        config_path = repository / ".agent-squad/config.json"
+        _set_review_root(config_path, review_root)
+        original_config = config_path.read_bytes()
+        exclude_path = repository / ".git/info/exclude"
+        original_exclude = exclude_path.read_bytes()
+
+        result = run_cli(repository, "init", data_home=data_home)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(expected_message, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(config_path.read_bytes(), original_config)
+        self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
     def test_help_is_available_without_a_git_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -193,7 +217,7 @@ class InitCommandTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(
-                "Git could not inspect the current directory",
+                "Git could not confirm that the current directory",
                 result.stderr,
             )
             self.assertIn("non-bare Git checkout", result.stderr)
@@ -487,28 +511,19 @@ class InitCommandTests(unittest.TestCase):
             repository = temporary_root / "repository"
             initialize_git_repository(repository)
             data_home = temporary_root / "data"
-            first = run_cli(repository, "init", data_home=data_home)
-            self.assertEqual(first.returncode, 0, first.stderr)
 
             inside_root = repository / "reviews"
             inside_root.mkdir()
             linked_root = temporary_root / "linked-reviews"
             linked_root.symlink_to(inside_root, target_is_directory=True)
-            config_path = repository / ".agent-squad/config.json"
-            _set_review_root(config_path, linked_root)
-            original_config = config_path.read_bytes()
-            exclude_path = repository / ".git/info/exclude"
-            original_exclude = exclude_path.read_bytes()
-
-            result = run_cli(repository, "init", data_home=data_home)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(
-                "must be outside the implementation worktree",
-                result.stderr,
+            self._assert_reinit_rejects_review_root(
+                repository,
+                data_home=data_home,
+                review_root=linked_root,
+                expected_message=(
+                    "must be outside the implementation worktree"
+                ),
             )
-            self.assertEqual(config_path.read_bytes(), original_config)
-            self.assertEqual(exclude_path.read_bytes(), original_exclude)
 
     def test_case_variant_review_root_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -519,23 +534,14 @@ class InitCommandTests(unittest.TestCase):
             if not case_variant.exists():
                 self.skipTest("temporary volume is case-sensitive")
             data_home = temporary_root / "data"
-            first = run_cli(repository, "init", data_home=data_home)
-            self.assertEqual(first.returncode, 0, first.stderr)
-            config_path = repository / ".agent-squad/config.json"
-            _set_review_root(config_path, case_variant / "reviews")
-            original_config = config_path.read_bytes()
-            exclude_path = repository / ".git/info/exclude"
-            original_exclude = exclude_path.read_bytes()
-
-            result = run_cli(repository, "init", data_home=data_home)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(
-                "must be outside the implementation worktree",
-                result.stderr,
+            self._assert_reinit_rejects_review_root(
+                repository,
+                data_home=data_home,
+                review_root=case_variant / "reviews",
+                expected_message=(
+                    "must be outside the implementation worktree"
+                ),
             )
-            self.assertEqual(config_path.read_bytes(), original_config)
-            self.assertEqual(exclude_path.read_bytes(), original_exclude)
 
     def test_symlink_loop_review_root_has_actionable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -543,24 +549,15 @@ class InitCommandTests(unittest.TestCase):
             repository = temporary_root / "repository"
             initialize_git_repository(repository)
             data_home = temporary_root / "data"
-            first = run_cli(repository, "init", data_home=data_home)
-            self.assertEqual(first.returncode, 0, first.stderr)
 
             loop = temporary_root / "review-loop"
             loop.symlink_to(loop, target_is_directory=True)
-            config_path = repository / ".agent-squad/config.json"
-            _set_review_root(config_path, loop / "reviews")
-            original_config = config_path.read_bytes()
-            exclude_path = repository / ".git/info/exclude"
-            original_exclude = exclude_path.read_bytes()
-
-            result = run_cli(repository, "init", data_home=data_home)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("cannot be resolved", result.stderr)
-            self.assertNotIn("Traceback", result.stderr)
-            self.assertEqual(config_path.read_bytes(), original_config)
-            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+            self._assert_reinit_rejects_review_root(
+                repository,
+                data_home=data_home,
+                review_root=loop / "reviews",
+                expected_message="cannot be resolved",
+            )
 
     def test_default_review_root_symlink_loop_has_actionable_error(
         self,
