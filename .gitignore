@@ -1,2 +1,14 @@
 # Local only files
 /.local/
+
+# Python build and interpreter output
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.venv/
+
+# Agent Squad local state
+/.agent-squad/
+/.agent-squad-review/
