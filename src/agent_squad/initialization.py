@@ -92,8 +92,11 @@ class Configuration:
             path="configuration",
         )
 
-        schema_version = data["schema_version"]
-        if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
+        schema_version = _require_int(
+            data["schema_version"],
+            "configuration.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
             raise ConfigurationError(
                 f"configuration.schema_version must be {SCHEMA_VERSION}"
             )
@@ -155,8 +158,11 @@ class Configuration:
                 "configuration.review_worktree_root must be an absolute path"
             )
 
-        review_limit = data["max_completed_change_reviews"]
-        if type(review_limit) is not int or review_limit < 1:
+        review_limit = _require_int(
+            data["max_completed_change_reviews"],
+            "configuration.max_completed_change_reviews",
+        )
+        if review_limit < 1:
             raise ConfigurationError(
                 "configuration.max_completed_change_reviews must be a "
                 "positive integer"
@@ -419,6 +425,12 @@ def _require_string(value: object, path: str) -> str:
     return value
 
 
+def _require_int(value: object, path: str) -> int:
+    if type(value) is not int:
+        raise ConfigurationError(f"{path} must be an integer")
+    return value
+
+
 def _require_agent_kind(value: object, path: str) -> AgentKind:
     kind = _require_string(value, path)
     try:
@@ -477,17 +489,64 @@ def _validate_review_worktree_root(
     implementation_root: Path,
 ) -> None:
     canonical_implementation_root = implementation_root.resolve(strict=False)
-    canonical_review_root = configuration.review_worktree_root.resolve(
-        strict=False
-    )
-    if (
+    try:
+        canonical_review_root = configuration.review_worktree_root.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        raise ConfigurationError(
+            "configuration.review_worktree_root cannot be resolved: "
+            f"{error}"
+        ) from error
+    is_inside_worktree = (
         canonical_review_root == canonical_implementation_root
         or canonical_implementation_root in canonical_review_root.parents
-    ):
+    )
+    if not is_inside_worktree:
+        try:
+            implementation_identity = _existing_path_identity(
+                canonical_implementation_root
+            )
+        except OSError as error:
+            raise RepositoryError(
+                "cannot inspect the implementation worktree "
+                f"{canonical_implementation_root}: {error}"
+            ) from error
+        if implementation_identity is None:
+            raise RepositoryError(
+                "the implementation worktree disappeared during "
+                f"initialization: {canonical_implementation_root}"
+            )
+
+        try:
+            review_lineage = (
+                canonical_review_root,
+                *canonical_review_root.parents,
+            )
+            is_inside_worktree = any(
+                _existing_path_identity(candidate)
+                == implementation_identity
+                for candidate in review_lineage
+            )
+        except OSError as error:
+            raise ConfigurationError(
+                "configuration.review_worktree_root cannot be inspected: "
+                f"{error}"
+            ) from error
+
+    if is_inside_worktree:
         raise ConfigurationError(
             "configuration.review_worktree_root must be outside the "
             "implementation worktree"
         )
+
+
+def _existing_path_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        return None
+    return status.st_dev, status.st_ino
 
 
 class _DuplicateKeyError(ValueError):

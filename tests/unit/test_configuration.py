@@ -23,17 +23,25 @@ def _configuration_data() -> dict[str, object]:
     return default_configuration(Path("/tmp/reviews")).to_dict()
 
 
+def _object_at(
+    data: dict[str, object],
+    path: tuple[str, ...],
+) -> dict[str, object]:
+    target = data
+    for component in path:
+        nested = target[component]
+        if not isinstance(nested, dict):
+            raise AssertionError(f"test path is not an object: {path}")
+        target = nested
+    return target
+
+
 def _set_value(
     data: dict[str, object],
     path: tuple[str, ...],
     value: object,
 ) -> None:
-    target = data
-    for component in path[:-1]:
-        nested = target[component]
-        if not isinstance(nested, dict):
-            raise AssertionError(f"test path is not an object: {path}")
-        target = nested
+    target = _object_at(data, path[:-1])
     target[path[-1]] = value
 
 
@@ -64,7 +72,6 @@ class ConfigurationTests(unittest.TestCase):
         data = _configuration_data()
         del data["allowed_generated_paths"]
         reviewer = data["reviewer"]
-        self.assertIsInstance(reviewer, dict)
         if not isinstance(reviewer, dict):
             self.fail("reviewer fixture must be an object")
         del reviewer["start_args"]
@@ -103,12 +110,7 @@ class ConfigurationTests(unittest.TestCase):
         for parent_path, field, pattern in cases:
             with self.subTest(parent_path=parent_path, field=field):
                 data = _configuration_data()
-                target = data
-                for component in parent_path:
-                    nested = target[component]
-                    if not isinstance(nested, dict):
-                        self.fail("configuration fixture must contain objects")
-                    target = nested
+                target = _object_at(data, parent_path)
                 del target[field]
                 with self.assertRaisesRegex(ConfigurationError, pattern):
                     Configuration.from_dict(data)
@@ -123,12 +125,7 @@ class ConfigurationTests(unittest.TestCase):
         for parent_path, label in cases:
             with self.subTest(parent_path=parent_path):
                 data = _configuration_data()
-                target = data
-                for component in parent_path:
-                    nested = target[component]
-                    if not isinstance(nested, dict):
-                        self.fail("configuration fixture must contain objects")
-                    target = nested
+                target = _object_at(data, parent_path)
                 target["unexpected"] = True
                 pattern = rf"{label} has unknown field: unexpected"
                 with self.assertRaisesRegex(ConfigurationError, pattern):
@@ -137,7 +134,11 @@ class ConfigurationTests(unittest.TestCase):
     def test_configuration_rejects_invalid_values(self) -> None:
         cases = (
             (("schema_version",), 2, "schema_version must be 1"),
-            (("schema_version",), True, "schema_version must be 1"),
+            (
+                ("schema_version",),
+                True,
+                "schema_version must be an integer",
+            ),
             (("implementer",), [], "implementer must be a JSON object"),
             (("reviewer",), [], "reviewer must be a JSON object"),
             (
@@ -199,7 +200,7 @@ class ConfigurationTests(unittest.TestCase):
             (
                 ("max_completed_change_reviews",),
                 True,
-                "max_completed_change_reviews must be a positive integer",
+                "max_completed_change_reviews must be an integer",
             ),
             (
                 ("max_completed_change_reviews",),

@@ -19,6 +19,15 @@ add_src_to_path()
 from agent_squad import initialization  # noqa: E402
 
 
+def _set_review_root(config_path: Path, review_root: Path) -> None:
+    configuration = json.loads(config_path.read_text(encoding="utf-8"))
+    configuration["review_worktree_root"] = str(review_root)
+    config_path.write_text(
+        json.dumps(configuration),
+        encoding="utf-8",
+    )
+
+
 class InitCommandTests(unittest.TestCase):
     def test_help_is_available_without_a_git_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -194,6 +203,214 @@ class InitCommandTests(unittest.TestCase):
                 "not a directory\n",
             )
 
+    def test_symlinked_control_root_preserves_excludes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            external_root = temporary_root / "external-control"
+            external_root.mkdir()
+            control_root = repository / ".agent-squad"
+            control_root.symlink_to(
+                external_root,
+                target_is_directory=True,
+            )
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic link", result.stderr)
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+            self.assertEqual(list(external_root.iterdir()), [])
+
+    def test_symlinked_configuration_preserves_excludes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            control_root = repository / ".agent-squad"
+            control_root.mkdir()
+            external_config = temporary_root / "external-config.json"
+            external_config.write_text("external\n", encoding="utf-8")
+            config_path = control_root / "config.json"
+            config_path.symlink_to(external_config)
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic link", result.stderr)
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+            self.assertEqual(
+                external_config.read_text(encoding="utf-8"),
+                "external\n",
+            )
+
+    def test_configuration_directory_preserves_excludes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            config_path = repository / ".agent-squad/config.json"
+            config_path.mkdir(parents=True)
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must be a regular file", result.stderr)
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
+    def test_symlinked_local_exclude_prevents_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+            external_exclude = temporary_root / "external-exclude"
+            external_exclude.write_bytes(original_exclude)
+            exclude_path.unlink()
+            exclude_path.symlink_to(external_exclude)
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic link", result.stderr)
+            self.assertFalse((repository / ".agent-squad").exists())
+            self.assertEqual(
+                external_exclude.read_bytes(),
+                original_exclude,
+            )
+
+    def test_local_exclude_directory_prevents_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            exclude_path = repository / ".git/info/exclude"
+            exclude_path.unlink()
+            exclude_path.mkdir()
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("must be a regular file", result.stderr)
+            self.assertFalse((repository / ".agent-squad").exists())
+
+    def test_missing_local_exclude_is_created(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            exclude_path = repository / ".git/info/exclude"
+            exclude_path.unlink()
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                exclude_path.read_text(encoding="utf-8"),
+                ".agent-squad/\n.agent-squad-review/\n",
+            )
+
+    def test_local_exclude_read_error_prevents_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            exclude_path = repository / ".git/info/exclude"
+            real_read_bytes = Path.read_bytes
+
+            def fail_exclude_read(path: Path) -> bytes:
+                if path.name == "exclude":
+                    raise PermissionError("simulated unreadable exclude")
+                return real_read_bytes(path)
+
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                autospec=True,
+                side_effect=fail_exclude_read,
+            ):
+                with self.assertRaisesRegex(
+                    initialization.InitializationError,
+                    "cannot read Git local exclude",
+                ):
+                    initialization.initialize_repository(
+                        repository,
+                        review_worktree_root=temporary_root / "reviews",
+                    )
+
+            self.assertFalse((repository / ".agent-squad").exists())
+
+    def test_invalid_git_info_paths_prevent_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+
+            for kind in ("symlink", "file"):
+                with self.subTest(kind=kind):
+                    repository = temporary_root / f"repository-{kind}"
+                    initialize_git_repository(repository)
+                    info_path = repository / ".git/info"
+                    (info_path / "exclude").unlink()
+                    info_path.rmdir()
+                    if kind == "symlink":
+                        external_info = temporary_root / "external-info"
+                        external_info.mkdir(exist_ok=True)
+                        info_path.symlink_to(
+                            external_info,
+                            target_is_directory=True,
+                        )
+                    else:
+                        info_path.write_text(
+                            "not a directory\n",
+                            encoding="utf-8",
+                        )
+
+                    result = run_cli(
+                        repository,
+                        "init",
+                        data_home=temporary_root / "data",
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        "Git metadata path must be a directory",
+                        result.stderr,
+                    )
+                    self.assertFalse(
+                        (repository / ".agent-squad").exists()
+                    )
+
     def test_inner_review_root_is_rejected_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -239,12 +456,7 @@ class InitCommandTests(unittest.TestCase):
             linked_root = temporary_root / "linked-reviews"
             linked_root.symlink_to(inside_root, target_is_directory=True)
             config_path = repository / ".agent-squad/config.json"
-            configuration = json.loads(config_path.read_text(encoding="utf-8"))
-            configuration["review_worktree_root"] = str(linked_root)
-            config_path.write_text(
-                json.dumps(configuration),
-                encoding="utf-8",
-            )
+            _set_review_root(config_path, linked_root)
             original_config = config_path.read_bytes()
             exclude_path = repository / ".git/info/exclude"
             original_exclude = exclude_path.read_bytes()
@@ -256,6 +468,31 @@ class InitCommandTests(unittest.TestCase):
                 "must be outside the implementation worktree",
                 result.stderr,
             )
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
+    def test_symlink_loop_review_root_has_actionable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            data_home = temporary_root / "data"
+            first = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            loop = temporary_root / "review-loop"
+            loop.symlink_to(loop, target_is_directory=True)
+            config_path = repository / ".agent-squad/config.json"
+            _set_review_root(config_path, loop / "reviews")
+            original_config = config_path.read_bytes()
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(repository, "init", data_home=data_home)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot be resolved", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
             self.assertEqual(config_path.read_bytes(), original_config)
             self.assertEqual(exclude_path.read_bytes(), original_exclude)
 
@@ -344,6 +581,48 @@ class InitCommandTests(unittest.TestCase):
                     )
 
             self.assertFalse((repository / ".agent-squad").exists())
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
+    def test_rollback_failure_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+            real_atomic_write = initialization._atomic_write
+            obstruction = repository / ".agent-squad/obstruction"
+
+            def fail_exclude_write(
+                path: Path,
+                content: bytes,
+                *,
+                mode: int,
+            ) -> None:
+                if path.name == "exclude":
+                    obstruction.write_text("keep root\n", encoding="utf-8")
+                    raise PermissionError("simulated read-only Git metadata")
+                real_atomic_write(path, content, mode=mode)
+
+            with mock.patch.object(
+                initialization,
+                "_atomic_write",
+                side_effect=fail_exclude_write,
+            ):
+                with self.assertRaisesRegex(
+                    initialization.InitializationError,
+                    "Rollback also encountered: could not remove newly "
+                    "created",
+                ):
+                    initialization.initialize_repository(
+                        repository,
+                        review_worktree_root=temporary_root / "reviews",
+                    )
+
+            self.assertTrue(obstruction.is_file())
+            self.assertFalse(
+                (repository / ".agent-squad/config.json").exists()
+            )
             self.assertEqual(exclude_path.read_bytes(), original_exclude)
 
 
