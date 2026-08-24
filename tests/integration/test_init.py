@@ -192,8 +192,31 @@ class InitCommandTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("not inside a Git worktree", result.stderr)
+            self.assertIn(
+                "Git could not inspect the current directory",
+                result.stderr,
+            )
+            self.assertIn("non-bare Git checkout", result.stderr)
             self.assertFalse((temporary_root / ".agent-squad").exists())
+
+    def test_bare_repository_is_rejected_as_not_a_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository.git"
+            run(
+                ["git", "init", "--bare", str(repository)],
+                cwd=temporary_root,
+            )
+
+            result = run_cli(
+                repository,
+                "init",
+                data_home=temporary_root / "data",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not inside a Git worktree", result.stderr)
+            self.assertFalse((repository / ".agent-squad").exists())
 
     def test_conflicting_control_root_preserves_excludes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -473,6 +496,33 @@ class InitCommandTests(unittest.TestCase):
             linked_root.symlink_to(inside_root, target_is_directory=True)
             config_path = repository / ".agent-squad/config.json"
             _set_review_root(config_path, linked_root)
+            original_config = config_path.read_bytes()
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(repository, "init", data_home=data_home)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "must be outside the implementation worktree",
+                result.stderr,
+            )
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
+    def test_case_variant_review_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            case_variant = temporary_root / "REPOSITORY"
+            if not case_variant.exists():
+                self.skipTest("temporary volume is case-sensitive")
+            data_home = temporary_root / "data"
+            first = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            config_path = repository / ".agent-squad/config.json"
+            _set_review_root(config_path, case_variant / "reviews")
             original_config = config_path.read_bytes()
             exclude_path = repository / ".git/info/exclude"
             original_exclude = exclude_path.read_bytes()

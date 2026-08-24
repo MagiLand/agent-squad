@@ -306,12 +306,17 @@ def discover_git_worktree(start: Path) -> GitWorktree:
         "rev-parse",
         "--is-inside-work-tree",
     )
-    if inside_result.returncode != 0 or inside_result.stdout.strip() != "true":
+    if inside_result.returncode != 0:
         detail = inside_result.stderr.strip()
         suffix = f" Git reported: {detail}" if detail else ""
         raise RepositoryError(
-            "the current directory is not inside a Git worktree. "
+            "Git could not inspect the current directory. "
             f"Run agent-squad init from a non-bare Git checkout.{suffix}"
+        )
+    if inside_result.stdout.strip() != "true":
+        raise RepositoryError(
+            "the current directory is not inside a Git worktree. "
+            "Run agent-squad init from a non-bare Git checkout."
         )
 
     root = _git_path(working_directory, "--show-toplevel")
