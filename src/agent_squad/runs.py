@@ -195,6 +195,15 @@ class CapturedInput:
 
 
 @dataclass(frozen=True)
+class _CapturedRecord:
+    """Validated metadata for one captured run input."""
+
+    source_path: Path
+    run_path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class _ImplementerRecord:
     """Validated Implementer selection stored in a run record."""
 
@@ -714,7 +723,11 @@ def _new_run_record(
         },
         "reviewer": {
             "kind": reviewer_kind.value,
-            "start_args": list(configuration.reviewer.start_args),
+            "start_args": (
+                list(configuration.reviewer.start_args)
+                if reviewer_kind == configuration.reviewer.kind
+                else []
+            ),
         },
         "initial_review_budget": budget.to_dict(),
     }
@@ -789,10 +802,14 @@ def _validate_run_record(
         "run record.task",
         expected_path=TASK_FILE_NAME,
     )
-    task_path = _captured_path(run_directory, task_record, "run record.task")
+    task_path = _captured_path(
+        run_directory,
+        task_record.run_path,
+        "run record.task",
+    )
     task_sha256 = _verify_captured_digest(
         task_path,
-        task_record["sha256"],
+        task_record.sha256,
         "captured task",
     )
     context_value = data["context_files"]
@@ -802,16 +819,20 @@ def _validate_run_record(
     for index, value in enumerate(context_value):
         label = f"run record.context_files[{index}]"
         context_record = _validate_captured_record(value, label)
-        path_text = context_record["path"]
+        path_text = context_record.run_path
         if path_text in seen_context_paths:
             raise RunStateError(
                 f"run record has duplicate captured context path: {path_text}"
             )
         seen_context_paths.add(path_text)
-        context_path = _captured_path(run_directory, context_record, label)
+        context_path = _captured_path(
+            run_directory,
+            context_record.run_path,
+            label,
+        )
         _verify_captured_digest(
             context_path,
-            context_record["sha256"],
+            context_record.sha256,
             f"captured context {path_text}",
         )
 
@@ -948,7 +969,7 @@ def _validate_captured_record(
     path: str,
     *,
     expected_path: str | None = None,
-) -> dict[str, str]:
+) -> _CapturedRecord:
     data = _require_object(value, path)
     _check_fields(
         data,
@@ -963,19 +984,19 @@ def _validate_captured_record(
     digest = _require_digest(data["sha256"], f"{path}.sha256")
     if expected_path is not None and run_path != expected_path:
         raise RunStateError(f"{path}.path must be {expected_path}")
-    return {
-        "source_path": str(source_path),
-        "path": run_path,
-        "sha256": digest,
-    }
+    return _CapturedRecord(
+        source_path=source_path,
+        run_path=run_path,
+        sha256=digest,
+    )
 
 
 def _captured_path(
     run_directory: Path,
-    record: dict[str, str],
+    run_path: str,
     label: str,
 ) -> Path:
-    relative = PurePosixPath(record["path"])
+    relative = PurePosixPath(run_path)
     if (
         relative.is_absolute()
         or ".." in relative.parts
@@ -1058,7 +1079,6 @@ def _validate_event_log(
         != expected_run_id
     ):
         raise RunStateError("run_started event identifies a different run")
-    _require_timestamp(event.get("timestamp"), "run_started.timestamp")
     if event.get("phase") != RunPhase.IMPLEMENTING.value:
         raise RunStateError("run_started event must record phase implementing")
     if event.get("base_oid") != expected_base_oid:

@@ -66,8 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--implementer",
         metavar="AGENT",
         help=(
-            "Implementer agent identity; defaults to repository "
-            "configuration"
+            "Implementer agent name within the configured Implementer kind; "
+            "defaults to repository configuration"
         ),
     )
     start_parser.add_argument(

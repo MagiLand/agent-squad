@@ -235,7 +235,7 @@ class RunArtifactValidationTests(unittest.TestCase):
             task = root / "task.md"
             task.write_text("# Task\n", encoding="utf-8")
             self.assertEqual(
-                runs._captured_path(root, {"path": "task.md"}, "task"),
+                runs._captured_path(root, "task.md", "task"),
                 task,
             )
             with self.assertRaisesRegex(
@@ -244,7 +244,7 @@ class RunArtifactValidationTests(unittest.TestCase):
             ):
                 runs._captured_path(
                     root,
-                    {"path": "../outside.md"},
+                    "../outside.md",
                     "task",
                 )
 
@@ -254,7 +254,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "must not contain symbolic links",
             ):
-                runs._captured_path(root, {"path": "link.md"}, "task")
+                runs._captured_path(root, "link.md", "task")
 
     def test_capture_input_rejects_nonregular_non_utf8_and_empty_tasks(
         self,
@@ -371,6 +371,14 @@ class RunArtifactValidationTests(unittest.TestCase):
             )
 
     def test_typed_role_and_round_summaries_preserve_field_names(self) -> None:
+        captured = runs._validate_captured_record(
+            {
+                "source_path": "/tmp/task.md",
+                "path": "task.md",
+                "sha256": "a" * 64,
+            },
+            "run record.task",
+        )
         implementer = runs._validate_implementer(
             {"agent_name": "codex-main", "kind": "codex"}
         )
@@ -384,6 +392,9 @@ class RunArtifactValidationTests(unittest.TestCase):
                 "review_worktree": "/tmp/review",
             }
         )
+        self.assertEqual(captured.source_path, Path("/tmp/task.md"))
+        self.assertEqual(captured.run_path, "task.md")
+        self.assertEqual(captured.sha256, "a" * 64)
         self.assertEqual(implementer.agent_name, "codex-main")
         self.assertEqual(implementer.kind.value, "codex")
         self.assertEqual(reviewer.kind.value, "claude")

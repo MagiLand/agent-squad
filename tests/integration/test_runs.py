@@ -338,6 +338,74 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 status.stdout,
             )
 
+    def test_role_overrides_do_not_cross_agent_kind_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            config_path = repository / ".agent-squad/config.json"
+            configuration = json.loads(config_path.read_text(encoding="utf-8"))
+            configuration["implementer"] = {
+                "agent_name": "configured-codex",
+                "kind": "codex",
+            }
+            configuration["reviewer"] = {
+                "kind": "claude",
+                "start_args": ["--model", "claude-opus"],
+            }
+            configuration["base_ref"] = "main"
+            config_path.write_text(
+                json.dumps(configuration),
+                encoding="utf-8",
+            )
+            task = temporary_root / "task.md"
+            task.write_text("# Override roles\n", encoding="utf-8")
+
+            result = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--implementer",
+                "alternate-codex",
+                "--reviewer",
+                "codex",
+                data_home=data_home,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(
+                (repository / ".agent-squad/state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            run_record = json.loads(
+                (
+                    repository
+                    / ".agent-squad/runs"
+                    / state["active_run_id"]
+                    / "run.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                run_record["implementer"],
+                {"agent_name": "alternate-codex", "kind": "codex"},
+            )
+            self.assertEqual(
+                run_record["reviewer"],
+                {"kind": "codex", "start_args": []},
+            )
+            status = run_cli(repository, "status", data_home=data_home)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn(
+                "Implementer: alternate-codex (codex)",
+                status.stdout,
+            )
+            self.assertIn("Reviewer: codex", status.stdout)
+
     def test_explicit_empty_implementer_and_base_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -692,6 +760,9 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 cwd=repository,
             )
             self.assertNotEqual(advanced_oid, original_base_oid)
+
+            status = run_cli(repository, "status", data_home=data_home)
+
             state = json.loads(
                 (repository / ".agent-squad/state.json").read_text(
                     encoding="utf-8"
@@ -705,8 +776,6 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     / "run.json"
                 ).read_text(encoding="utf-8")
             )
-
-            status = run_cli(repository, "status", data_home=data_home)
 
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertEqual(state["base_oid"], original_base_oid)
