@@ -5,10 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import fcntl
+import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+
+
+class InvalidJsonError(ValueError):
+    """Raised when JSON text is malformed or repeats an object key."""
+
+
+def decode_json(content: str) -> object:
+    """Decode JSON while rejecting duplicate object keys."""
+
+    try:
+        return json.loads(
+            content,
+            object_pairs_hook=_object_without_duplicates,
+        )
+    except (json.JSONDecodeError, _DuplicateKeyError) as error:
+        raise InvalidJsonError(str(error)) from error
 
 
 def atomic_write(path: Path, content: bytes, *, mode: int) -> None:
@@ -61,3 +78,18 @@ def exclusive_file_lock(path: Path) -> Iterator[None]:
                 os.close(descriptor)
             except OSError:
                 pass
+
+
+class _DuplicateKeyError(ValueError):
+    pass
+
+
+def _object_without_duplicates(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKeyError(f"duplicate object key: {key}")
+        result[key] = value
+    return result

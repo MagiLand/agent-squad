@@ -26,7 +26,12 @@ from .initialization import (
     load_initialized_repository,
     run_git,
 )
-from .storage import atomic_write, exclusive_file_lock
+from .storage import (
+    InvalidJsonError,
+    atomic_write,
+    decode_json,
+    exclusive_file_lock,
+)
 
 
 STATE_FILE_NAME = "state.json"
@@ -190,6 +195,48 @@ class CapturedInput:
 
 
 @dataclass(frozen=True)
+class _ImplementerRecord:
+    """Validated Implementer selection stored in a run record."""
+
+    agent_name: str
+    kind: AgentKind
+
+
+@dataclass(frozen=True)
+class _ReviewerRecord:
+    """Validated Reviewer selection stored in a run record."""
+
+    kind: AgentKind
+    start_args: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ValidatedRunRecord:
+    """Typed view of one fully validated immutable run record."""
+
+    phase: RunPhase
+    task_path: Path
+    task_sha256: str
+    context_count: int
+    repository: RepositoryIdentity
+    base_ref: str
+    base_oid: str
+    object_format: str
+    implementer: _ImplementerRecord
+    reviewer: _ReviewerRecord
+    initial_budget: ReviewBudget
+
+
+@dataclass(frozen=True)
+class _RoundSummary:
+    """Validated status fields for the active review round."""
+
+    status: str | None
+    mode: str | None
+    review_worktree: str | None
+
+
+@dataclass(frozen=True)
 class StartRunResult:
     """Stable details returned after a run reaches its commit point."""
 
@@ -254,16 +301,24 @@ def start_run(
     reviewer_kind: AgentKind | None = None,
     base_ref: str | None = None,
 ) -> StartRunResult:
-    """Capture inputs and atomically start one run in an initialized worktree."""
+    """Capture inputs and atomically start one run in this worktree."""
 
     repository = load_initialized_repository(start)
     selected_implementer = _validate_selection(
-        implementer_agent or repository.configuration.implementer.agent_name,
+        (
+            implementer_agent
+            if implementer_agent is not None
+            else repository.configuration.implementer.agent_name
+        ),
         "Implementer agent identity",
     )
     selected_reviewer = reviewer_kind or repository.configuration.reviewer.kind
     selected_base = _validate_selection(
-        base_ref or repository.configuration.base_ref,
+        (
+            base_ref
+            if base_ref is not None
+            else repository.configuration.base_ref
+        ),
         "base reference",
     )
     invocation_directory = _invocation_directory(start)
@@ -294,17 +349,14 @@ def inspect_status(start: Path) -> RepositoryStatus:
     repository = load_initialized_repository(start)
     current_identity = _repository_identity(repository.worktree)
     state_path = repository.control_root / STATE_FILE_NAME
-    if not _path_exists(state_path):
+    state = _load_existing_state(state_path)
+    if state is None or state["active_run_id"] is None:
         return _idle_status(current_identity)
 
-    state = _load_json_object(state_path, "authoritative state")
-    _validate_schema_version(state, "state")
-    if "active_run_id" not in state:
-        raise RunStateError("state is missing required field: active_run_id")
-    if state["active_run_id"] is None:
-        return _idle_status(current_identity)
-
-    active_run_id = _require_uuid(state["active_run_id"], "state.active_run_id")
+    active_run_id = _require_uuid(
+        state["active_run_id"],
+        "state.active_run_id",
+    )
     phase = _require_phase(state.get("phase"), "state.phase")
     if phase in TERMINAL_PHASES:
         raise RunStateError(
@@ -354,34 +406,43 @@ def inspect_status(start: Path) -> RepositoryStatus:
     run_record = _load_json_object(run_record_path, "active run record")
     record = _validate_run_record(run_record, run_directory, active_run_id)
 
-    stored_identity = record["repository"]
-    _assert_matching_value(
+    stored_identity = record.repository
+    _assert_matching_state_value(
         state["implementation_root"],
         stored_identity.implementation_root,
-        "implementation root",
+        field="implementation_root",
+        label="implementation root",
     )
-    _assert_matching_value(
+    _assert_matching_state_value(
         state["git_common_dir"],
         stored_identity.git_common_dir,
-        "Git common directory",
+        field="git_common_dir",
+        label="Git common directory",
     )
-    _assert_matching_value(
+    _assert_matching_state_value(
         state["worktree_git_dir"],
         stored_identity.worktree_git_dir,
-        "worktree Git directory",
+        field="worktree_git_dir",
+        label="worktree Git directory",
     )
-    _assert_matching_text(
+    _assert_matching_state_value(
         state["repository_id"],
         stored_identity.repository_id,
-        "repository ID",
+        field="repository_id",
+        label="repository ID",
     )
     _assert_current_identity(stored_identity, current_identity)
-    _assert_matching_text(state["base_oid"], record["base_oid"], "base OID")
-    if phase is not record["phase"]:
+    _assert_matching_state_value(
+        state["base_oid"],
+        record.base_oid,
+        field="base_oid",
+        label="base OID",
+    )
+    if phase is not record.phase:
         raise RunStateError(
             "state.phase does not match the active run record phase"
         )
-    if budget.original_limit != record["original_limit"]:
+    if budget.original_limit != record.initial_budget.original_limit:
         raise RunStateError(
             "state review-budget original limit does not match run metadata"
         )
@@ -389,7 +450,7 @@ def inspect_status(start: Path) -> RepositoryStatus:
     _validate_event_log(
         run_directory / EVENT_LOG_FILE_NAME,
         active_run_id,
-        record["base_oid"],
+        record.base_oid,
     )
     next_action = _next_action(phase)
     return RepositoryStatus(
@@ -400,24 +461,24 @@ def inspect_status(start: Path) -> RepositoryStatus:
         active_run=ActiveRunStatus(
             run_id=active_run_id,
             phase=phase,
-            task_path=record["task_path"],
-            task_sha256=record["task_sha256"],
-            context_count=record["context_count"],
+            task_path=record.task_path,
+            task_sha256=record.task_sha256,
+            context_count=record.context_count,
             repository=stored_identity,
-            base_ref=record["base_ref"],
-            base_oid=record["base_oid"],
-            git_object_format=record["object_format"],
-            implementer_agent=record["implementer_agent"],
-            implementer_kind=record["implementer_kind"],
-            reviewer_kind=record["reviewer_kind"],
-            reviewer_start_args=record["reviewer_start_args"],
+            base_ref=record.base_ref,
+            base_oid=record.base_oid,
+            git_object_format=record.object_format,
+            implementer_agent=record.implementer.agent_name,
+            implementer_kind=record.implementer.kind,
+            reviewer_kind=record.reviewer.kind,
+            reviewer_start_args=record.reviewer.start_args,
             current_round=current_round,
             current_head_oid=current_head_oid,
             approved_head_oid=approved_head_oid,
             active_escalation_id=active_escalation_id,
-            round_status=round_details[0],
-            submission_mode=round_details[1],
-            review_worktree=round_details[2],
+            round_status=round_details.status,
+            submission_mode=round_details.mode,
+            review_worktree=round_details.review_worktree,
             handoff_status=handoff_status,
             review_budget=budget,
             next_action=next_action,
@@ -439,7 +500,10 @@ def _start_run_locked(
     state_path = repository.control_root / STATE_FILE_NAME
     _ensure_state_path_is_safe(state_path)
     existing_state = _load_existing_state(state_path)
-    if existing_state is not None and existing_state["active_run_id"] is not None:
+    if (
+        existing_state is not None
+        and existing_state["active_run_id"] is not None
+    ):
         active_run_id = _require_uuid(
             existing_state["active_run_id"], "state.active_run_id"
         )
@@ -688,7 +752,7 @@ def _validate_run_record(
     data: dict[str, object],
     run_directory: Path,
     expected_run_id: str,
-) -> dict[str, object]:
+) -> _ValidatedRunRecord:
     _check_fields(
         data,
         required={
@@ -770,21 +834,19 @@ def _validate_run_record(
             "run record.initial_review_budget must describe an unused initial "
             "budget"
         )
-    return {
-        "phase": phase,
-        "task_path": task_path,
-        "task_sha256": task_sha256,
-        "context_count": len(context_value),
-        "repository": identity,
-        "base_ref": base_ref,
-        "base_oid": base_oid,
-        "object_format": object_format,
-        "implementer_agent": implementer[0],
-        "implementer_kind": implementer[1],
-        "reviewer_kind": reviewer[0],
-        "reviewer_start_args": reviewer[1],
-        "original_limit": initial_budget.original_limit,
-    }
+    return _ValidatedRunRecord(
+        phase=phase,
+        task_path=task_path,
+        task_sha256=task_sha256,
+        context_count=len(context_value),
+        repository=identity,
+        base_ref=base_ref,
+        base_oid=base_oid,
+        object_format=object_format,
+        implementer=implementer,
+        reviewer=reviewer,
+        initial_budget=initial_budget,
+    )
 
 
 def _validate_repository_record(value: object) -> RepositoryIdentity:
@@ -838,20 +900,26 @@ def _validate_repository_record(value: object) -> RepositoryIdentity:
     )
 
 
-def _validate_implementer(value: object) -> tuple[str, AgentKind]:
+def _validate_implementer(value: object) -> _ImplementerRecord:
     data = _require_object(value, "run record.implementer")
     _check_fields(
         data,
         required={"agent_name", "kind"},
         path="run record.implementer",
     )
-    return (
-        _require_string(data["agent_name"], "run record.implementer.agent_name"),
-        _require_agent_kind(data["kind"], "run record.implementer.kind"),
+    return _ImplementerRecord(
+        agent_name=_require_string(
+            data["agent_name"],
+            "run record.implementer.agent_name",
+        ),
+        kind=_require_agent_kind(
+            data["kind"],
+            "run record.implementer.kind",
+        ),
     )
 
 
-def _validate_reviewer(value: object) -> tuple[AgentKind, tuple[str, ...]]:
+def _validate_reviewer(value: object) -> _ReviewerRecord:
     data = _require_object(value, "run record.reviewer")
     _check_fields(
         data,
@@ -866,9 +934,12 @@ def _validate_reviewer(value: object) -> tuple[AgentKind, tuple[str, ...]]:
             "run record.reviewer.start_args must be a JSON array of "
             "non-empty strings"
         )
-    return (
-        _require_agent_kind(data["kind"], "run record.reviewer.kind"),
-        tuple(arguments),
+    return _ReviewerRecord(
+        kind=_require_agent_kind(
+            data["kind"],
+            "run record.reviewer.kind",
+        ),
+        start_args=tuple(arguments),
     )
 
 
@@ -884,7 +955,10 @@ def _validate_captured_record(
         required={"source_path", "path", "sha256"},
         path=path,
     )
-    source_path = _require_absolute_path(data["source_path"], f"{path}.source_path")
+    source_path = _require_absolute_path(
+        data["source_path"],
+        f"{path}.source_path",
+    )
     run_path = _require_string(data["path"], f"{path}.path")
     digest = _require_digest(data["sha256"], f"{path}.sha256")
     if expected_path is not None and run_path != expected_path:
@@ -902,7 +976,11 @@ def _captured_path(
     label: str,
 ) -> Path:
     relative = PurePosixPath(record["path"])
-    if relative.is_absolute() or ".." in relative.parts or relative.name in {"", "."}:
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.name in {"", "."}
+    ):
         raise RunStateError(f"{label}.path must stay inside the run directory")
     path = run_directory.joinpath(*relative.parts)
     candidate = run_directory
@@ -954,17 +1032,17 @@ def _validate_event_log(
     events: list[dict[str, object]] = []
     for index, line in enumerate(lines, start=1):
         try:
-            value = json.loads(
-                line,
-                object_pairs_hook=_object_without_duplicates,
-            )
-        except (json.JSONDecodeError, _DuplicateKeyError) as error:
+            value = decode_json(line)
+        except InvalidJsonError as error:
             raise RunStateError(
                 f"active run event log line {index} contains invalid JSON: "
                 f"{error}"
             ) from error
         event = _require_object(value, f"event log line {index}")
-        _require_timestamp(event.get("timestamp"), f"event log line {index}.timestamp")
+        _require_timestamp(
+            event.get("timestamp"),
+            f"event log line {index}.timestamp",
+        )
         _require_string(event.get("event"), f"event log line {index}.event")
         events.append(event)
     event = events[0]
@@ -975,28 +1053,39 @@ def _validate_event_log(
     )
     if event.get("event") != "run_started":
         raise RunStateError("active run event log must begin with run_started")
-    if _require_uuid(event.get("run_id"), "run_started.run_id") != expected_run_id:
+    if (
+        _require_uuid(event.get("run_id"), "run_started.run_id")
+        != expected_run_id
+    ):
         raise RunStateError("run_started event identifies a different run")
     _require_timestamp(event.get("timestamp"), "run_started.timestamp")
     if event.get("phase") != RunPhase.IMPLEMENTING.value:
         raise RunStateError("run_started event must record phase implementing")
     if event.get("base_oid") != expected_base_oid:
-        raise RunStateError("run_started event base OID does not match run metadata")
+        raise RunStateError(
+            "run_started event base OID does not match run metadata"
+        )
 
 
 def _round_status_details(
     value: object,
-) -> tuple[str | None, str | None, str | None]:
+) -> _RoundSummary:
     if value is None:
-        return None, None, None
+        return _RoundSummary(None, None, None)
     data = _require_object(value, "state.active_round")
     status_value = data.get("status")
     mode_value = data.get("mode")
     worktree_value = data.get("review_worktree")
-    return (
-        _require_optional_string(status_value, "state.active_round.status"),
-        _require_optional_string(mode_value, "state.active_round.mode"),
-        _require_optional_string(
+    return _RoundSummary(
+        status=_require_optional_string(
+            status_value,
+            "state.active_round.status",
+        ),
+        mode=_require_optional_string(
+            mode_value,
+            "state.active_round.mode",
+        ),
+        review_worktree=_require_optional_string(
             worktree_value, "state.active_round.review_worktree"
         ),
     )
@@ -1014,14 +1103,18 @@ def _repository_identity(worktree: GitWorktree) -> RepositoryIdentity:
     if branch_result.returncode == 0:
         branch_ref = branch_result.stdout.rstrip("\r\n")
         if not branch_ref:
-            raise RunStateError("Git returned an empty symbolic HEAD reference")
+            raise RunStateError(
+                "Git returned an empty symbolic HEAD reference"
+            )
         detached = False
     elif branch_result.returncode == 1:
         branch_ref = None
         detached = True
     else:
         detail = branch_result.stderr.strip() or "unknown Git error"
-        raise RunStateError(f"could not determine branch or detached state: {detail}")
+        raise RunStateError(
+            f"could not determine branch or detached state: {detail}"
+        )
     repository_id = hashlib.sha256(
         os.fsencode(str(worktree.common_directory))
     ).hexdigest()
@@ -1043,7 +1136,11 @@ def _git_object_format(repository_root: Path) -> str:
     return _require_object_format(result.stdout.rstrip("\r\n"))
 
 
-def _resolve_commit(repository_root: Path, reference: str, object_format: str) -> str:
+def _resolve_commit(
+    repository_root: Path,
+    reference: str,
+    object_format: str,
+) -> str:
     result = run_git(
         repository_root,
         "rev-parse",
@@ -1052,11 +1149,19 @@ def _resolve_commit(repository_root: Path, reference: str, object_format: str) -
         f"{reference}^{{commit}}",
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or "reference does not identify a commit"
-        raise RunStartError(
-            f"cannot resolve base reference {reference!r} to a commit: {detail}"
+        detail = (
+            result.stderr.strip()
+            or "reference does not identify a commit"
         )
-    return _require_oid(result.stdout.rstrip("\r\n"), object_format, "resolved base")
+        raise RunStartError(
+            f"cannot resolve base reference {reference!r} to a commit: "
+            f"{detail}"
+        )
+    return _require_oid(
+        result.stdout.rstrip("\r\n"),
+        object_format,
+        "resolved base",
+    )
 
 
 def _capture_input(
@@ -1072,12 +1177,16 @@ def _capture_input(
         resolved = candidate.resolve(strict=True)
         with resolved.open("rb") as input_file:
             if not stat.S_ISREG(os.fstat(input_file.fileno()).st_mode):
-                raise RunStartError(f"{label} must be a regular file: {resolved}")
+                raise RunStartError(
+                    f"{label} must be a regular file: {resolved}"
+                )
             content = input_file.read()
     except RunStartError:
         raise
     except (OSError, RuntimeError) as error:
-        raise RunStartError(f"cannot read {label} {candidate}: {error}") from error
+        raise RunStartError(
+            f"cannot read {label} {candidate}: {error}"
+        ) from error
     if require_text:
         try:
             text = content.decode("utf-8")
@@ -1094,15 +1203,20 @@ def _capture_input(
 
 
 def _context_run_path(index: int, source: Path) -> str:
-    return str(PurePosixPath(CONTEXT_DIRECTORY_NAME, f"{index:03d}", source.name))
+    return str(
+        PurePosixPath(CONTEXT_DIRECTORY_NAME, f"{index:03d}", source.name)
+    )
 
 
-def _reject_duplicate_context_sources(contexts: tuple[CapturedInput, ...]) -> None:
+def _reject_duplicate_context_sources(
+    contexts: tuple[CapturedInput, ...],
+) -> None:
     seen: set[Path] = set()
     for context in contexts:
         if context.source_path in seen:
             raise RunStartError(
-                f"context file was provided more than once: {context.source_path}"
+                "context file was provided more than once: "
+                f"{context.source_path}"
             )
         seen.add(context.source_path)
 
@@ -1111,7 +1225,9 @@ def _invocation_directory(start: Path) -> Path:
     try:
         directory = start.resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise RunStartError(f"cannot resolve the current directory: {error}") from error
+        raise RunStartError(
+            f"cannot resolve the current directory: {error}"
+        ) from error
     if not directory.is_dir():
         raise RunStartError(f"current path is not a directory: {directory}")
     return directory
@@ -1135,7 +1251,9 @@ def _ensure_state_path_is_safe(path: Path) -> None:
             f"{path} is a symbolic link; refusing to read or replace it"
         )
     if path.exists() and not path.is_file():
-        raise RunStateError(f"authoritative state must be a regular file: {path}")
+        raise RunStateError(
+            f"authoritative state must be a regular file: {path}"
+        )
 
 
 def _ensure_runs_root(path: Path) -> bool:
@@ -1145,7 +1263,9 @@ def _ensure_runs_root(path: Path) -> bool:
         )
     if path.exists():
         if not path.is_dir():
-            raise RunStateError(f"run history path must be a directory: {path}")
+            raise RunStateError(
+                f"run history path must be a directory: {path}"
+            )
         return False
     path.mkdir(mode=0o700)
     return True
@@ -1161,7 +1281,8 @@ def _safe_run_directory(control_root: Path, run_id: str) -> Path:
     run_directory = runs_root / run_id
     if run_directory.is_symlink() or not run_directory.is_dir():
         raise RunStateError(
-            f"active run directory must be a non-symlink directory: {run_directory}"
+            "active run directory must be a non-symlink directory: "
+            f"{run_directory}"
         )
     return run_directory.resolve(strict=True)
 
@@ -1188,7 +1309,9 @@ def _rollback_new_run(
         except FileNotFoundError:
             pass
         except OSError as error:
-            errors.append(f"could not remove newly created {runs_root}: {error}")
+            errors.append(
+                f"could not remove newly created {runs_root}: {error}"
+            )
     return errors
 
 
@@ -1205,17 +1328,12 @@ def _idle_status(identity: RepositoryIdentity) -> RepositoryStatus:
 
 
 def _next_action(phase: RunPhase) -> str:
-    actions = {
-        RunPhase.IMPLEMENTING: "continue implementing the captured task",
-        RunPhase.REVIEWING: "agent-squad apply-review",
-        RunPhase.APPROVED: "agent-squad complete",
-        RunPhase.NEEDS_HUMAN: (
-            "agent-squad resume --resolution <resolution.md>"
-        ),
-        RunPhase.COMPLETED: "agent-squad start --task <task.md>",
-        RunPhase.CANCELLED: "agent-squad start --task <task.md>",
-    }
-    return actions[phase]
+    if phase is not RunPhase.IMPLEMENTING:
+        raise RunStateError(
+            f"phase {phase.value} is not supported by this implementation "
+            "increment"
+        )
+    return "continue implementing the captured task"
 
 
 def _assert_current_identity(
@@ -1228,8 +1346,16 @@ def _assert_current_identity(
             current.implementation_root,
             "implementation root",
         ),
-        (stored.git_common_dir, current.git_common_dir, "Git common directory"),
-        (stored.worktree_git_dir, current.worktree_git_dir, "worktree Git directory"),
+        (
+            stored.git_common_dir,
+            current.git_common_dir,
+            "Git common directory",
+        ),
+        (
+            stored.worktree_git_dir,
+            current.worktree_git_dir,
+            "worktree Git directory",
+        ),
         (stored.repository_id, current.repository_id, "repository ID"),
     )
     for expected, actual, label in comparisons:
@@ -1240,40 +1366,54 @@ def _assert_current_identity(
             )
 
 
-def _assert_matching_value(value: object, expected: Path, label: str) -> None:
-    actual = _require_absolute_path(value, f"state.{label.replace(' ', '_')}")
+def _assert_matching_state_value(
+    value: object,
+    expected: Path | str,
+    *,
+    field: str,
+    label: str,
+) -> None:
+    if isinstance(expected, Path):
+        actual: Path | str = _require_absolute_path(value, f"state.{field}")
+    else:
+        actual = _require_string(value, f"state.{field}")
     if actual != expected:
-        raise RunStateError(f"state {label} does not match active run metadata")
-
-
-def _assert_matching_text(value: object, expected: str, label: str) -> None:
-    actual = _require_string(value, f"state.{label.replace(' ', '_')}")
-    if actual != expected:
-        raise RunStateError(f"state {label} does not match active run metadata")
+        raise RunStateError(
+            f"state {label} does not match active run metadata"
+        )
 
 
 def _load_json_object(path: Path, label: str) -> dict[str, object]:
     if path.is_symlink() or not path.is_file():
-        raise RunStateError(f"{label} must be a regular non-symlink file: {path}")
+        raise RunStateError(
+            f"{label} must be a regular non-symlink file: {path}"
+        )
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise RunStateError(f"cannot read {label} {path}: {error}") from error
     try:
-        value = json.loads(raw, object_pairs_hook=_object_without_duplicates)
-    except (json.JSONDecodeError, _DuplicateKeyError) as error:
-        raise RunStateError(f"{label} contains invalid JSON: {error}") from error
+        value = decode_json(raw)
+    except InvalidJsonError as error:
+        raise RunStateError(
+            f"{label} contains invalid JSON: {error}"
+        ) from error
     return _require_object(value, label)
 
 
 def _validate_schema_version(data: dict[str, object], path: str) -> None:
-    version = _require_int(data.get("schema_version"), f"{path}.schema_version")
+    version = _require_int(
+        data.get("schema_version"),
+        f"{path}.schema_version",
+    )
     if version != SCHEMA_VERSION:
         raise RunStateError(f"{path}.schema_version must be {SCHEMA_VERSION}")
 
 
 def _require_object(value: object, path: str) -> dict[str, object]:
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) for key in value
+    ):
         raise RunStateError(f"{path} must be a JSON object")
     return value
 
@@ -1372,7 +1512,8 @@ def _require_object_format(value: object) -> str:
     object_format = _require_string(value, "Git object format")
     if object_format not in OID_LENGTHS:
         raise RunStateError(
-            f"unsupported Git object format {object_format!r}; expected sha1 or sha256"
+            f"unsupported Git object format {object_format!r}; expected "
+            "sha1 or sha256"
         )
     return object_format
 
@@ -1380,7 +1521,10 @@ def _require_object_format(value: object) -> str:
 def _require_oid(value: object, object_format: str, path: str) -> str:
     text = _require_string(value, path)
     expected_length = OID_LENGTHS[object_format]
-    if len(text) != expected_length or re.fullmatch(r"[0-9a-f]+", text) is None:
+    if (
+        len(text) != expected_length
+        or re.fullmatch(r"[0-9a-f]+", text) is None
+    ):
         raise RunStateError(
             f"{path} must be a full lowercase {object_format} object ID"
         )
@@ -1394,7 +1538,9 @@ def _require_timestamp(value: object, path: str) -> str:
     try:
         parsed = datetime.fromisoformat(f"{text[:-1]}+00:00")
     except ValueError:
-        raise RunStateError(f"{path} must be an RFC 3339 UTC timestamp") from None
+        raise RunStateError(
+            f"{path} must be an RFC 3339 UTC timestamp"
+        ) from None
     if parsed.tzinfo != timezone.utc:
         raise RunStateError(f"{path} must be an RFC 3339 UTC timestamp")
     return text
@@ -1425,18 +1571,3 @@ def _encode_event(value: dict[str, object]) -> bytes:
 
 def _path_exists(path: Path) -> bool:
     return os.path.lexists(path)
-
-
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _object_without_duplicates(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateKeyError(f"duplicate object key: {key}")
-        result[key] = value
-    return result

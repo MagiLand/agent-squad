@@ -32,7 +32,7 @@ def _set_review_root(config_path: Path, review_root: Path) -> None:
 def _failing_exclude_write(
     before_failure: Callable[[], None] | None = None,
 ) -> Callable[..., None]:
-    real_atomic_write = initialization._atomic_write
+    real_atomic_write = initialization.atomic_write
 
     def write(path: Path, content: bytes, *, mode: int) -> None:
         if path.name == "exclude":
@@ -643,7 +643,7 @@ class InitCommandTests(unittest.TestCase):
 
             with mock.patch.object(
                 initialization,
-                "_atomic_write",
+                "atomic_write",
                 side_effect=_failing_exclude_write(),
             ):
                 with self.assertRaisesRegex(
@@ -672,7 +672,7 @@ class InitCommandTests(unittest.TestCase):
 
             with mock.patch.object(
                 initialization,
-                "_atomic_write",
+                "atomic_write",
                 side_effect=_failing_exclude_write(obstruct_rollback),
             ):
                 with self.assertRaisesRegex(

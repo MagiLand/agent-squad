@@ -65,7 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--implementer",
         metavar="AGENT",
-        help="Implementer agent identity; defaults to repository configuration",
+        help=(
+            "Implementer agent identity; defaults to repository "
+            "configuration"
+        ),
     )
     start_parser.add_argument(
         "--reviewer",
@@ -108,9 +111,9 @@ def _run_init(_arguments: argparse.Namespace) -> int:
 
 
 def _run_start(arguments: argparse.Namespace) -> int:
-    reviewer_kind = (
-        AgentKind(arguments.reviewer) if arguments.reviewer is not None else None
-    )
+    reviewer_kind = None
+    if arguments.reviewer is not None:
+        reviewer_kind = AgentKind(arguments.reviewer)
     result = start_run(
         Path.cwd(),
         task_path=arguments.task,
@@ -173,8 +176,6 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         f"(original {budget.original_limit}, "
         f"additional {budget.additional_rounds_granted})"
     )
-    print("Developer resolutions: none")
-    print("Marker-confirmed unapplied result: no")
     print(f"Next action: {run.next_action}")
     return 0
 

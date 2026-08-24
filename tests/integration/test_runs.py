@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 from threading import Barrier
 import unittest
@@ -14,55 +15,18 @@ import uuid
 
 from tests._support import (
     add_src_to_path,
+    git_path,
     initialize_git_repository,
     run,
     run_cli,
+    seed_commit,
+    seed_git_repository,
 )
 
 
 add_src_to_path()
 
 from agent_squad import runs  # noqa: E402
-
-
-def _seed_repository(repository: Path) -> str:
-    initialize_git_repository(repository)
-    run(
-        ["git", "config", "user.name", "Agent Squad Tests"],
-        cwd=repository,
-    )
-    run(
-        [
-            "git",
-            "config",
-            "user.email",
-            "agent-squad@example.invalid",
-        ],
-        cwd=repository,
-    )
-    (repository / "README.md").write_text("fixture\n", encoding="utf-8")
-    run(["git", "add", "README.md"], cwd=repository)
-    run(
-        [
-            "git",
-            "-c",
-            "commit.gpgSign=false",
-            "commit",
-            "--no-verify",
-            "-m",
-            "test: seed repository",
-        ],
-        cwd=repository,
-    )
-    return run(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
-
-
-def _git_path(repository: Path, argument: str) -> Path:
-    text = run(["git", "rev-parse", argument], cwd=repository).stdout.strip()
-    path = Path(text)
-    if not path.is_absolute():
-        path = repository / path
-    return path.resolve()
 
 
 def _snapshot_files(root: Path) -> dict[str, bytes]:
@@ -78,7 +42,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             task = temporary_root / "task.md"
             task.write_text("# Task\n", encoding="utf-8")
             data_home = temporary_root / "data"
@@ -101,11 +65,13 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
             self.assertFalse((repository / ".agent-squad").exists())
 
-    def test_start_captures_inputs_identity_roles_base_and_budget(self) -> None:
+    def test_start_captures_inputs_identity_roles_base_and_budget(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            base_oid = _seed_repository(repository)
+            base_oid = seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -154,8 +120,8 @@ class StartAndStatusCommandTests(unittest.TestCase):
             )
 
             canonical_repository = repository.resolve()
-            common_directory = _git_path(repository, "--git-common-dir")
-            git_directory = _git_path(repository, "--git-dir")
+            common_directory = git_path(repository, "--git-common-dir")
+            git_directory = git_path(repository, "--git-dir")
             repository_id = hashlib.sha256(
                 str(common_directory).encode()
             ).hexdigest()
@@ -243,7 +209,10 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 (run_directory / "task.md", 0o400),
                 (run_directory / "context/001/notes.txt", 0o400),
             ):
-                self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected_mode)
+                self.assertEqual(
+                    stat.S_IMODE(path.stat().st_mode),
+                    expected_mode,
+                )
 
             events = [
                 json.loads(line)
@@ -259,7 +228,10 @@ class StartAndStatusCommandTests(unittest.TestCase):
 
             task.write_text("changed source\n", encoding="utf-8")
             first_context.write_text("changed context\n", encoding="utf-8")
-            self.assertEqual((run_directory / "task.md").read_bytes(), task_bytes)
+            self.assertEqual(
+                (run_directory / "task.md").read_bytes(),
+                task_bytes,
+            )
             self.assertEqual(
                 (run_directory / "context/001/notes.txt").read_bytes(),
                 b"first context\n",
@@ -280,6 +252,11 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 "Next action: continue implementing the captured task",
             ):
                 self.assertIn(expected, status.stdout)
+            self.assertNotIn("Developer resolutions:", status.stdout)
+            self.assertNotIn(
+                "Marker-confirmed unapplied result:",
+                status.stdout,
+            )
 
     def test_start_uses_validated_repository_configuration_as_defaults(
         self,
@@ -287,7 +264,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            base_oid = _seed_repository(repository)
+            base_oid = seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -361,11 +338,49 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 status.stdout,
             )
 
-    def test_status_reports_initialized_repository_without_side_effects(self) -> None:
+    def test_explicit_empty_implementer_and_base_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+
+            cases = (
+                ("--implementer", "Implementer agent identity"),
+                ("--base", "base reference"),
+            )
+            for option, label in cases:
+                with self.subTest(option=option):
+                    result = run_cli(
+                        repository,
+                        "start",
+                        "--task",
+                        str(task),
+                        option,
+                        "",
+                        data_home=data_home,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(
+                        f"{label} must be non-empty",
+                        result.stderr,
+                    )
+
+            control_root = repository / ".agent-squad"
+            self.assertFalse((control_root / "state.json").exists())
+            self.assertFalse((control_root / "runs").exists())
+
+    def test_status_reports_initialized_repository_without_side_effects(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -390,7 +405,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -421,7 +436,10 @@ class StartAndStatusCommandTests(unittest.TestCase):
             )
 
             self.assertNotEqual(second.returncode, 0)
-            self.assertIn("is already active in phase implementing", second.stderr)
+            self.assertIn(
+                "is already active in phase implementing",
+                second.stderr,
+            )
             self.assertNotIn("Traceback", second.stderr)
             self.assertEqual(_snapshot_files(control_root), before)
             self.assertEqual(
@@ -429,11 +447,145 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 1,
             )
 
+    def test_status_rejects_inconsistent_authoritative_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "main",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            state_path = repository / ".agent-squad/state.json"
+            original = json.loads(state_path.read_text(encoding="utf-8"))
+
+            cases = (
+                (
+                    "terminal phase",
+                    "active_run_id must be null when phase is completed",
+                ),
+                (
+                    "phase mismatch",
+                    "state.phase does not match",
+                ),
+                (
+                    "budget mismatch",
+                    "original limit does not match",
+                ),
+                (
+                    "base mismatch",
+                    "state base OID does not match",
+                ),
+            )
+            for case, message in cases:
+                with self.subTest(case=case):
+                    state = json.loads(json.dumps(original))
+                    if case == "terminal phase":
+                        state["phase"] = "completed"
+                    elif case == "phase mismatch":
+                        state["phase"] = "reviewing"
+                    elif case == "budget mismatch":
+                        state["review_budget"]["original_limit"] = 5
+                        state["review_budget"]["effective_limit"] = 5
+                    else:
+                        state["base_oid"] = "f" * 40
+                    state_path.write_text(
+                        json.dumps(state),
+                        encoding="utf-8",
+                    )
+
+                    status = run_cli(
+                        repository,
+                        "status",
+                        data_home=data_home,
+                    )
+
+                    self.assertNotEqual(status.returncode, 0)
+                    self.assertIn(message, status.stderr)
+
+    def test_status_rejects_invalid_role_and_repository_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "main",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            state = json.loads(
+                (repository / ".agent-squad/state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            record_path = (
+                repository
+                / ".agent-squad/runs"
+                / state["active_run_id"]
+                / "run.json"
+            )
+            original = json.loads(record_path.read_text(encoding="utf-8"))
+
+            cases = (
+                (
+                    "repository identity",
+                    "branch and detached fields are inconsistent",
+                ),
+                (
+                    "reviewer arguments",
+                    "non-empty strings",
+                ),
+            )
+            for case, message in cases:
+                with self.subTest(case=case):
+                    record = json.loads(json.dumps(original))
+                    if case == "repository identity":
+                        record["repository"]["start_branch_ref"] = None
+                        record["repository"]["start_head_detached"] = False
+                    else:
+                        record["reviewer"]["start_args"] = [""]
+                    record_path.write_text(
+                        json.dumps(record),
+                        encoding="utf-8",
+                    )
+
+                    status = run_cli(
+                        repository,
+                        "status",
+                        data_home=data_home,
+                    )
+
+                    self.assertNotEqual(status.returncode, 0)
+                    self.assertIn(message, status.stderr)
+
     def test_concurrent_starts_create_exactly_one_active_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -479,7 +631,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -506,13 +658,103 @@ class StartAndStatusCommandTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("Active run: none", status.stdout)
 
+    def test_fixed_base_does_not_move_when_branch_advances(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            original_base_oid = seed_git_repository(repository)
+            run(
+                ["git", "branch", "base-branch", original_base_oid],
+                cwd=repository,
+            )
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "base-branch",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            advanced_oid = seed_commit(
+                repository,
+                content="advanced fixture\n",
+            )
+            run(
+                ["git", "branch", "-f", "base-branch", advanced_oid],
+                cwd=repository,
+            )
+            self.assertNotEqual(advanced_oid, original_base_oid)
+            state = json.loads(
+                (repository / ".agent-squad/state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            record = json.loads(
+                (
+                    repository
+                    / ".agent-squad/runs"
+                    / state["active_run_id"]
+                    / "run.json"
+                ).read_text(encoding="utf-8")
+            )
+
+            status = run_cli(repository, "status", data_home=data_home)
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(state["base_oid"], original_base_oid)
+            self.assertEqual(record["base_oid"], original_base_oid)
+            self.assertIn(
+                f"Base: base-branch -> {original_base_oid}",
+                status.stdout,
+            )
+            self.assertNotIn(advanced_oid, status.stdout)
+
+    def test_lock_failure_is_reported_without_runtime_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+
+            with mock.patch.object(
+                runs,
+                "exclusive_file_lock",
+                side_effect=PermissionError("simulated lock failure"),
+            ):
+                with self.assertRaisesRegex(
+                    runs.RunStartError,
+                    "could not acquire or use the local run lock",
+                ):
+                    runs.start_run(
+                        repository,
+                        task_path=task,
+                        base_ref="main",
+                    )
+
+            control_root = repository / ".agent-squad"
+            self.assertFalse((control_root / "state.json").exists())
+            self.assertFalse((control_root / "runs").exists())
+            self.assertFalse((control_root / "lock").exists())
+
     def test_state_write_failure_rolls_back_complete_staged_run_under_lock(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -576,11 +818,58 @@ class StartAndStatusCommandTests(unittest.TestCase):
             self.assertFalse((control_root / "runs").exists())
             self.assertTrue((control_root / "lock").is_file())
 
+    def test_rollback_failure_is_reported_with_the_start_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            seed_git_repository(repository)
+            data_home = temporary_root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = temporary_root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            real_atomic_write = runs.atomic_write
+
+            def failing_state_write(
+                path: Path,
+                content: bytes,
+                *,
+                mode: int,
+            ) -> None:
+                if path.name == "state.json":
+                    raise PermissionError("simulated state write failure")
+                real_atomic_write(path, content, mode=mode)
+
+            with (
+                mock.patch.object(
+                    runs,
+                    "atomic_write",
+                    side_effect=failing_state_write,
+                ),
+                mock.patch.object(
+                    runs.shutil,
+                    "rmtree",
+                    side_effect=PermissionError(
+                        "simulated rollback failure"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    runs.RunStartError,
+                    "Rollback also encountered: could not remove newly "
+                    "created",
+                ):
+                    runs.start_run(
+                        repository,
+                        task_path=task,
+                        base_ref="main",
+                    )
+
     def test_detached_start_records_detached_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             run(["git", "checkout", "--detach"], cwd=repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
@@ -624,7 +913,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             primary = temporary_root / "primary"
-            base_oid = _seed_repository(primary)
+            base_oid = seed_git_repository(primary)
             linked = temporary_root / "linked"
             run(
                 ["git", "worktree", "add", "--detach", str(linked), "HEAD"],
@@ -648,14 +937,17 @@ class StartAndStatusCommandTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             state = json.loads(
-                (linked / ".agent-squad/state.json").read_text(encoding="utf-8")
+                (linked / ".agent-squad/state.json").read_text(
+                    encoding="utf-8"
+                )
             )
             self.assertEqual(state["base_oid"], base_oid)
             self.assertEqual(
-                state["git_common_dir"], str(_git_path(linked, "--git-common-dir"))
+                state["git_common_dir"],
+                str(git_path(linked, "--git-common-dir")),
             )
             self.assertEqual(
-                state["worktree_git_dir"], str(_git_path(linked, "--git-dir"))
+                state["worktree_git_dir"], str(git_path(linked, "--git-dir"))
             )
             self.assertNotEqual(
                 state["git_common_dir"], state["worktree_git_dir"]
@@ -665,53 +957,19 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            repository.mkdir()
-            initialized_git = run(
-                [
-                    "git",
-                    "init",
-                    "--object-format=sha256",
-                    "--initial-branch=main",
-                ],
-                cwd=repository,
-                check=False,
+            try:
+                initialize_git_repository(
+                    repository,
+                    object_format="sha256",
+                )
+            except subprocess.CalledProcessError:
+                self.skipTest(
+                    "installed Git cannot create SHA-256 repositories"
+                )
+            expected_oid = seed_commit(
+                repository,
+                content="sha256 fixture\n",
             )
-            if initialized_git.returncode != 0:
-                self.skipTest("installed Git cannot create SHA-256 repositories")
-            run(
-                ["git", "config", "user.name", "Agent Squad Tests"],
-                cwd=repository,
-            )
-            run(
-                [
-                    "git",
-                    "config",
-                    "user.email",
-                    "agent-squad@example.invalid",
-                ],
-                cwd=repository,
-            )
-            (repository / "README.md").write_text(
-                "sha256 fixture\n",
-                encoding="utf-8",
-            )
-            run(["git", "add", "README.md"], cwd=repository)
-            run(
-                [
-                    "git",
-                    "-c",
-                    "commit.gpgSign=false",
-                    "commit",
-                    "--no-verify",
-                    "-m",
-                    "test: seed sha256 repository",
-                ],
-                cwd=repository,
-            )
-            expected_oid = run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=repository,
-            ).stdout.strip()
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -753,7 +1011,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -787,7 +1045,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -830,7 +1088,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
-            _seed_repository(repository)
+            seed_git_repository(repository)
             data_home = temporary_root / "data"
             initialized = run_cli(repository, "init", data_home=data_home)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -854,7 +1112,9 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 / state["active_run_id"]
                 / "run.json"
             )
-            run_record = json.loads(run_record_path.read_text(encoding="utf-8"))
+            run_record = json.loads(
+                run_record_path.read_text(encoding="utf-8")
+            )
             foreign_repository_id = "0" * 64
             state["repository_id"] = foreign_repository_id
             run_record["repository"]["repository_id"] = foreign_repository_id

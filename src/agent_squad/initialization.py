@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 import stat
 import subprocess
 
-from .storage import atomic_write as _atomic_write
+from .storage import InvalidJsonError, atomic_write, decode_json
 
 
 SCHEMA_VERSION = 1
@@ -296,8 +296,8 @@ def load_configuration(path: Path) -> Configuration:
         raise ConfigurationError(f"cannot read {path}: {error}") from error
 
     try:
-        decoded = json.loads(raw, object_pairs_hook=_object_without_duplicates)
-    except (json.JSONDecodeError, _DuplicateKeyError) as error:
+        decoded = decode_json(raw)
+    except InvalidJsonError as error:
         raise ConfigurationError(
             f"{path.name} contains invalid JSON: {error}"
         ) from error
@@ -386,7 +386,7 @@ def initialize_repository(
             created_paths.append(control_root)
 
         if configuration_bytes is not None:
-            _atomic_write(configuration_path, configuration_bytes, mode=0o600)
+            atomic_write(configuration_path, configuration_bytes, mode=0o600)
             configuration_created = True
             created_paths.append(configuration_path)
 
@@ -395,7 +395,7 @@ def initialize_repository(
             if not info_directory.exists():
                 info_directory.mkdir(mode=0o755)
                 created_paths.append(info_directory)
-            _atomic_write(
+            atomic_write(
                 exclude_path,
                 updated_exclude,
                 mode=_file_mode(exclude_path),
@@ -603,21 +603,6 @@ def _existing_path_identity(path: Path) -> tuple[int, int] | None:
     return status.st_dev, status.st_ino
 
 
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _object_without_duplicates(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateKeyError(f"duplicate object key: {key}")
-        result[key] = value
-    return result
-
-
 def _encode_configuration(configuration: Configuration) -> bytes:
     text = json.dumps(configuration.to_dict(), indent=2, ensure_ascii=False)
     return f"{text}\n".encode("utf-8")
@@ -627,6 +612,8 @@ def run_git(
     working_directory: Path,
     *arguments: str,
 ) -> subprocess.CompletedProcess[str]:
+    """Run Git with an argument array and captured UTF-8 text output."""
+
     try:
         return subprocess.run(
             ["git", *arguments],
