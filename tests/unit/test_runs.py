@@ -210,6 +210,10 @@ class RunArtifactValidationTests(unittest.TestCase):
                     "identifies a different run",
                 ),
                 (
+                    f"{json.dumps({**event, 'timestamp': 'yesterday'})}\n",
+                    r"event log line 1\.timestamp",
+                ),
+                (
                     f"{json.dumps({**event, 'base_oid': 'b' * 40})}\n",
                     "base OID does not match",
                 ),

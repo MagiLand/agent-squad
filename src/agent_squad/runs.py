@@ -19,7 +19,6 @@ import uuid
 from .initialization import (
     AgentKind,
     AgentSquadError,
-    Configuration,
     GitWorktree,
     InitializedRepository,
     SCHEMA_VERSION,
@@ -313,20 +312,34 @@ def start_run(
     """Capture inputs and atomically start one run in this worktree."""
 
     repository = load_initialized_repository(start)
-    selected_implementer = _validate_selection(
-        (
-            implementer_agent
-            if implementer_agent is not None
-            else repository.configuration.implementer.agent_name
+    configuration = repository.configuration
+    selected_implementer = _ImplementerRecord(
+        agent_name=_validate_selection(
+            (
+                implementer_agent
+                if implementer_agent is not None
+                else configuration.implementer.agent_name
+            ),
+            "Implementer agent identity",
         ),
-        "Implementer agent identity",
+        kind=configuration.implementer.kind,
     )
-    selected_reviewer = reviewer_kind or repository.configuration.reviewer.kind
+    selected_reviewer_kind = (
+        reviewer_kind or configuration.reviewer.kind
+    )
+    selected_reviewer = _ReviewerRecord(
+        kind=selected_reviewer_kind,
+        start_args=(
+            configuration.reviewer.start_args
+            if selected_reviewer_kind == configuration.reviewer.kind
+            else ()
+        ),
+    )
     selected_base = _validate_selection(
         (
             base_ref
             if base_ref is not None
-            else repository.configuration.base_ref
+            else configuration.base_ref
         ),
         "base reference",
     )
@@ -340,8 +353,8 @@ def start_run(
                 task_path=task_path,
                 context_paths=context_paths,
                 invocation_directory=invocation_directory,
-                implementer_agent=selected_implementer,
-                reviewer_kind=selected_reviewer,
+                implementer=selected_implementer,
+                reviewer=selected_reviewer,
                 base_ref=selected_base,
             )
     except RunError:
@@ -502,8 +515,8 @@ def _start_run_locked(
     task_path: Path,
     context_paths: Sequence[Path],
     invocation_directory: Path,
-    implementer_agent: str,
-    reviewer_kind: AgentKind,
+    implementer: _ImplementerRecord,
+    reviewer: _ReviewerRecord,
     base_ref: str,
 ) -> StartRunResult:
     state_path = repository.control_root / STATE_FILE_NAME
@@ -561,9 +574,8 @@ def _start_run_locked(
         base_ref=base_ref,
         base_oid=resolved_base_oid,
         object_format=object_format,
-        implementer_agent=implementer_agent,
-        configuration=repository.configuration,
-        reviewer_kind=reviewer_kind,
+        implementer=implementer,
+        reviewer=reviewer,
         budget=budget,
     )
     state = _new_state(
@@ -693,9 +705,8 @@ def _new_run_record(
     base_ref: str,
     base_oid: str,
     object_format: str,
-    implementer_agent: str,
-    configuration: Configuration,
-    reviewer_kind: AgentKind,
+    implementer: _ImplementerRecord,
+    reviewer: _ReviewerRecord,
     budget: ReviewBudget,
 ) -> dict[str, object]:
     return {
@@ -718,16 +729,12 @@ def _new_run_record(
         "base_oid": base_oid,
         "git_object_format": object_format,
         "implementer": {
-            "agent_name": implementer_agent,
-            "kind": configuration.implementer.kind.value,
+            "agent_name": implementer.agent_name,
+            "kind": implementer.kind.value,
         },
         "reviewer": {
-            "kind": reviewer_kind.value,
-            "start_args": (
-                list(configuration.reviewer.start_args)
-                if reviewer_kind == configuration.reviewer.kind
-                else []
-            ),
+            "kind": reviewer.kind.value,
+            "start_args": list(reviewer.start_args),
         },
         "initial_review_budget": budget.to_dict(),
     }
@@ -796,6 +803,11 @@ def _validate_run_record(
     _require_timestamp(data["started_at"], "run record.started_at")
     if data["finished_at"] is not None:
         _require_timestamp(data["finished_at"], "run record.finished_at")
+    if (phase in TERMINAL_PHASES) != (data["finished_at"] is not None):
+        raise RunStateError(
+            "run record.finished_at must be set exactly when the phase is "
+            "terminal"
+        )
 
     task_record = _validate_captured_record(
         data["task"],

@@ -39,13 +39,7 @@ It does not modify the project's tracked `.gitignore`, overwrite valid existing 
 
 ## Start and inspect a run
 
-Start a run with an approved UTF-8 Markdown task. The Implementer agent name,
-Reviewer kind, and base reference default to `.agent-squad/config.json`; pass
-them explicitly to override those selections for this run. `--implementer`
-changes the agent name within the configured `implementer.kind`; change the
-configuration to select another Implementer kind. Configured Reviewer
-`start_args` are used only when the configured Reviewer kind is selected.
-Repeat `--context` to capture only the additional files the run needs.
+Start a run with an approved UTF-8 Markdown task. The Implementer agent name, Reviewer kind, and base reference default to `.agent-squad/config.json`; pass them explicitly to override those selections for this run. `--implementer` changes the agent name within the configured `implementer.kind`; change the configuration to select another Implementer kind. Configured Reviewer `start_args` are used only when the configured Reviewer kind is selected. Repeat `--context` to capture only the additional files the run needs.
 
 ```bash
 agent-squad start \

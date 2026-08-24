@@ -582,7 +582,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     self.assertNotEqual(status.returncode, 0)
                     self.assertIn(message, status.stderr)
 
-    def test_status_rejects_invalid_role_and_repository_metadata(
+    def test_status_rejects_invalid_run_metadata(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -626,6 +626,11 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     "reviewer arguments",
                     "non-empty strings",
                 ),
+                (
+                    "finish time",
+                    "finished_at must be set exactly when the phase is "
+                    "terminal",
+                ),
             )
             for case, message in cases:
                 with self.subTest(case=case):
@@ -633,8 +638,10 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     if case == "repository identity":
                         record["repository"]["start_branch_ref"] = None
                         record["repository"]["start_head_detached"] = False
-                    else:
+                    elif case == "reviewer arguments":
                         record["reviewer"]["start_args"] = [""]
+                    else:
+                        record["finished_at"] = "2026-08-24T10:00:00Z"
                     record_path.write_text(
                         json.dumps(record),
                         encoding="utf-8",
