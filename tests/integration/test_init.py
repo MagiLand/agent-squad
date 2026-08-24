@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 from pathlib import Path
 import tempfile
@@ -26,6 +27,21 @@ def _set_review_root(config_path: Path, review_root: Path) -> None:
         json.dumps(configuration),
         encoding="utf-8",
     )
+
+
+def _failing_exclude_write(
+    before_failure: Callable[[], None] | None = None,
+) -> Callable[..., None]:
+    real_atomic_write = initialization._atomic_write
+
+    def write(path: Path, content: bytes, *, mode: int) -> None:
+        if path.name == "exclude":
+            if before_failure is not None:
+                before_failure()
+            raise PermissionError("simulated read-only Git metadata")
+        real_atomic_write(path, content, mode=mode)
+
+    return write
 
 
 class InitCommandTests(unittest.TestCase):
@@ -496,6 +512,29 @@ class InitCommandTests(unittest.TestCase):
             self.assertEqual(config_path.read_bytes(), original_config)
             self.assertEqual(exclude_path.read_bytes(), original_exclude)
 
+    def test_default_review_root_symlink_loop_has_actionable_error(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repository = temporary_root / "repository"
+            initialize_git_repository(repository)
+            loop = temporary_root / "data-loop"
+            loop.symlink_to(loop, target_is_directory=True)
+            exclude_path = repository / ".git/info/exclude"
+            original_exclude = exclude_path.read_bytes()
+
+            result = run_cli(repository, "init", data_home=loop)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "default review worktree root cannot be resolved",
+                result.stderr,
+            )
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse((repository / ".agent-squad").exists())
+            self.assertEqual(exclude_path.read_bytes(), original_exclude)
+
     def test_linked_worktree_updates_common_git_exclude(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -554,22 +593,11 @@ class InitCommandTests(unittest.TestCase):
             initialize_git_repository(repository)
             exclude_path = repository / ".git/info/exclude"
             original_exclude = exclude_path.read_bytes()
-            real_atomic_write = initialization._atomic_write
-
-            def fail_exclude_write(
-                path: Path,
-                content: bytes,
-                *,
-                mode: int,
-            ) -> None:
-                if path.name == "exclude":
-                    raise PermissionError("simulated read-only Git metadata")
-                real_atomic_write(path, content, mode=mode)
 
             with mock.patch.object(
                 initialization,
                 "_atomic_write",
-                side_effect=fail_exclude_write,
+                side_effect=_failing_exclude_write(),
             ):
                 with self.assertRaisesRegex(
                     initialization.InitializationError,
@@ -590,24 +618,15 @@ class InitCommandTests(unittest.TestCase):
             initialize_git_repository(repository)
             exclude_path = repository / ".git/info/exclude"
             original_exclude = exclude_path.read_bytes()
-            real_atomic_write = initialization._atomic_write
             obstruction = repository / ".agent-squad/obstruction"
 
-            def fail_exclude_write(
-                path: Path,
-                content: bytes,
-                *,
-                mode: int,
-            ) -> None:
-                if path.name == "exclude":
-                    obstruction.write_text("keep root\n", encoding="utf-8")
-                    raise PermissionError("simulated read-only Git metadata")
-                real_atomic_write(path, content, mode=mode)
+            def obstruct_rollback() -> None:
+                obstruction.write_text("keep root\n", encoding="utf-8")
 
             with mock.patch.object(
                 initialization,
                 "_atomic_write",
-                side_effect=fail_exclude_write,
+                side_effect=_failing_exclude_write(obstruct_rollback),
             ):
                 with self.assertRaisesRegex(
                     initialization.InitializationError,

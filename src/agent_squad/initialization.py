@@ -241,7 +241,14 @@ def default_review_worktree_root() -> Path:
             data_home = default_data_home
     else:
         data_home = default_data_home
-    return (data_home / "agent-squad" / "worktrees").resolve(strict=False)
+    review_root = data_home / "agent-squad" / "worktrees"
+    try:
+        return review_root.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ConfigurationError(
+            "the default review worktree root cannot be resolved; check "
+            f"XDG_DATA_HOME and HOME: {error}"
+        ) from error
 
 
 def default_configuration(review_worktree_root: Path) -> Configuration:
@@ -498,10 +505,11 @@ def _validate_review_worktree_root(
             "configuration.review_worktree_root cannot be resolved: "
             f"{error}"
         ) from error
-    is_inside_worktree = (
-        canonical_review_root == canonical_implementation_root
-        or canonical_implementation_root in canonical_review_root.parents
+    review_lineage = (
+        canonical_review_root,
+        *canonical_review_root.parents,
     )
+    is_inside_worktree = canonical_implementation_root in review_lineage
     if not is_inside_worktree:
         try:
             implementation_identity = _existing_path_identity(
@@ -519,10 +527,6 @@ def _validate_review_worktree_root(
             )
 
         try:
-            review_lineage = (
-                canonical_review_root,
-                *canonical_review_root.parents,
-            )
             is_inside_worktree = any(
                 _existing_path_identity(candidate)
                 == implementation_identity
@@ -695,11 +699,11 @@ def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            os.chmod(temporary_path, mode)
+            temporary_path.chmod(mode)
             temporary_file.write(content)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, path)
+        temporary_path.replace(path)
         temporary_path = None
     finally:
         if temporary_path is not None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -12,17 +13,53 @@ add_src_to_path()
 from agent_squad import initialization  # noqa: E402
 
 
+IMPLEMENTATION_ROOT = Path("/agent-squad-tests/repository")
+REVIEW_ROOT = Path("/agent-squad-tests/reviews")
+
+
+class DefaultReviewWorktreeRootTests(unittest.TestCase):
+    def test_resolution_error_is_actionable(self) -> None:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"XDG_DATA_HOME": "/agent-squad-tests/data"},
+            ),
+            mock.patch.object(
+                Path,
+                "resolve",
+                autospec=True,
+                side_effect=PermissionError("simulated inaccessible path"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                initialization.ConfigurationError,
+                "default review worktree root cannot be resolved; check "
+                "XDG_DATA_HOME and HOME: simulated inaccessible path",
+            ):
+                initialization.default_review_worktree_root()
+
+
 class ReviewRootValidationTests(unittest.TestCase):
+    def _assert_validation_error(
+        self,
+        error_type: type[Exception],
+        pattern: str,
+        *,
+        review_root: Path = REVIEW_ROOT,
+    ) -> None:
+        configuration = initialization.default_configuration(review_root)
+        with self.assertRaisesRegex(error_type, pattern):
+            initialization._validate_review_worktree_root(
+                configuration,
+                IMPLEMENTATION_ROOT,
+            )
+
     def test_existing_lineage_identity_rejects_case_variant(self) -> None:
-        implementation_root = Path("/agent-squad-tests/repository")
         case_variant_root = Path("/agent-squad-tests/REPOSITORY")
-        configuration = initialization.default_configuration(
-            case_variant_root / "reviews"
-        )
         implementation_identity = (7, 11)
 
         def fake_identity(path: Path) -> tuple[int, int] | None:
-            if path in (implementation_root, case_variant_root):
+            if path in (IMPLEMENTATION_ROOT, case_variant_root):
                 return implementation_identity
             return None
 
@@ -31,22 +68,15 @@ class ReviewRootValidationTests(unittest.TestCase):
             "_existing_path_identity",
             side_effect=fake_identity,
         ):
-            with self.assertRaisesRegex(
+            self._assert_validation_error(
                 initialization.ConfigurationError,
                 "must be outside the implementation worktree",
-            ):
-                initialization._validate_review_worktree_root(
-                    configuration,
-                    implementation_root,
-                )
+                review_root=case_variant_root / "reviews",
+            )
 
     def test_resolution_os_error_is_actionable(self) -> None:
-        implementation_root = Path("/agent-squad-tests/repository")
-        review_root = Path("/agent-squad-tests/reviews")
-        configuration = initialization.default_configuration(review_root)
-
         def fake_resolve(path: Path, *, strict: bool) -> Path:
-            if path == implementation_root:
+            if path == IMPLEMENTATION_ROOT:
                 return path
             raise PermissionError("simulated inaccessible path")
 
@@ -56,23 +86,16 @@ class ReviewRootValidationTests(unittest.TestCase):
             autospec=True,
             side_effect=fake_resolve,
         ):
-            with self.assertRaisesRegex(
+            self._assert_validation_error(
                 initialization.ConfigurationError,
                 "cannot be resolved: simulated inaccessible path",
-            ):
-                initialization._validate_review_worktree_root(
-                    configuration,
-                    implementation_root,
-                )
+            )
 
     def test_lineage_inspection_os_error_is_actionable(self) -> None:
-        implementation_root = Path("/agent-squad-tests/repository")
-        review_root = Path("/agent-squad-tests/reviews")
-        configuration = initialization.default_configuration(review_root)
         implementation_identity = (7, 11)
 
         def fake_identity(path: Path) -> tuple[int, int] | None:
-            if path == implementation_root:
+            if path == IMPLEMENTATION_ROOT:
                 return implementation_identity
             raise PermissionError("simulated inaccessible ancestor")
 
@@ -81,54 +104,32 @@ class ReviewRootValidationTests(unittest.TestCase):
             "_existing_path_identity",
             side_effect=fake_identity,
         ):
-            with self.assertRaisesRegex(
+            self._assert_validation_error(
                 initialization.ConfigurationError,
                 "cannot be inspected: simulated inaccessible ancestor",
-            ):
-                initialization._validate_review_worktree_root(
-                    configuration,
-                    implementation_root,
-                )
+            )
 
     def test_missing_implementation_root_is_actionable(self) -> None:
-        implementation_root = Path("/agent-squad-tests/repository")
-        configuration = initialization.default_configuration(
-            Path("/agent-squad-tests/reviews")
-        )
-
         with mock.patch.object(
             initialization,
             "_existing_path_identity",
             return_value=None,
         ):
-            with self.assertRaisesRegex(
+            self._assert_validation_error(
                 initialization.RepositoryError,
                 "implementation worktree disappeared",
-            ):
-                initialization._validate_review_worktree_root(
-                    configuration,
-                    implementation_root,
-                )
+            )
 
     def test_implementation_root_inspection_error_is_actionable(self) -> None:
-        implementation_root = Path("/agent-squad-tests/repository")
-        configuration = initialization.default_configuration(
-            Path("/agent-squad-tests/reviews")
-        )
-
         with mock.patch.object(
             initialization,
             "_existing_path_identity",
             side_effect=PermissionError("simulated inaccessible worktree"),
         ):
-            with self.assertRaisesRegex(
+            self._assert_validation_error(
                 initialization.RepositoryError,
                 "cannot inspect the implementation worktree",
-            ):
-                initialization._validate_review_worktree_root(
-                    configuration,
-                    implementation_root,
-                )
+            )
 
 
 if __name__ == "__main__":

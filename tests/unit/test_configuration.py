@@ -71,9 +71,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_optional_fields_may_be_omitted(self) -> None:
         data = _configuration_data()
         del data["allowed_generated_paths"]
-        reviewer = data["reviewer"]
-        if not isinstance(reviewer, dict):
-            self.fail("reviewer fixture must be an object")
+        reviewer = _object_at(data, ("reviewer",))
         del reviewer["start_args"]
 
         configuration = Configuration.from_dict(data)
