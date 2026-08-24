@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from tests._support import add_src_to_path
 
@@ -287,6 +289,31 @@ class RunArtifactValidationTests(unittest.TestCase):
                             label="task specification",
                             require_text=True,
                         )
+
+    def test_capture_input_rejects_fifo_before_opening(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            fifo = root / "task.pipe"
+            os.mkfifo(fifo)
+
+            with mock.patch.object(
+                Path,
+                "open",
+                side_effect=AssertionError("FIFO must not be opened"),
+            ) as open_file:
+                with self.assertRaisesRegex(
+                    runs.RunStartError,
+                    "must be a regular file",
+                ):
+                    runs._capture_input(
+                        fifo,
+                        root,
+                        "task.md",
+                        label="task specification",
+                        require_text=True,
+                    )
+
+            open_file.assert_not_called()
 
     def test_authoritative_path_guards_reject_unsafe_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

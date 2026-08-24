@@ -324,9 +324,7 @@ def start_run(
         ),
         kind=configuration.implementer.kind,
     )
-    selected_reviewer_kind = (
-        reviewer_kind or configuration.reviewer.kind
-    )
+    selected_reviewer_kind = reviewer_kind or configuration.reviewer.kind
     selected_reviewer = _ReviewerRecord(
         kind=selected_reviewer_kind,
         start_args=(
@@ -1207,6 +1205,10 @@ def _capture_input(
     candidate = path if path.is_absolute() else invocation_directory / path
     try:
         resolved = candidate.resolve(strict=True)
+        if not resolved.is_file():
+            raise RunStartError(
+                f"{label} must be a regular file: {resolved}"
+            )
         with resolved.open("rb") as input_file:
             if not stat.S_ISREG(os.fstat(input_file.fileno()).st_mode):
                 raise RunStartError(
