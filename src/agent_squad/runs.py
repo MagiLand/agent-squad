@@ -1520,7 +1520,7 @@ def _require_object_format(value: object) -> str:
     if object_format not in OID_LENGTHS:
         raise RunStateError(
             f"unsupported Git object format {object_format!r}; expected "
-            "sha1 or sha256"
+            f"one of: {', '.join(OID_LENGTHS)}"
         )
     return object_format
 
