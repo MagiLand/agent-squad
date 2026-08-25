@@ -37,6 +37,24 @@ def _snapshot_files(root: Path) -> dict[str, bytes]:
     }
 
 
+def _load_run_artifacts(
+    repository: Path,
+) -> tuple[dict[str, object], dict[str, object]]:
+    control_root = repository / ".agent-squad"
+    state: dict[str, object] = json.loads(
+        (control_root / "state.json").read_text(encoding="utf-8")
+    )
+    run_id = state["active_run_id"]
+    if not isinstance(run_id, str):
+        raise AssertionError("active_run_id must be a string")
+    run_record: dict[str, object] = json.loads(
+        (control_root / "runs" / run_id / "run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return state, run_record
+
+
 class StartAndStatusCommandTests(unittest.TestCase):
     def test_start_and_status_require_repository_initialization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -298,19 +316,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            state = json.loads(
-                (repository / ".agent-squad/state.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            run_record = json.loads(
-                (
-                    repository
-                    / ".agent-squad/runs"
-                    / state["active_run_id"]
-                    / "run.json"
-                ).read_text(encoding="utf-8")
-            )
+            state, run_record = _load_run_artifacts(repository)
             self.assertEqual(
                 run_record["task"]["source_path"], str(task.resolve())
             )
@@ -380,19 +386,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            state = json.loads(
-                (repository / ".agent-squad/state.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            run_record = json.loads(
-                (
-                    repository
-                    / ".agent-squad/runs"
-                    / state["active_run_id"]
-                    / "run.json"
-                ).read_text(encoding="utf-8")
-            )
+            _, run_record = _load_run_artifacts(repository)
             self.assertEqual(
                 run_record["implementer"],
                 {"agent_name": "alternate-codex", "kind": "codex"},
@@ -771,23 +765,11 @@ class StartAndStatusCommandTests(unittest.TestCase):
 
             status = run_cli(repository, "status", data_home=data_home)
 
-            state = json.loads(
-                (repository / ".agent-squad/state.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            record = json.loads(
-                (
-                    repository
-                    / ".agent-squad/runs"
-                    / state["active_run_id"]
-                    / "run.json"
-                ).read_text(encoding="utf-8")
-            )
+            state, run_record = _load_run_artifacts(repository)
 
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertEqual(state["base_oid"], original_base_oid)
-            self.assertEqual(record["base_oid"], original_base_oid)
+            self.assertEqual(run_record["base_oid"], original_base_oid)
             self.assertIn(
                 f"Base: base-branch -> {original_base_oid}",
                 status.stdout,
@@ -965,19 +947,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            state = json.loads(
-                (repository / ".agent-squad/state.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            run_record = json.loads(
-                (
-                    repository
-                    / ".agent-squad/runs"
-                    / state["active_run_id"]
-                    / "run.json"
-                ).read_text(encoding="utf-8")
-            )
+            _, run_record = _load_run_artifacts(repository)
             self.assertIsNone(run_record["repository"]["start_branch_ref"])
             self.assertTrue(run_record["repository"]["start_head_detached"])
             status = run_cli(repository, "status", data_home=data_home)
@@ -1065,19 +1035,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(expected_oid), 64)
-            state = json.loads(
-                (repository / ".agent-squad/state.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            run_record = json.loads(
-                (
-                    repository
-                    / ".agent-squad/runs"
-                    / state["active_run_id"]
-                    / "run.json"
-                ).read_text(encoding="utf-8")
-            )
+            state, run_record = _load_run_artifacts(repository)
             self.assertEqual(state["base_oid"], expected_oid)
             self.assertEqual(run_record["base_oid"], expected_oid)
             self.assertEqual(run_record["git_object_format"], "sha256")

@@ -1016,7 +1016,7 @@ def _captured_path(run_directory: Path, run_path: str, label: str) -> Path:
     try:
         resolved = path.resolve(strict=True)
         resolved.relative_to(run_directory)
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         raise RunStateError(
             f"{label}.path does not resolve to a safe captured file: {error}"
         ) from error
