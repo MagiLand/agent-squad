@@ -110,16 +110,6 @@ def _run_init(_arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _invocation_directory() -> Path:
-    try:
-        return Path.cwd()
-    except OSError as error:
-        raise AgentSquadError(
-            "cannot determine the current directory; it may have been "
-            f"removed or become unreadable: {error}"
-        ) from error
-
-
 def _run_start(arguments: argparse.Namespace) -> int:
     reviewer_kind = None
     if arguments.reviewer is not None:
@@ -188,6 +178,16 @@ def _run_status(_arguments: argparse.Namespace) -> int:
     )
     print(f"Next action: {run.next_action}")
     return 0
+
+
+def _invocation_directory() -> Path:
+    try:
+        return Path.cwd()
+    except OSError as error:
+        raise AgentSquadError(
+            "cannot determine the current directory; it may have been "
+            f"removed or become unreadable: {error}"
+        ) from error
 
 
 def main(argv: Sequence[str] | None = None) -> int:
