@@ -213,8 +213,9 @@ class Configuration:
 
 @dataclass(frozen=True)
 class GitWorktree:
-    """Canonical paths discovered from Git."""
+    """Resolved invocation directory and canonical Git worktree paths."""
 
+    working_directory: Path
     root: Path
     common_directory: Path
     git_directory: Path
@@ -344,6 +345,7 @@ def discover_git_worktree(start: Path) -> GitWorktree:
         )
 
     return GitWorktree(
+        working_directory=working_directory,
         root=root,
         common_directory=common_directory,
         git_directory=git_directory,

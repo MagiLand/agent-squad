@@ -341,8 +341,6 @@ def start_run(
         ),
         "base reference",
     )
-    invocation_directory = _invocation_directory(start)
-
     lock_path = repository.control_root / LOCK_FILE_NAME
     try:
         with exclusive_file_lock(lock_path):
@@ -350,7 +348,7 @@ def start_run(
                 repository,
                 task_path=task_path,
                 context_paths=context_paths,
-                invocation_directory=invocation_directory,
+                invocation_directory=repository.worktree.working_directory,
                 implementer=selected_implementer,
                 reviewer=selected_reviewer,
                 base_ref=selected_base,
@@ -1001,11 +999,7 @@ def _validate_captured_record(
     )
 
 
-def _captured_path(
-    run_directory: Path,
-    run_path: str,
-    label: str,
-) -> Path:
+def _captured_path(run_directory: Path, run_path: str, label: str) -> Path:
     relative = PurePosixPath(run_path)
     if (
         relative.is_absolute()
@@ -1248,18 +1242,6 @@ def _reject_duplicate_context_sources(
                 f"{context.source_path}"
             )
         seen.add(context.source_path)
-
-
-def _invocation_directory(start: Path) -> Path:
-    try:
-        directory = start.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise RunStartError(
-            f"cannot resolve the current directory: {error}"
-        ) from error
-    if not directory.is_dir():
-        raise RunStartError(f"current path is not a directory: {directory}")
-    return directory
 
 
 def _load_existing_state(path: Path) -> dict[str, object] | None:
