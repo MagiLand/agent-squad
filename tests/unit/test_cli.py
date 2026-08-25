@@ -48,3 +48,7 @@ class InvocationDirectoryTests(unittest.TestCase):
                     stderr.getvalue(),
                 )
                 self.assertNotIn("Traceback", stderr.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
