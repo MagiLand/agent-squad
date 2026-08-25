@@ -16,6 +16,15 @@ import stat
 import tempfile
 import uuid
 
+from .artifacts import (
+    ArtifactValidationError,
+    BundleArtifact,
+    HandoffStatus,
+    REVIEWER_NAME_PATTERN,
+    ReviewRequest,
+    RoundStatus,
+    SubmissionMode,
+)
 from .initialization import (
     AgentKind,
     AgentSquadError,
@@ -225,7 +234,7 @@ class _ValidatedRunRecord:
     phase: RunPhase
     task_path: Path
     task_sha256: str
-    context_count: int
+    context_records: tuple[_CapturedRecord, ...]
     repository: RepositoryIdentity
     base_ref: str
     base_oid: str
@@ -234,14 +243,36 @@ class _ValidatedRunRecord:
     reviewer: _ReviewerRecord
     initial_budget: ReviewBudget
 
+    @property
+    def context_count(self) -> int:
+        """Return the number of immutable context inputs."""
+
+        return len(self.context_records)
+
 
 @dataclass(frozen=True)
 class _RoundSummary:
     """Validated status fields for the active review round."""
 
+    round_number: int | None
     status: str | None
     mode: str | None
+    request_id: str | None
+    result_id: str | None
     review_worktree: str | None
+    reviewer_name: str | None
+
+
+@dataclass(frozen=True)
+class _HandoffSummary:
+    """Validated current request-handoff details."""
+
+    round_number: int | None
+    status: str | None
+    target: str | None
+    last_error: str | None
+    herdr_version: str | None
+    herdr_protocol: int | None
 
 
 @dataclass(frozen=True)
@@ -282,7 +313,11 @@ class ActiveRunStatus:
     active_escalation_id: str | None
     round_status: str | None
     submission_mode: str | None
+    request_id: str | None
+    reviewer_name: str | None
     handoff_status: str | None
+    handoff_target: str | None
+    handoff_error: str | None
     review_worktree: str | None
     review_budget: ReviewBudget
 
@@ -359,7 +394,11 @@ def start_run(
         ) from error
 
 
-def inspect_status(start: Path) -> RepositoryStatus:
+def inspect_status(
+    start: Path,
+    *,
+    _lock_held: bool = False,
+) -> RepositoryStatus:
     """Return validated idle or active state for an initialized worktree."""
 
     repository = load_initialized_repository(start)
@@ -368,6 +407,22 @@ def inspect_status(start: Path) -> RepositoryStatus:
     state = _load_existing_state(state_path)
     if state is None or state["active_run_id"] is None:
         return _idle_status(current_identity)
+    if not _lock_held:
+        lock_path = repository.control_root / LOCK_FILE_NAME
+        if lock_path.is_symlink() or not lock_path.is_file():
+            raise RunStateError(
+                "an active run must have a regular non-symlink lock file: "
+                f"{lock_path}"
+            )
+        try:
+            with exclusive_file_lock(lock_path):
+                return inspect_status(start, _lock_held=True)
+        except RunError:
+            raise
+        except OSError as error:
+            raise RunStateError(
+                f"could not acquire the active-run lock {lock_path}: {error}"
+            ) from error
 
     active_run_id = _require_uuid(
         state["active_run_id"],
@@ -415,7 +470,7 @@ def inspect_status(start: Path) -> RepositoryStatus:
         state["active_escalation_id"], "state.active_escalation_id"
     )
     round_details = _round_status_details(state["active_round"])
-    handoff_status = _handoff_status(state["handoff"])
+    handoff = _handoff_details(state["handoff"])
 
     run_directory = _safe_run_directory(repository.control_root, active_run_id)
     run_record_path = run_directory / RUN_RECORD_FILE_NAME
@@ -462,13 +517,32 @@ def inspect_status(start: Path) -> RepositoryStatus:
         raise RunStateError(
             "state review-budget original limit does not match run metadata"
         )
+    _validate_active_state_shape(
+        phase=phase,
+        current_round=current_round,
+        current_head_oid=current_head_oid,
+        approved_head_oid=approved_head_oid,
+        active_escalation_id=active_escalation_id,
+        round_details=round_details,
+        handoff=handoff,
+        object_format=record.object_format,
+    )
 
     _validate_event_log(
         run_directory / EVENT_LOG_FILE_NAME,
         active_run_id,
         record.base_oid,
     )
-    next_action = _next_action(phase)
+    if phase is RunPhase.REVIEWING:
+        _validate_active_review_artifacts(
+            run_directory=run_directory,
+            record=record,
+            run_id=active_run_id,
+            current_round=current_round,
+            current_head_oid=current_head_oid,
+            round_details=round_details,
+        )
+    next_action = _next_action(phase, handoff_status=handoff.status)
     return RepositoryStatus(
         repository_root=current_identity.implementation_root,
         repository_id=current_identity.repository_id,
@@ -494,8 +568,12 @@ def inspect_status(start: Path) -> RepositoryStatus:
             active_escalation_id=active_escalation_id,
             round_status=round_details.status,
             submission_mode=round_details.mode,
+            request_id=round_details.request_id,
+            reviewer_name=round_details.reviewer_name,
             review_worktree=round_details.review_worktree,
-            handoff_status=handoff_status,
+            handoff_status=handoff.status,
+            handoff_target=handoff.target,
+            handoff_error=handoff.last_error,
             review_budget=budget,
         ),
         next_action=next_action,
@@ -820,6 +898,7 @@ def _validate_run_record(
     if not isinstance(context_value, list):
         raise RunStateError("run record.context_files must be a JSON array")
     seen_context_paths: set[str] = set()
+    context_records: list[_CapturedRecord] = []
     for index, value in enumerate(context_value):
         label = f"run record.context_files[{index}]"
         context_record = _validate_captured_record(value, label)
@@ -839,6 +918,7 @@ def _validate_run_record(
             context_record.sha256,
             f"captured context {path_text}",
         )
+        context_records.append(context_record)
 
     identity = _validate_repository_record(data["repository"])
     base_ref = _require_string(data["base_ref"], "run record.base_ref")
@@ -863,7 +943,7 @@ def _validate_run_record(
         phase=phase,
         task_path=task_path,
         task_sha256=task_sha256,
-        context_count=len(context_value),
+        context_records=tuple(context_records),
         repository=identity,
         base_ref=base_ref,
         base_oid=base_oid,
@@ -1087,33 +1167,604 @@ def _validate_event_log(
         )
 
 
+def _validate_active_review_artifacts(
+    *,
+    run_directory: Path,
+    record: _ValidatedRunRecord,
+    run_id: str,
+    current_round: int,
+    current_head_oid: str | None,
+    round_details: _RoundSummary,
+) -> None:
+    round_directory = (
+        run_directory / "rounds" / f"{current_round:03d}"
+    )
+    if round_directory.is_symlink() or not round_directory.is_dir():
+        raise RunStateError(
+            "active round directory must be a non-symlink directory: "
+            f"{round_directory}"
+        )
+    round_record = _load_json_object(
+        round_directory / "round.json",
+        "active round record",
+    )
+    _check_fields(
+        round_record,
+        required={
+            "schema_version",
+            "created_at",
+            "updated_at",
+            "run_id",
+            "round",
+            "mode",
+            "request_id",
+            "result_id",
+            "base_oid",
+            "head_oid",
+            "git_object_format",
+            "status",
+            "review_worktree",
+            "reviewer",
+            "artifacts",
+            "warnings",
+        },
+        path="active round record",
+    )
+    _validate_schema_version(round_record, "active round record")
+    _require_timestamp(
+        round_record["created_at"],
+        "active round record.created_at",
+    )
+    _require_timestamp(
+        round_record["updated_at"],
+        "active round record.updated_at",
+    )
+    comparisons = (
+        (
+            _require_uuid(
+                round_record["run_id"],
+                "active round record.run_id",
+            ),
+            run_id,
+            "run ID",
+        ),
+        (
+            _require_int(
+                round_record["round"],
+                "active round record.round",
+            ),
+            current_round,
+            "round number",
+        ),
+        (
+            _require_string(
+                round_record["mode"],
+                "active round record.mode",
+            ),
+            round_details.mode,
+            "submission mode",
+        ),
+        (
+            _require_uuid(
+                round_record["request_id"],
+                "active round record.request_id",
+            ),
+            round_details.request_id,
+            "request ID",
+        ),
+        (
+            _require_string(
+                round_record["status"],
+                "active round record.status",
+            ),
+            round_details.status,
+            "round status",
+        ),
+        (
+            _require_string(
+                round_record["git_object_format"],
+                "active round record.git_object_format",
+            ),
+            record.object_format,
+            "Git object format",
+        ),
+        (
+            _require_oid(
+                round_record["base_oid"],
+                record.object_format,
+                "active round record.base_oid",
+            ),
+            record.base_oid,
+            "base OID",
+        ),
+        (
+            _require_oid(
+                round_record["head_oid"],
+                record.object_format,
+                "active round record.head_oid",
+            ),
+            current_head_oid,
+            "head OID",
+        ),
+        (
+            str(
+                _require_absolute_path(
+                    round_record["review_worktree"],
+                    "active round record.review_worktree",
+                )
+            ),
+            round_details.review_worktree,
+            "review worktree",
+        ),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise RunStateError(
+                f"active round record {label} does not match state or run "
+                "metadata"
+            )
+    if round_record["result_id"] is not None:
+        raise RunStateError(
+            "a reviewing active round record must have no result ID"
+        )
+
+    reviewer = _require_object(
+        round_record["reviewer"],
+        "active round record.reviewer",
+    )
+    _check_fields(
+        reviewer,
+        required={
+            "name",
+            "kind",
+            "start_args",
+        },
+        path="active round record.reviewer",
+    )
+    if reviewer["name"] != round_details.reviewer_name:
+        raise RunStateError(
+            "active round Reviewer name does not match state"
+        )
+    if reviewer["kind"] != record.reviewer.kind.value:
+        raise RunStateError(
+            "active round Reviewer kind does not match run metadata"
+        )
+    if reviewer["start_args"] != list(record.reviewer.start_args):
+        raise RunStateError(
+            "active round Reviewer arguments do not match run metadata"
+        )
+    warnings = round_record["warnings"]
+    if not isinstance(warnings, list) or not all(
+        isinstance(item, str) and item for item in warnings
+    ):
+        raise RunStateError(
+            "active round record.warnings must be an array of non-empty "
+            "strings"
+        )
+
+    artifacts = _require_object(
+        round_record["artifacts"],
+        "active round record.artifacts",
+    )
+    _check_fields(
+        artifacts,
+        required={
+            "request",
+            "implementation_report",
+            "bundle_inputs",
+        },
+        path="active round record.artifacts",
+    )
+    request_artifact = _round_artifact(
+        artifacts["request"],
+        "active round record.artifacts.request",
+    )
+    report_artifact = _round_artifact(
+        artifacts["implementation_report"],
+        "active round record.artifacts.implementation_report",
+    )
+    if request_artifact.path != "request.json":
+        raise RunStateError(
+            "active round request artifact path must be request.json"
+        )
+    if report_artifact.path != "implementation-report.md":
+        raise RunStateError(
+            "active round report path must be implementation-report.md"
+        )
+    request_path = _captured_path(
+        round_directory,
+        request_artifact.path,
+        "active round request artifact",
+    )
+    report_path = _captured_path(
+        round_directory,
+        report_artifact.path,
+        "active round report artifact",
+    )
+    _verify_captured_digest(
+        request_path,
+        request_artifact.sha256,
+        "active round request",
+    )
+    _verify_captured_digest(
+        report_path,
+        report_artifact.sha256,
+        "active round implementation report",
+    )
+    request_data = _load_json_object(request_path, "active review request")
+    try:
+        request = ReviewRequest.from_dict(request_data)
+    except ArtifactValidationError as error:
+        raise RunStateError(
+            f"active review request is invalid: {error}"
+        ) from error
+    _assert_request_matches_active_round(
+        request=request,
+        record=record,
+        run_id=run_id,
+        current_round=current_round,
+        current_head_oid=current_head_oid,
+        round_details=round_details,
+        report_artifact=report_artifact,
+    )
+
+    request_bundle_artifact = BundleArtifact(
+        path="input/request.json",
+        sha256=request_artifact.sha256,
+    )
+    expected_bundle_inputs = (
+        request_bundle_artifact,
+        request.task,
+        request.implementation_report,
+        *request.context_files,
+    )
+    bundle_values = artifacts["bundle_inputs"]
+    if not isinstance(bundle_values, list):
+        raise RunStateError(
+            "active round record.artifacts.bundle_inputs must be an array"
+        )
+    try:
+        bundle_inputs = tuple(
+            BundleArtifact.from_dict(
+                value,
+                label=f"active round bundle input {index}",
+            )
+            for index, value in enumerate(bundle_values)
+        )
+    except ArtifactValidationError as error:
+        raise RunStateError(str(error)) from error
+    if bundle_inputs != expected_bundle_inputs:
+        raise RunStateError(
+            "active round bundle-input manifest does not match the request"
+        )
+
+    review_worktree = Path(round_details.review_worktree or "")
+    bundle_root = review_worktree / ".agent-squad-review"
+    if review_worktree.is_symlink() or not review_worktree.is_dir():
+        raise RunStateError(
+            f"active review worktree does not exist: {review_worktree}"
+        )
+    for artifact in bundle_inputs:
+        path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)
+        if path.is_symlink() or not path.is_file():
+            raise RunStateError(
+                "active review bundle input must be a regular non-symlink "
+                f"file: {path}"
+            )
+        _verify_captured_digest(
+            path,
+            artifact.sha256,
+            f"active review bundle input {artifact.path}",
+        )
+
+
+def _round_artifact(value: object, label: str) -> BundleArtifact:
+    try:
+        return BundleArtifact.from_dict(value, label=label)
+    except ArtifactValidationError as error:
+        raise RunStateError(str(error)) from error
+
+
+def _assert_request_matches_active_round(
+    *,
+    request: ReviewRequest,
+    record: _ValidatedRunRecord,
+    run_id: str,
+    current_round: int,
+    current_head_oid: str | None,
+    round_details: _RoundSummary,
+    report_artifact: BundleArtifact,
+) -> None:
+    expected_context = tuple(
+        BundleArtifact(
+            path=f"input/{context.run_path}",
+            sha256=context.sha256,
+        )
+        for context in record.context_records
+    )
+    comparisons = (
+        (request.run_id, run_id, "run ID"),
+        (request.round_number, current_round, "round number"),
+        (request.mode.value, round_details.mode, "submission mode"),
+        (request.request_id, round_details.request_id, "request ID"),
+        (request.object_format, record.object_format, "Git object format"),
+        (request.base_oid, record.base_oid, "base OID"),
+        (request.head_oid, current_head_oid, "head OID"),
+        (request.task.sha256, record.task_sha256, "task digest"),
+        (
+            request.implementation_report.sha256,
+            report_artifact.sha256,
+            "implementation-report digest",
+        ),
+        (request.context_files, expected_context, "context manifest"),
+        (
+            request.implementer_agent,
+            record.implementer.agent_name,
+            "Implementer identity",
+        ),
+        (
+            request.implementer_kind,
+            record.implementer.kind,
+            "Implementer kind",
+        ),
+        (request.reviewer_kind, record.reviewer.kind, "Reviewer kind"),
+        (
+            request.reviewer_name,
+            round_details.reviewer_name,
+            "Reviewer name",
+        ),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise RunStateError(
+                f"active review request {label} does not match state or run "
+                "metadata"
+            )
+    if request.previous_review_path is not None:
+        raise RunStateError(
+            "the first active review request cannot reference a previous "
+            "review"
+        )
+    if request.previous_response_path is not None:
+        raise RunStateError(
+            "the first active review request cannot reference a previous "
+            "response"
+        )
+    if request.resolution_paths:
+        raise RunStateError(
+            "this first-round implementation does not support Developer "
+            "resolution inputs"
+        )
+
+
 def _round_status_details(value: object) -> _RoundSummary:
     if value is None:
-        return _RoundSummary(None, None, None)
+        return _RoundSummary(None, None, None, None, None, None, None)
     data = _require_object(value, "state.active_round")
-    status_value = data.get("status")
-    mode_value = data.get("mode")
-    worktree_value = data.get("review_worktree")
+    _check_fields(
+        data,
+        required={
+            "round",
+            "status",
+            "mode",
+            "request_id",
+            "result_id",
+            "review_worktree",
+            "reviewer_name",
+        },
+        path="state.active_round",
+    )
+    round_number = _require_nonnegative_int(
+        data.get("round"),
+        "state.active_round.round",
+    )
+    if round_number < 1:
+        raise RunStateError("state.active_round.round must be positive")
+    status_text = _require_string(
+        data.get("status"),
+        "state.active_round.status",
+    )
+    try:
+        status = RoundStatus(status_text)
+    except ValueError:
+        supported = ", ".join(item.value for item in RoundStatus)
+        raise RunStateError(
+            f"state.active_round.status must be one of: {supported}"
+        ) from None
+    mode_text = _require_string(
+        data.get("mode"),
+        "state.active_round.mode",
+    )
+    try:
+        mode = SubmissionMode(mode_text)
+    except ValueError:
+        supported = ", ".join(item.value for item in SubmissionMode)
+        raise RunStateError(
+            f"state.active_round.mode must be one of: {supported}"
+        ) from None
+    request_id = _require_uuid(
+        data.get("request_id"),
+        "state.active_round.request_id",
+    )
+    result_value = data.get("result_id")
+    result_id = (
+        None
+        if result_value is None
+        else _require_uuid(result_value, "state.active_round.result_id")
+    )
+    worktree = _require_absolute_path(
+        data.get("review_worktree"),
+        "state.active_round.review_worktree",
+    )
+    reviewer_name = _require_string(
+        data.get("reviewer_name"),
+        "state.active_round.reviewer_name",
+    )
+    if REVIEWER_NAME_PATTERN.fullmatch(reviewer_name) is None:
+        raise RunStateError(
+            "state.active_round.reviewer_name must be a valid Herdr agent "
+            "name"
+        )
     return _RoundSummary(
-        status=_require_optional_string(
-            status_value,
-            "state.active_round.status",
-        ),
-        mode=_require_optional_string(
-            mode_value,
-            "state.active_round.mode",
-        ),
-        review_worktree=_require_optional_string(
-            worktree_value, "state.active_round.review_worktree"
-        ),
+        round_number=round_number,
+        status=status.value,
+        mode=mode.value,
+        request_id=request_id,
+        result_id=result_id,
+        review_worktree=str(worktree),
+        reviewer_name=reviewer_name,
     )
 
 
-def _handoff_status(value: object) -> str | None:
+def _handoff_details(value: object) -> _HandoffSummary:
     if value is None:
-        return None
+        return _HandoffSummary(None, None, None, None, None, None)
     data = _require_object(value, "state.handoff")
-    return _require_optional_string(data.get("status"), "state.handoff.status")
+    _check_fields(
+        data,
+        required={
+            "kind",
+            "round",
+            "status",
+            "target",
+            "last_error",
+            "updated_at",
+            "herdr_version",
+            "herdr_protocol",
+        },
+        path="state.handoff",
+    )
+    if data["kind"] != "review_request":
+        raise RunStateError("state.handoff.kind must be review_request")
+    round_number = _require_nonnegative_int(
+        data["round"],
+        "state.handoff.round",
+    )
+    if round_number < 1:
+        raise RunStateError("state.handoff.round must be positive")
+    _require_timestamp(data["updated_at"], "state.handoff.updated_at")
+    version_value = data["herdr_version"]
+    version = (
+        None
+        if version_value is None
+        else _require_string(version_value, "state.handoff.herdr_version")
+    )
+    protocol_value = data["herdr_protocol"]
+    protocol = (
+        None
+        if protocol_value is None
+        else _require_int(protocol_value, "state.handoff.herdr_protocol")
+    )
+    if protocol is not None and protocol < 1:
+        raise RunStateError("state.handoff.herdr_protocol must be positive")
+    status_text = _require_string(data.get("status"), "state.handoff.status")
+    try:
+        handoff_status = HandoffStatus(status_text)
+    except ValueError:
+        supported = ", ".join(item.value for item in HandoffStatus)
+        raise RunStateError(
+            f"state.handoff.status must be one of: {supported}"
+        ) from None
+    target = _require_string(data.get("target"), "state.handoff.target")
+    if REVIEWER_NAME_PATTERN.fullmatch(target) is None:
+        raise RunStateError(
+            "state.handoff.target must be a valid Herdr agent name"
+        )
+    last_error = _require_optional_string(
+        data.get("last_error"),
+        "state.handoff.last_error",
+    )
+    if handoff_status is HandoffStatus.FAILED and last_error is None:
+        raise RunStateError(
+            "state.handoff.last_error is required when handoff failed"
+        )
+    if handoff_status is not HandoffStatus.FAILED and last_error is not None:
+        raise RunStateError(
+            "state.handoff.last_error is allowed only when handoff failed"
+        )
+    if handoff_status is HandoffStatus.SENT and (
+        version is None or protocol is None
+    ):
+        raise RunStateError(
+            "a sent handoff must record Herdr version and protocol"
+        )
+    return _HandoffSummary(
+        round_number=round_number,
+        status=handoff_status.value,
+        target=target,
+        last_error=last_error,
+        herdr_version=version,
+        herdr_protocol=protocol,
+    )
+
+
+def _validate_active_state_shape(
+    *,
+    phase: RunPhase,
+    current_round: int,
+    current_head_oid: str | None,
+    approved_head_oid: str | None,
+    active_escalation_id: str | None,
+    round_details: _RoundSummary,
+    handoff: _HandoffSummary,
+    object_format: str,
+) -> None:
+    if current_head_oid is not None:
+        _require_oid(current_head_oid, object_format, "state.current_head_oid")
+    if approved_head_oid is not None:
+        _require_oid(
+            approved_head_oid,
+            object_format,
+            "state.approved_head_oid",
+        )
+    if phase is RunPhase.IMPLEMENTING:
+        if current_round != 0:
+            return
+        if current_head_oid is not None:
+            raise RunStateError(
+                "an unused implementing run must have no current round or "
+                "requested head"
+            )
+        if (
+            round_details.round_number is not None
+            or handoff.status is not None
+        ):
+            raise RunStateError(
+                "an unused implementing run must have no active round or "
+                "handoff"
+            )
+        return
+    if phase is not RunPhase.REVIEWING:
+        return
+    if current_round < 1 or current_head_oid is None:
+        raise RunStateError(
+            "a reviewing run must identify a current round and head"
+        )
+    if approved_head_oid is not None or active_escalation_id is not None:
+        raise RunStateError(
+            "a reviewing run cannot retain approval or active escalation"
+        )
+    if round_details.round_number != current_round:
+        raise RunStateError(
+            "state.active_round.round must match state.current_round"
+        )
+    if round_details.status != RoundStatus.REVIEWING.value:
+        raise RunStateError(
+            "the active round status must be reviewing while the run is "
+            "reviewing"
+        )
+    if round_details.result_id is not None:
+        raise RunStateError(
+            "a reviewing round cannot have an authoritative result ID"
+        )
+    if handoff.round_number != current_round:
+        raise RunStateError(
+            "state.handoff.round must match state.current_round"
+        )
+    if handoff.target != round_details.reviewer_name:
+        raise RunStateError(
+            "state.handoff.target must match the active Reviewer name"
+        )
 
 
 def _repository_identity(worktree: GitWorktree) -> RepositoryIdentity:
@@ -1334,13 +1985,23 @@ def _idle_status(identity: RepositoryIdentity) -> RepositoryStatus:
     )
 
 
-def _next_action(phase: RunPhase) -> str:
-    if phase is not RunPhase.IMPLEMENTING:
-        raise RunStateError(
-            f"phase {phase.value} is not supported by this implementation "
-            "increment"
-        )
-    return "continue implementing the captured task"
+def _next_action(
+    phase: RunPhase,
+    *,
+    handoff_status: str | None = None,
+) -> str:
+    if phase is RunPhase.IMPLEMENTING:
+        return "continue implementing the captured task"
+    if phase is RunPhase.REVIEWING:
+        if handoff_status == HandoffStatus.FAILED.value:
+            return "recover the preserved review-request handoff"
+        if handoff_status == HandoffStatus.PENDING.value:
+            return "finish or recover the pending review-request handoff"
+        return "wait for the Reviewer result"
+    raise RunStateError(
+        f"phase {phase.value} is not supported by this implementation "
+        "increment"
+    )
 
 
 def _assert_current_identity(

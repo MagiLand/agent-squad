@@ -20,6 +20,13 @@ class InvocationDirectoryTests(unittest.TestCase):
             ("init",),
             ("start", "--task", "task.md"),
             ("status",),
+            (
+                "submit",
+                "--report",
+                "report.md",
+                "--mode",
+                "new_revision",
+            ),
         )
         for arguments in cases:
             with self.subTest(command=arguments[0]):
@@ -56,6 +63,16 @@ class LocalStateErrorTests(unittest.TestCase):
             (("init",), "initialize_repository"),
             (("start", "--task", "task.md"), "start_run"),
             (("status",), "inspect_status"),
+            (
+                (
+                    "submit",
+                    "--report",
+                    "report.md",
+                    "--mode",
+                    "new_revision",
+                ),
+                "submit_candidate",
+            ),
         )
         for arguments, operation in cases:
             with self.subTest(command=arguments[0]):

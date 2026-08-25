@@ -162,16 +162,27 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     validator()
 
-    def test_next_action_only_covers_the_reachable_active_phase(self) -> None:
+    def test_next_action_covers_implemented_active_phases(self) -> None:
         self.assertEqual(
             runs._next_action(runs.RunPhase.IMPLEMENTING),
             "continue implementing the captured task",
         )
+        self.assertEqual(
+            runs._next_action(runs.RunPhase.REVIEWING),
+            "wait for the Reviewer result",
+        )
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                handoff_status="failed",
+            ),
+            "recover the preserved review-request handoff",
+        )
         with self.assertRaisesRegex(
             runs.RunStateError,
-            "reviewing is not supported",
+            "approved is not supported",
         ):
-            runs._next_action(runs.RunPhase.REVIEWING)
+            runs._next_action(runs.RunPhase.APPROVED)
 
 
 class RunArtifactValidationTests(unittest.TestCase):
@@ -418,9 +429,13 @@ class RunArtifactValidationTests(unittest.TestCase):
         )
         round_summary = runs._round_status_details(
             {
-                "status": "pending",
-                "mode": "workspace",
+                "round": 1,
+                "status": "reviewing",
+                "mode": "new_revision",
+                "request_id": "12345678-1234-5678-9234-567812345678",
+                "result_id": None,
                 "review_worktree": "/tmp/review",
+                "reviewer_name": "asq-12345678-r001-reviewer",
             }
         )
         self.assertEqual(captured.source_path, Path("/tmp/task.md"))
@@ -430,9 +445,18 @@ class RunArtifactValidationTests(unittest.TestCase):
         self.assertEqual(implementer.kind.value, "codex")
         self.assertEqual(reviewer.kind.value, "claude")
         self.assertEqual(reviewer.start_args, ("--strict",))
-        self.assertEqual(round_summary.status, "pending")
-        self.assertEqual(round_summary.mode, "workspace")
+        self.assertEqual(round_summary.status, "reviewing")
+        self.assertEqual(round_summary.mode, "new_revision")
         self.assertEqual(round_summary.review_worktree, "/tmp/review")
+        self.assertEqual(round_summary.round_number, 1)
+        self.assertEqual(
+            round_summary.request_id,
+            "12345678-1234-5678-9234-567812345678",
+        )
+        self.assertEqual(
+            round_summary.reviewer_name,
+            "asq-12345678-r001-reviewer",
+        )
 
     def test_state_match_errors_name_the_real_json_field(self) -> None:
         with self.assertRaisesRegex(
@@ -445,6 +469,41 @@ class RunArtifactValidationTests(unittest.TestCase):
                 field="git_common_dir",
                 label="Git common directory",
             )
+
+    def test_handoff_details_validate_delivery_invariants(self) -> None:
+        valid = {
+            "kind": "review_request",
+            "round": 1,
+            "status": "sent",
+            "target": "asq-123456781234-r001-reviewer",
+            "last_error": None,
+            "updated_at": "2026-08-25T12:00:00Z",
+            "herdr_version": "herdr test",
+            "herdr_protocol": 20,
+        }
+        handoff = runs._handoff_details(valid)
+        self.assertEqual(handoff.status, "sent")
+        self.assertEqual(handoff.herdr_protocol, 20)
+
+        cases = (
+            ({**valid, "status": "unknown"}, "must be one of"),
+            (
+                {**valid, "status": "failed", "last_error": None},
+                "last_error is required",
+            ),
+            (
+                {**valid, "herdr_protocol": None},
+                "sent handoff must record",
+            ),
+            (
+                {**valid, "target": "Reviewer Name"},
+                "valid Herdr agent name",
+            ),
+        )
+        for value, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._handoff_details(value)
 
 
 if __name__ == "__main__":
