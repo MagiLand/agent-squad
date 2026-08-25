@@ -1538,16 +1538,13 @@ def _require_oid(value: object, object_format: str, path: str) -> str:
 
 def _require_timestamp(value: object, path: str) -> str:
     text = _require_string(value, path)
+    message = f"{path} must be an RFC 3339 UTC timestamp"
     if UTC_TIMESTAMP_PATTERN.fullmatch(text) is None:
-        raise RunStateError(f"{path} must be an RFC 3339 UTC timestamp")
+        raise RunStateError(message)
     try:
-        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00")
+        datetime.fromisoformat(f"{text[:-1]}+00:00")
     except ValueError:
-        raise RunStateError(
-            f"{path} must be an RFC 3339 UTC timestamp"
-        ) from None
-    if parsed.tzinfo != timezone.utc:
-        raise RunStateError(f"{path} must be an RFC 3339 UTC timestamp")
+        raise RunStateError(message) from None
     return text
 
 

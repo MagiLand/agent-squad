@@ -200,6 +200,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AgentSquadError as error:
         print(f"agent-squad: error: {error}", file=sys.stderr)
         return 1
+    except OSError as error:
+        print(
+            f"agent-squad: error: cannot access local state: {error}",
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":

@@ -50,5 +50,40 @@ class InvocationDirectoryTests(unittest.TestCase):
                 self.assertNotIn("Traceback", stderr.getvalue())
 
 
+class LocalStateErrorTests(unittest.TestCase):
+    def test_commands_report_unexpected_operating_system_errors(self) -> None:
+        cases = (
+            (("init",), "initialize_repository"),
+            (("start", "--task", "task.md"), "start_run"),
+            (("status",), "inspect_status"),
+        )
+        for arguments, operation in cases:
+            with self.subTest(command=arguments[0]):
+                stdout = StringIO()
+                stderr = StringIO()
+                error = PermissionError(
+                    13,
+                    "simulated unreadable local state",
+                )
+                with (
+                    mock.patch.object(cli, operation, side_effect=error),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    result = cli.main(arguments)
+
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(
+                    "agent-squad: error: cannot access local state",
+                    stderr.getvalue(),
+                )
+                self.assertIn(
+                    "simulated unreadable local state",
+                    stderr.getvalue(),
+                )
+                self.assertNotIn("Traceback", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
