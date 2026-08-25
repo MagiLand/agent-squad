@@ -215,7 +215,7 @@ class Configuration:
 class GitWorktree:
     """Resolved invocation directory and canonical Git worktree paths."""
 
-    working_directory: Path
+    invocation_directory: Path
     root: Path
     common_directory: Path
     git_directory: Path
@@ -345,7 +345,7 @@ def discover_git_worktree(start: Path) -> GitWorktree:
         )
 
     return GitWorktree(
-        working_directory=working_directory,
+        invocation_directory=working_directory,
         root=root,
         common_directory=common_directory,
         git_directory=git_directory,

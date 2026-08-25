@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_init(_arguments: argparse.Namespace) -> int:
-    result = initialize_repository(Path.cwd())
+    result = initialize_repository(_invocation_directory())
     configuration_action = (
         "created" if result.configuration_created else "validated"
     )
@@ -110,12 +110,22 @@ def _run_init(_arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _invocation_directory() -> Path:
+    try:
+        return Path.cwd()
+    except OSError as error:
+        raise AgentSquadError(
+            "cannot determine the current directory; it may have been "
+            f"removed or become unreadable: {error}"
+        ) from error
+
+
 def _run_start(arguments: argparse.Namespace) -> int:
     reviewer_kind = None
     if arguments.reviewer is not None:
         reviewer_kind = AgentKind(arguments.reviewer)
     result = start_run(
-        Path.cwd(),
+        _invocation_directory(),
         task_path=arguments.task,
         context_paths=arguments.context,
         implementer_agent=arguments.implementer,
@@ -132,7 +142,7 @@ def _run_start(arguments: argparse.Namespace) -> int:
 
 
 def _run_status(_arguments: argparse.Namespace) -> int:
-    status = inspect_status(Path.cwd())
+    status = inspect_status(_invocation_directory())
     print(f"Repository: {status.repository_root}")
     print(f"Repository ID: {status.repository_id}")
     print(f"Git common directory: {status.git_common_dir}")

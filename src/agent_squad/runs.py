@@ -348,7 +348,6 @@ def start_run(
                 repository,
                 task_path=task_path,
                 context_paths=context_paths,
-                invocation_directory=repository.worktree.working_directory,
                 implementer=selected_implementer,
                 reviewer=selected_reviewer,
                 base_ref=selected_base,
@@ -510,7 +509,6 @@ def _start_run_locked(
     *,
     task_path: Path,
     context_paths: Sequence[Path],
-    invocation_directory: Path,
     implementer: _ImplementerRecord,
     reviewer: _ReviewerRecord,
     base_ref: str,
@@ -540,7 +538,7 @@ def _start_run_locked(
     )
     task = _capture_input(
         task_path,
-        invocation_directory,
+        repository.worktree.invocation_directory,
         TASK_FILE_NAME,
         label="task specification",
         require_text=True,
@@ -548,7 +546,7 @@ def _start_run_locked(
     contexts = tuple(
         _capture_input(
             path,
-            invocation_directory,
+            repository.worktree.invocation_directory,
             _context_run_path(index, path),
             label=f"context file {index}",
             require_text=False,

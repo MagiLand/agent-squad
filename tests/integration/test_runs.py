@@ -311,6 +311,9 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     / "run.json"
                 ).read_text(encoding="utf-8")
             )
+            self.assertEqual(
+                run_record["task"]["source_path"], str(task.resolve())
+            )
             self.assertEqual(run_record["base_ref"], "main")
             self.assertEqual(run_record["base_oid"], base_oid)
             self.assertEqual(
