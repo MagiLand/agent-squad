@@ -1385,9 +1385,7 @@ def _assert_matching_state_value(
     else:
         actual = _require_string(value, f"state.{field}")
     if actual != expected:
-        raise RunStateError(
-            f"state {label} does not match active run metadata"
-        )
+        raise RunStateError(f"state {label} does not match run metadata")
 
 
 def _load_json_object(path: Path, label: str) -> dict[str, object]:
