@@ -285,7 +285,6 @@ class ActiveRunStatus:
     handoff_status: str | None
     review_worktree: str | None
     review_budget: ReviewBudget
-    next_action: str
 
 
 @dataclass(frozen=True)
@@ -498,7 +497,6 @@ def inspect_status(start: Path) -> RepositoryStatus:
             review_worktree=round_details.review_worktree,
             handoff_status=handoff_status,
             review_budget=budget,
-            next_action=next_action,
         ),
         next_action=next_action,
     )

@@ -176,7 +176,7 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         f"(original {budget.original_limit}, "
         f"additional {budget.additional_rounds_granted})"
     )
-    print(f"Next action: {run.next_action}")
+    print(f"Next action: {status.next_action}")
     return 0
 
 

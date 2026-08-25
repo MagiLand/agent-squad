@@ -579,6 +579,71 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     self.assertNotEqual(status.returncode, 0)
                     self.assertIn(message, status.stderr)
 
+    def test_released_terminal_state_allows_a_new_start(self) -> None:
+        for terminal_phase in ("completed", "cancelled"):
+            with self.subTest(terminal_phase=terminal_phase):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    temporary_root = Path(temporary_directory)
+                    repository = temporary_root / "repository"
+                    seed_git_repository(repository)
+                    data_home = temporary_root / "data"
+                    initialized = run_cli(
+                        repository,
+                        "init",
+                        data_home=data_home,
+                    )
+                    self.assertEqual(
+                        initialized.returncode,
+                        0,
+                        initialized.stderr,
+                    )
+                    task = temporary_root / "task.md"
+                    task.write_text("# Task\n", encoding="utf-8")
+                    start_arguments = (
+                        "start",
+                        "--task",
+                        str(task),
+                        "--base",
+                        "main",
+                    )
+                    first = run_cli(
+                        repository,
+                        *start_arguments,
+                        data_home=data_home,
+                    )
+                    self.assertEqual(first.returncode, 0, first.stderr)
+                    state_path = repository / ".agent-squad/state.json"
+                    state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    first_run_id = state["active_run_id"]
+                    state.update(
+                        active_run_id=None,
+                        phase=terminal_phase,
+                    )
+                    state_path.write_text(
+                        json.dumps(state),
+                        encoding="utf-8",
+                    )
+
+                    status = run_cli(
+                        repository,
+                        "status",
+                        data_home=data_home,
+                    )
+                    second = run_cli(
+                        repository,
+                        *start_arguments,
+                        data_home=data_home,
+                    )
+
+                    self.assertEqual(status.returncode, 0, status.stderr)
+                    self.assertIn("Active run: none", status.stdout)
+                    self.assertEqual(second.returncode, 0, second.stderr)
+                    runs_root = repository / ".agent-squad/runs"
+                    self.assertTrue((runs_root / first_run_id).is_dir())
+                    self.assertEqual(len(list(runs_root.iterdir())), 2)
+
     def test_status_rejects_invalid_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
