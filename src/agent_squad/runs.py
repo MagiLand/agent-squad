@@ -1097,9 +1097,7 @@ def _validate_event_log(
         )
 
 
-def _round_status_details(
-    value: object,
-) -> _RoundSummary:
+def _round_status_details(value: object) -> _RoundSummary:
     if value is None:
         return _RoundSummary(None, None, None)
     data = _require_object(value, "state.active_round")
@@ -1205,15 +1203,12 @@ def _capture_input(
     candidate = path if path.is_absolute() else invocation_directory / path
     try:
         resolved = candidate.resolve(strict=True)
+        not_regular_message = f"{label} must be a regular file: {resolved}"
         if not resolved.is_file():
-            raise RunStartError(
-                f"{label} must be a regular file: {resolved}"
-            )
+            raise RunStartError(not_regular_message)
         with resolved.open("rb") as input_file:
             if not stat.S_ISREG(os.fstat(input_file.fileno()).st_mode):
-                raise RunStartError(
-                    f"{label} must be a regular file: {resolved}"
-                )
+                raise RunStartError(not_regular_message)
             content = input_file.read()
     except RunStartError:
         raise

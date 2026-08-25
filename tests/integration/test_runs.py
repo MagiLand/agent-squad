@@ -582,9 +582,7 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     self.assertNotEqual(status.returncode, 0)
                     self.assertIn(message, status.stderr)
 
-    def test_status_rejects_invalid_run_metadata(
-        self,
-    ) -> None:
+    def test_status_rejects_invalid_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             repository = temporary_root / "repository"
