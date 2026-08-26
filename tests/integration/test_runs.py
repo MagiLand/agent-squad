@@ -777,8 +777,8 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 ),
                 (
                     "object format",
-                    "run record.git_object_format must be sha1 or sha256: "
-                    "'sha512'",
+                    "error: run record.git_object_format must be sha1 or "
+                    "sha256: 'sha512'",
                 ),
             )
             for case, message in cases:

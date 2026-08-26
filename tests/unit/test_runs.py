@@ -53,6 +53,21 @@ def _handoff() -> HandoffRecord:
     )
 
 
+def _active_state_arguments(**overrides: object) -> dict[str, object]:
+    arguments: dict[str, object] = {
+        "phase": runs.RunPhase.REVIEWING,
+        "current_round": 1,
+        "current_head_oid": "a" * 40,
+        "approved_head_oid": None,
+        "active_escalation_id": None,
+        "active_round": _active_round(),
+        "handoff": _handoff(),
+        "object_format": "sha1",
+    }
+    arguments.update(overrides)
+    return arguments
+
+
 class ReviewBudgetTests(unittest.TestCase):
     def test_initial_budget_round_trips(self) -> None:
         budget = runs.ReviewBudget.initial(4)
@@ -479,28 +494,17 @@ class RunArtifactValidationTests(unittest.TestCase):
             "must record an active round",
         ):
             runs._validate_active_state_shape(
-                phase=runs.RunPhase.REVIEWING,
-                current_round=1,
-                current_head_oid="a" * 40,
-                approved_head_oid=None,
-                active_escalation_id=None,
-                active_round=None,
-                handoff=None,
-                object_format="sha1",
+                **_active_state_arguments(
+                    active_round=None,
+                    handoff=None,
+                )
             )
 
     def test_reviewing_state_returns_the_validated_active_round(self) -> None:
         active_round = _active_round()
 
         result = runs._validate_active_state_shape(
-            phase=runs.RunPhase.REVIEWING,
-            current_round=1,
-            current_head_oid="a" * 40,
-            approved_head_oid=None,
-            active_escalation_id=None,
-            active_round=active_round,
-            handoff=_handoff(),
-            object_format="sha1",
+            **_active_state_arguments(active_round=active_round)
         )
 
         self.assertIs(result, active_round)
@@ -511,24 +515,17 @@ class RunArtifactValidationTests(unittest.TestCase):
         oid = "a" * 40
         reviewing_round = _active_round()
         handoff = _handoff()
-        valid_reviewing = {
-            "phase": runs.RunPhase.REVIEWING,
-            "current_round": 1,
-            "current_head_oid": oid,
-            "approved_head_oid": None,
-            "active_escalation_id": None,
-            "active_round": reviewing_round,
-            "handoff": handoff,
-            "object_format": "sha1",
-        }
-        unused_implementing = {
-            **valid_reviewing,
-            "phase": runs.RunPhase.IMPLEMENTING,
-            "current_round": 0,
-            "current_head_oid": None,
-            "active_round": None,
-            "handoff": None,
-        }
+        valid_reviewing = _active_state_arguments(
+            active_round=reviewing_round,
+            handoff=handoff,
+        )
+        unused_implementing = _active_state_arguments(
+            phase=runs.RunPhase.IMPLEMENTING,
+            current_round=0,
+            current_head_oid=None,
+            active_round=None,
+            handoff=None,
+        )
         cases = (
             (
                 "unused implementing head",
@@ -539,6 +536,12 @@ class RunArtifactValidationTests(unittest.TestCase):
             (
                 "unused implementing active records",
                 {**unused_implementing, "active_round": reviewing_round},
+                "an unused implementing run must have no active round or "
+                "handoff",
+            ),
+            (
+                "unused implementing handoff",
+                {**unused_implementing, "handoff": handoff},
                 "an unused implementing run must have no active round or "
                 "handoff",
             ),
@@ -623,14 +626,10 @@ class RunArtifactValidationTests(unittest.TestCase):
             "must record a closed active round",
         ):
             runs._validate_active_state_shape(
-                phase=runs.RunPhase.IMPLEMENTING,
-                current_round=1,
-                current_head_oid="a" * 40,
-                approved_head_oid=None,
-                active_escalation_id=None,
-                active_round=_active_round(),
-                handoff=_handoff(),
-                object_format="sha1",
+                **_active_state_arguments(
+                    phase=runs.RunPhase.IMPLEMENTING,
+                    active_round=_active_round(),
+                )
             )
 
         cases = (
@@ -657,25 +656,20 @@ class RunArtifactValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._validate_active_state_shape(
-                        phase=runs.RunPhase.IMPLEMENTING,
-                        current_round=1,
-                        current_head_oid=current_head,
-                        approved_head_oid=approved_head,
-                        active_escalation_id=escalation_id,
-                        active_round=_active_round(RoundStatus.APPLIED),
-                        handoff=_handoff(),
-                        object_format="sha1",
+                        **_active_state_arguments(
+                            phase=runs.RunPhase.IMPLEMENTING,
+                            current_head_oid=current_head,
+                            approved_head_oid=approved_head,
+                            active_escalation_id=escalation_id,
+                            active_round=_active_round(RoundStatus.APPLIED),
+                        )
                     )
 
         result = runs._validate_active_state_shape(
-            phase=runs.RunPhase.IMPLEMENTING,
-            current_round=1,
-            current_head_oid="a" * 40,
-            approved_head_oid=None,
-            active_escalation_id=None,
-            active_round=_active_round(RoundStatus.APPLIED),
-            handoff=_handoff(),
-            object_format="sha1",
+            **_active_state_arguments(
+                phase=runs.RunPhase.IMPLEMENTING,
+                active_round=_active_round(RoundStatus.APPLIED),
+            )
         )
         self.assertIsNone(result)
 
