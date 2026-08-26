@@ -15,7 +15,10 @@ from agent_squad.artifacts import (  # noqa: E402
     HandoffRecord,
     HandoffStatus,
     ReviewRequest,
+    ReviewerLocalMarker,
+    ReviewResult,
     ReviewRoundRecord,
+    ReviewVerdict,
     RoundStatus,
     SubmissionMode,
 )
@@ -121,6 +124,50 @@ def _round_record() -> dict[str, object]:
             ],
         },
         "warnings": ["captured instruction warning"],
+    }
+
+
+def _review_result() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T12:30:00Z",
+        "result_id": "abcdefab-1234-5678-9234-567812345678",
+        "request_id": "12345678-1234-5678-9234-567812345678",
+        "run_id": "87654321-4321-6789-a234-678912345678",
+        "round": 1,
+        "base_oid": "a" * 40,
+        "head_oid": "b" * 40,
+        "verdict": "changes_requested",
+        "summary": "One correctness issue blocks approval.",
+        "findings": [
+            {
+                "id": "REV-001",
+                "severity": "high",
+                "blocking": True,
+                "category": "correctness",
+                "file": "src/example.py",
+                "line_start": 4,
+                "line_end": 7,
+                "problem": "Empty input bypasses the fallback.",
+                "evidence": "The early return runs first.",
+                "impact": "The result is incorrect.",
+                "required_change": "Handle empty input first.",
+                "verification": "Add an empty-input regression test.",
+            }
+        ],
+        "non_blocking_observations": ["Consider a shorter helper name."],
+    }
+
+
+def _review_marker() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "submitted_at": "2026-08-25T12:31:00Z",
+        "request_id": "12345678-1234-5678-9234-567812345678",
+        "result_id": "abcdefab-1234-5678-9234-567812345678",
+        "status": "result_submitted",
+        "review_json_path": "output/review.json",
+        "review_sha256": "f" * 64,
     }
 
 
@@ -357,6 +404,133 @@ class ReviewRequestTests(unittest.TestCase):
             "duplicate paths",
         ):
             ReviewRequest.from_dict(data)
+
+
+class ReviewResultTests(unittest.TestCase):
+    def test_all_verdicts_round_trip_with_semantic_rules(self) -> None:
+        cases = (
+            ("changes_requested", _review_result()["findings"]),
+            ("approved", []),
+            ("needs_human", []),
+        )
+        for verdict, findings in cases:
+            with self.subTest(verdict=verdict):
+                data = _review_result()
+                data["verdict"] = verdict
+                data["findings"] = findings
+                if verdict == "needs_human":
+                    data["summary"] = "Decide whether compatibility wins."
+
+                result = ReviewResult.from_dict(
+                    data,
+                    object_format="sha1",
+                )
+
+                self.assertEqual(result.to_dict(), data)
+                self.assertIs(result.verdict, ReviewVerdict(verdict))
+
+    def test_result_rejects_invalid_structure_and_semantics(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                lambda data: data.update(result_id="not-a-uuid"),
+                "canonical UUID",
+            ),
+            (
+                lambda data: data.update(result_id=data["request_id"]),
+                "must be distinct",
+            ),
+            (
+                lambda data: data["findings"][0].update(blocking=1),
+                "must be a boolean",
+            ),
+            (
+                lambda data: data["findings"][0].update(
+                    line_start=8,
+                    line_end=7,
+                ),
+                "line_end must be at least",
+            ),
+            (
+                lambda data: data["findings"][0].update(file="../secret"),
+                "repository-relative path",
+            ),
+            (
+                lambda data: data["findings"].append(
+                    copy.deepcopy(data["findings"][0])
+                ),
+                "duplicate finding IDs",
+            ),
+            (
+                lambda data: data.update(verdict="approved"),
+                "cannot contain blocking findings",
+            ),
+            (
+                lambda data: (
+                    data.update(verdict="changes_requested"),
+                    data.update(findings=[]),
+                ),
+                "must contain at least one blocking finding",
+            ),
+            (
+                lambda data: data.update(summary="  \n"),
+                "non-whitespace text",
+            ),
+            (
+                lambda data: data.update(
+                    non_blocking_observations=[{"note": "optional"}]
+                ),
+                "must be a non-empty string",
+            ),
+            (
+                lambda data: data.update(unexpected=True),
+                "unknown field",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = copy.deepcopy(_review_result())
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewResult.from_dict(data, object_format="sha1")
+
+
+class ReviewerLocalMarkerTests(unittest.TestCase):
+    def test_marker_round_trips(self) -> None:
+        marker = ReviewerLocalMarker.from_dict(_review_marker())
+
+        self.assertEqual(marker.to_dict(), _review_marker())
+
+    def test_marker_rejects_invalid_status_path_and_digest(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(status="draft"),
+                "status must be result_submitted",
+            ),
+            (
+                lambda data: data.update(review_json_path="../review.json"),
+                "bundle-relative path",
+            ),
+            (
+                lambda data: data.update(review_sha256="A" * 64),
+                "lowercase SHA-256",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = _review_marker()
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewerLocalMarker.from_dict(data)
 
 
 if __name__ == "__main__":

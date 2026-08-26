@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .artifacts import HandoffStatus, SubmissionMode
 from .initialization import AgentKind, AgentSquadError, initialize_repository
+from .review_submissions import submit_review_result
 from .runs import inspect_status, start_run
 from .submissions import submit_candidate
 
@@ -121,6 +122,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     submit_parser.set_defaults(handler=_run_submit)
+
+    review_submit_parser = commands.add_parser(
+        "review-submit",
+        help="validate and submit one Reviewer result",
+        description=(
+            "Run from the detached review worktree, validate the exact "
+            "request, revision, bundle, and review artifacts, persist the "
+            "Reviewer-local result marker, then notify the Implementer."
+        ),
+    )
+    review_submit_parser.set_defaults(handler=_run_review_submit)
     return parser
 
 
@@ -260,6 +272,35 @@ def _run_submit(arguments: argparse.Namespace) -> int:
         )
         return 1
     print("Next action: wait for the Reviewer result")
+    return 0
+
+
+def _run_review_submit(_arguments: argparse.Namespace) -> int:
+    result = submit_review_result(_invocation_directory())
+    marker_action = "created" if result.marker_created else "reused"
+    print(
+        f"Marker-confirmed review result {result.result_id} for run "
+        f"{result.run_id}"
+    )
+    print(f"Round: {result.round_number}")
+    print(f"Revision: {result.head_oid}")
+    print(f"Verdict: {result.verdict.value}")
+    print(f"Reviewer-local marker {marker_action}: {result.marker_path}")
+    if not result.notification_sent:
+        print("Result notification: failed")
+        print(
+            "The marker-confirmed result remains valid and can be "
+            "rediscovered or sent again.",
+            file=sys.stderr,
+        )
+        print(
+            "agent-squad: error: review result notification failed: "
+            f"{result.notification_error}",
+            file=sys.stderr,
+        )
+        return 1
+    print("Result notification: sent")
+    print("Next action: wait for the Implementer to apply the result")
     return 0
 
 
