@@ -12,10 +12,14 @@ add_src_to_path()
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
     ArtifactValidationError,
+    HandoffRecord,
+    HandoffStatus,
     ReviewRequest,
+    ReviewRoundRecord,
     RoundStatus,
     SubmissionMode,
 )
+from agent_squad.initialization import AgentKind  # noqa: E402
 
 
 def _request() -> dict[str, object]:
@@ -64,6 +68,62 @@ def _active_round() -> dict[str, object]:
     }
 
 
+def _handoff() -> dict[str, object]:
+    return {
+        "kind": "review_request",
+        "round": 1,
+        "status": "sent",
+        "target": "asq-12345678-r001-reviewer",
+        "last_error": None,
+        "updated_at": "2026-08-25T12:00:00Z",
+        "herdr_version": "herdr test",
+        "herdr_protocol": 20,
+    }
+
+
+def _round_record() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T12:00:00Z",
+        "updated_at": "2026-08-25T12:00:00Z",
+        "run_id": "87654321-4321-6789-a234-678912345678",
+        "round": 1,
+        "mode": "new_revision",
+        "request_id": "12345678-1234-5678-9234-567812345678",
+        "result_id": None,
+        "base_oid": "a" * 40,
+        "head_oid": "b" * 40,
+        "git_object_format": "sha1",
+        "status": "reviewing",
+        "review_worktree": "/tmp/review",
+        "reviewer": {
+            "name": "asq-87654321-r001-reviewer",
+            "kind": "claude",
+            "start_args": ["--strict"],
+        },
+        "artifacts": {
+            "request": {"path": "request.json", "sha256": "f" * 64},
+            "implementation_report": {
+                "path": "implementation-report.md",
+                "sha256": "d" * 64,
+            },
+            "bundle_inputs": [
+                {"path": "input/request.json", "sha256": "f" * 64},
+                {"path": "input/task.md", "sha256": "c" * 64},
+                {
+                    "path": "input/implementation-report.md",
+                    "sha256": "d" * 64,
+                },
+                {
+                    "path": "input/context/001/notes.md",
+                    "sha256": "e" * 64,
+                },
+            ],
+        },
+        "warnings": ["captured instruction warning"],
+    }
+
+
 class ActiveRoundRecordTests(unittest.TestCase):
     def test_record_round_trips_with_typed_fields(self) -> None:
         record = ActiveRoundRecord.from_dict(_active_round())
@@ -106,6 +166,97 @@ class ActiveRoundRecordTests(unittest.TestCase):
                     message,
                 ):
                     ActiveRoundRecord.from_dict(data)
+
+
+class HandoffRecordTests(unittest.TestCase):
+    def test_record_round_trips_with_typed_fields(self) -> None:
+        record = HandoffRecord.from_dict(_handoff())
+
+        self.assertEqual(record.to_dict(), _handoff())
+        self.assertIs(record.status, HandoffStatus.SENT)
+        self.assertEqual(record.herdr_protocol, 20)
+
+    def test_record_rejects_invalid_delivery_state(self) -> None:
+        cases = (
+            (lambda data: data.update(round=0), "round must be positive"),
+            (lambda data: data.update(status="unknown"), "must be one of"),
+            (
+                lambda data: data.update(status="failed", last_error=None),
+                "last_error is required",
+            ),
+            (
+                lambda data: data.update(herdr_protocol=None),
+                "sent handoff must record",
+            ),
+            (
+                lambda data: data.update(target="Reviewer Name"),
+                "valid Herdr agent name",
+            ),
+            (lambda data: data.update(unexpected=True), "unknown field"),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = _handoff()
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    HandoffRecord.from_dict(data)
+
+
+class ReviewRoundRecordTests(unittest.TestCase):
+    def test_writer_and_reader_share_one_typed_round_record(self) -> None:
+        request = ReviewRequest.from_dict(_request())
+        written = ReviewRoundRecord.for_request(
+            request,
+            review_worktree=Path("/tmp/review"),
+            reviewer_start_args=("--strict",),
+            request_digest="f" * 64,
+            warnings=("captured instruction warning",),
+        )
+
+        self.assertEqual(written.to_dict(), _round_record())
+        read = ReviewRoundRecord.from_dict(
+            written.to_dict(),
+            label="round record",
+        )
+        self.assertEqual(read, written)
+        self.assertIs(read.reviewer_kind, AgentKind.CLAUDE)
+        self.assertIs(read.status, RoundStatus.REVIEWING)
+
+    def test_record_rejects_invalid_shape_and_nested_values(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (lambda data: data.update(round=0), "round must be positive"),
+            (
+                lambda data: data["reviewer"].update(name="Reviewer Name"),
+                "valid Herdr agent name",
+            ),
+            (
+                lambda data: data["artifacts"]["request"].update(
+                    path="input/request.json"
+                ),
+                "request artifact path must be request.json",
+            ),
+            (
+                lambda data: data.update(warnings=[""]),
+                "must be a non-empty string",
+            ),
+            (lambda data: data.update(unexpected=True), "unknown field"),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = copy.deepcopy(_round_record())
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(data, label="round record")
 
 
 class ReviewRequestTests(unittest.TestCase):

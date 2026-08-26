@@ -18,8 +18,10 @@ from .artifacts import (
     ActiveRoundRecord,
     ArtifactValidationError,
     BundleArtifact,
+    HandoffRecord,
     HandoffStatus,
     ReviewRequest,
+    ReviewRoundRecord,
     RoundStatus,
     SubmissionMode,
 )
@@ -28,7 +30,6 @@ from .initialization import (
     AgentSquadError,
     GitWorktree,
     InitializedRepository,
-    SCHEMA_VERSION,
     load_initialized_repository,
     run_git,
 )
@@ -199,8 +200,8 @@ def _prepare_submission_locked(
     if (
         active.current_round != 0
         or active.current_head_oid is not None
-        or active.round_status is not None
-        or active.handoff_status is not None
+        or active.active_round is not None
+        or active.handoff is not None
     ):
         raise SubmissionError(
             "the first submission requires an unused run with no existing "
@@ -307,7 +308,7 @@ def _prepare_submission_locked(
         error=None,
         installation=None,
     )
-    round_record = _new_round_record(
+    round_record = ReviewRoundRecord.for_request(
         request=request,
         review_worktree=review_worktree,
         reviewer_start_args=active.reviewer_start_args,
@@ -350,7 +351,7 @@ def _prepare_submission_locked(
         )
         atomic_write(
             staging_directory / ROUND_RECORD_FILE_NAME,
-            encode_json(round_record),
+            encode_json(round_record.to_dict()),
             mode=0o600,
         )
 
@@ -411,7 +412,7 @@ def _prepare_submission_locked(
             current_head_oid=head_oid,
             approved_head_oid=None,
             active_round=active_round.to_dict(),
-            handoff=pending_handoff,
+            handoff=pending_handoff.to_dict(),
         )
 
         staging_directory.replace(round_directory)
@@ -548,7 +549,7 @@ def _record_handoff(
 
     next_state = copy.deepcopy(state)
     next_state["updated_at"] = timestamp
-    next_state["handoff"] = handoff
+    next_state["handoff"] = handoff.to_dict()
     try:
         atomic_write(state_path, encode_json(next_state), mode=0o600)
     except OSError as write_error:
@@ -1020,7 +1021,10 @@ def _build_review_bundle(
         run_relative = PurePosixPath(*relative.parts[1:])
         source = run_directory.joinpath(*run_relative.parts)
         destination = bundle_root.joinpath(*relative.parts)
-        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory = bundle_root
+        for part in relative.parts[:-1]:
+            directory /= part
+            directory.mkdir(mode=0o700, exist_ok=True)
         atomic_write(destination, _read_file(source), mode=0o400)
 
     authoritative_request = staging_directory / REQUEST_FILE_NAME
@@ -1139,59 +1143,6 @@ def _verify_bundle_file(
         raise SubmissionError(f"review-bundle input digest mismatch: {path}")
 
 
-def _new_round_record(
-    *,
-    request: ReviewRequest,
-    review_worktree: Path,
-    reviewer_start_args: tuple[str, ...],
-    request_digest: str,
-    warnings: tuple[str, ...],
-) -> dict[str, object]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "created_at": request.created_at,
-        "updated_at": request.created_at,
-        "run_id": request.run_id,
-        "round": request.round_number,
-        "mode": request.mode.value,
-        "request_id": request.request_id,
-        "result_id": None,
-        "base_oid": request.base_oid,
-        "head_oid": request.head_oid,
-        "git_object_format": request.object_format,
-        "status": RoundStatus.REVIEWING.value,
-        "review_worktree": str(review_worktree),
-        "reviewer": {
-            "name": request.reviewer_name,
-            "kind": request.reviewer_kind.value,
-            "start_args": list(reviewer_start_args),
-        },
-        "artifacts": {
-            "request": {
-                "path": REQUEST_FILE_NAME,
-                "sha256": request_digest,
-            },
-            "implementation_report": {
-                "path": IMPLEMENTATION_REPORT_FILE_NAME,
-                "sha256": request.implementation_report.sha256,
-            },
-            "bundle_inputs": [
-                {
-                    "path": "input/request.json",
-                    "sha256": request_digest,
-                },
-                request.task.to_dict(),
-                request.implementation_report.to_dict(),
-                *[
-                    artifact.to_dict()
-                    for artifact in request.context_files
-                ],
-            ],
-        },
-        "warnings": list(warnings),
-    }
-
-
 def _handoff_record(
     *,
     round_number: int,
@@ -1200,21 +1151,20 @@ def _handoff_record(
     timestamp: str,
     error: str | None,
     installation: HerdrInstallation | None,
-) -> dict[str, object]:
-    return {
-        "kind": "review_request",
-        "round": round_number,
-        "status": status.value,
-        "target": target,
-        "last_error": error,
-        "updated_at": timestamp,
-        "herdr_version": (
+) -> HandoffRecord:
+    return HandoffRecord(
+        round_number=round_number,
+        status=status,
+        target=target,
+        last_error=error,
+        updated_at=timestamp,
+        herdr_version=(
             installation.version if installation is not None else None
         ),
-        "herdr_protocol": (
+        herdr_protocol=(
             installation.protocol if installation is not None else None
         ),
-    }
+    )
 
 
 def _review_request_prompt(prepared: _PreparedSubmission) -> str:

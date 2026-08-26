@@ -170,7 +170,7 @@ class ProtocolValueValidationTests(unittest.TestCase):
         self.assertEqual(
             runs._next_action(
                 runs.RunPhase.REVIEWING,
-                handoff_status="failed",
+                handoff_status=runs.HandoffStatus.FAILED,
             ),
             "recover the preserved review-request handoff",
         )
@@ -443,51 +443,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 label="Git common directory",
             )
 
-    def test_handoff_details_validate_delivery_invariants(self) -> None:
-        valid = {
-            "kind": "review_request",
-            "round": 1,
-            "status": "sent",
-            "target": "asq-123456781234-r001-reviewer",
-            "last_error": None,
-            "updated_at": "2026-08-25T12:00:00Z",
-            "herdr_version": "herdr test",
-            "herdr_protocol": 20,
-        }
-        handoff = runs._handoff_details(valid)
-        self.assertEqual(handoff.status, "sent")
-        self.assertEqual(handoff.herdr_protocol, 20)
-
-        cases = (
-            ({**valid, "status": "unknown"}, "must be one of"),
-            (
-                {**valid, "status": "failed", "last_error": None},
-                "last_error is required",
-            ),
-            (
-                {**valid, "herdr_protocol": None},
-                "sent handoff must record",
-            ),
-            (
-                {**valid, "target": "Reviewer Name"},
-                "valid Herdr agent name",
-            ),
-        )
-        for value, message in cases:
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(runs.RunStateError, message):
-                    runs._handoff_details(value)
-
     def test_reviewing_state_requires_an_active_round_record(self) -> None:
-        handoff = runs._HandoffSummary(
-            round_number=1,
-            status="sent",
-            target="asq-12345678-r001-reviewer",
-            last_error=None,
-            herdr_version="herdr test",
-            herdr_protocol=20,
-        )
-
         with self.assertRaisesRegex(
             runs.RunStateError,
             "must record an active round",
@@ -499,7 +455,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 approved_head_oid=None,
                 active_escalation_id=None,
                 active_round=None,
-                handoff=handoff,
+                handoff=None,
                 object_format="sha1",
             )
 

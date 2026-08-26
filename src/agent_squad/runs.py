@@ -17,9 +17,10 @@ from .artifacts import (
     ActiveRoundRecord,
     ArtifactValidationError,
     BundleArtifact,
+    HandoffRecord,
     HandoffStatus,
-    REVIEWER_NAME_PATTERN,
     ReviewRequest,
+    ReviewRoundRecord,
     RoundStatus,
 )
 from .initialization import (
@@ -258,18 +259,6 @@ class _ValidatedRunRecord:
 
 
 @dataclass(frozen=True)
-class _HandoffSummary:
-    """Validated current request-handoff details."""
-
-    round_number: int | None
-    status: str | None
-    target: str | None
-    last_error: str | None
-    herdr_version: str | None
-    herdr_protocol: int | None
-
-
-@dataclass(frozen=True)
 class StartRunResult:
     """Stable details returned after a run reaches its commit point."""
 
@@ -305,14 +294,8 @@ class ActiveRunStatus:
     current_head_oid: str | None
     approved_head_oid: str | None
     active_escalation_id: str | None
-    round_status: str | None
-    submission_mode: str | None
-    request_id: str | None
-    reviewer_name: str | None
-    handoff_status: str | None
-    handoff_target: str | None
-    handoff_error: str | None
-    review_worktree: Path | None
+    active_round: ActiveRoundRecord | None
+    handoff: HandoffRecord | None
     review_worktree_available: bool | None
     review_budget: ReviewBudget
 
@@ -477,15 +460,20 @@ def _inspect_status(
         state["active_escalation_id"], "state.active_escalation_id"
     )
     active_round_value = state["active_round"]
+    handoff_value = state["handoff"]
     try:
         active_round = (
             None
             if active_round_value is None
             else ActiveRoundRecord.from_dict(active_round_value)
         )
+        handoff = (
+            None
+            if handoff_value is None
+            else HandoffRecord.from_dict(handoff_value)
+        )
     except ArtifactValidationError as error:
         raise RunStateError(str(error)) from error
-    handoff = _handoff_details(state["handoff"])
 
     run_directory = safe_run_directory(repository.control_root, active_run_id)
     run_record_path = run_directory / RUN_RECORD_FILE_NAME
@@ -550,7 +538,10 @@ def _inspect_status(
     )
     review_worktree_available: bool | None = None
     if phase is RunPhase.REVIEWING:
-        assert active_round is not None
+        if active_round is None:
+            raise RunStateError(
+                "a reviewing run must record an active round"
+            )
         review_worktree_available = _validate_active_review_artifacts(
             run_directory=run_directory,
             record=record,
@@ -559,7 +550,10 @@ def _inspect_status(
             current_head_oid=current_head_oid,
             active_round=active_round,
         )
-    next_action = _next_action(phase, handoff_status=handoff.status)
+    next_action = _next_action(
+        phase,
+        handoff_status=handoff.status if handoff is not None else None,
+    )
     return RepositoryStatus(
         repository_root=current_identity.implementation_root,
         repository_id=current_identity.repository_id,
@@ -583,29 +577,9 @@ def _inspect_status(
             current_head_oid=current_head_oid,
             approved_head_oid=approved_head_oid,
             active_escalation_id=active_escalation_id,
-            round_status=(
-                active_round.status.value if active_round is not None else None
-            ),
-            submission_mode=(
-                active_round.mode.value if active_round is not None else None
-            ),
-            request_id=(
-                active_round.request_id if active_round is not None else None
-            ),
-            reviewer_name=(
-                active_round.reviewer_name
-                if active_round is not None
-                else None
-            ),
-            review_worktree=(
-                active_round.review_worktree
-                if active_round is not None
-                else None
-            ),
+            active_round=active_round,
+            handoff=handoff,
             review_worktree_available=review_worktree_available,
-            handoff_status=handoff.status,
-            handoff_target=handoff.target,
-            handoff_error=handoff.last_error,
             review_budget=budget,
         ),
         next_action=next_action,
@@ -1220,113 +1194,27 @@ def _validate_active_review_artifacts(
             "active round directory must be a non-symlink directory: "
             f"{round_directory}"
         )
-    round_record = load_json_object(
-        round_directory / "round.json",
-        "active round record",
-    )
-    _check_fields(
-        round_record,
-        required={
-            "schema_version",
-            "created_at",
-            "updated_at",
-            "run_id",
-            "round",
-            "mode",
-            "request_id",
-            "result_id",
-            "base_oid",
-            "head_oid",
-            "git_object_format",
-            "status",
-            "review_worktree",
-            "reviewer",
-            "artifacts",
-            "warnings",
-        },
-        path="active round record",
-    )
-    _validate_schema_version(round_record, "active round record")
-    _require_timestamp(
-        round_record["created_at"],
-        "active round record.created_at",
-    )
-    _require_timestamp(
-        round_record["updated_at"],
-        "active round record.updated_at",
-    )
+    try:
+        round_record = ReviewRoundRecord.from_dict(
+            load_json_object(
+                round_directory / "round.json",
+                "active round record",
+            ),
+            label="active round record",
+        )
+    except ArtifactValidationError as error:
+        raise RunStateError(str(error)) from error
     comparisons = (
+        (round_record.run_id, run_id, "run ID"),
+        (round_record.round_number, current_round, "round number"),
+        (round_record.mode, active_round.mode, "submission mode"),
+        (round_record.request_id, active_round.request_id, "request ID"),
+        (round_record.status, active_round.status, "round status"),
+        (round_record.object_format, record.object_format, "Git object format"),
+        (round_record.base_oid, record.base_oid, "base OID"),
+        (round_record.head_oid, current_head_oid, "head OID"),
         (
-            _require_uuid(
-                round_record["run_id"],
-                "active round record.run_id",
-            ),
-            run_id,
-            "run ID",
-        ),
-        (
-            _require_int(
-                round_record["round"],
-                "active round record.round",
-            ),
-            current_round,
-            "round number",
-        ),
-        (
-            _require_string(
-                round_record["mode"],
-                "active round record.mode",
-            ),
-            active_round.mode.value,
-            "submission mode",
-        ),
-        (
-            _require_uuid(
-                round_record["request_id"],
-                "active round record.request_id",
-            ),
-            active_round.request_id,
-            "request ID",
-        ),
-        (
-            _require_string(
-                round_record["status"],
-                "active round record.status",
-            ),
-            active_round.status.value,
-            "round status",
-        ),
-        (
-            _require_string(
-                round_record["git_object_format"],
-                "active round record.git_object_format",
-            ),
-            record.object_format,
-            "Git object format",
-        ),
-        (
-            _require_oid(
-                round_record["base_oid"],
-                record.object_format,
-                "active round record.base_oid",
-            ),
-            record.base_oid,
-            "base OID",
-        ),
-        (
-            _require_oid(
-                round_record["head_oid"],
-                record.object_format,
-                "active round record.head_oid",
-            ),
-            current_head_oid,
-            "head OID",
-        ),
-        (
-            _require_absolute_path(
-                round_record["review_worktree"],
-                "active round record.review_worktree",
-            ),
+            round_record.review_worktree,
             active_round.review_worktree,
             "review worktree",
         ),
@@ -1337,74 +1225,25 @@ def _validate_active_review_artifacts(
                 f"active round record {label} does not match state or run "
                 "metadata"
             )
-    if round_record["result_id"] is not None:
+    if round_record.result_id is not None:
         raise RunStateError(
             "a reviewing active round record must have no result ID"
         )
 
-    reviewer = _require_object(
-        round_record["reviewer"],
-        "active round record.reviewer",
-    )
-    _check_fields(
-        reviewer,
-        required={
-            "name",
-            "kind",
-            "start_args",
-        },
-        path="active round record.reviewer",
-    )
-    if reviewer["name"] != active_round.reviewer_name:
+    if round_record.reviewer_name != active_round.reviewer_name:
         raise RunStateError(
             "active round Reviewer name does not match state"
         )
-    if reviewer["kind"] != record.reviewer.kind.value:
+    if round_record.reviewer_kind is not record.reviewer.kind:
         raise RunStateError(
             "active round Reviewer kind does not match run metadata"
         )
-    if reviewer["start_args"] != list(record.reviewer.start_args):
+    if round_record.reviewer_start_args != record.reviewer.start_args:
         raise RunStateError(
             "active round Reviewer arguments do not match run metadata"
         )
-    warnings = round_record["warnings"]
-    if not isinstance(warnings, list) or not all(
-        isinstance(item, str) and item for item in warnings
-    ):
-        raise RunStateError(
-            "active round record.warnings must be an array of non-empty "
-            "strings"
-        )
-
-    artifacts = _require_object(
-        round_record["artifacts"],
-        "active round record.artifacts",
-    )
-    _check_fields(
-        artifacts,
-        required={
-            "request",
-            "implementation_report",
-            "bundle_inputs",
-        },
-        path="active round record.artifacts",
-    )
-    request_artifact = _round_artifact(
-        artifacts["request"],
-        "active round record.artifacts.request",
-    )
-    report_artifact = _round_artifact(
-        artifacts["implementation_report"],
-        "active round record.artifacts.implementation_report",
-    )
-    if request_artifact.path != "request.json":
-        raise RunStateError(
-            "active round request artifact path must be request.json"
-        )
-    if report_artifact.path != "implementation-report.md":
-        raise RunStateError(
-            "active round report path must be implementation-report.md"
-        )
+    request_artifact = round_record.request_artifact
+    report_artifact = round_record.implementation_report
     request_path = _captured_path(
         round_directory,
         request_artifact.path,
@@ -1452,21 +1291,7 @@ def _validate_active_review_artifacts(
         request.implementation_report,
         *request.context_files,
     )
-    bundle_values = artifacts["bundle_inputs"]
-    if not isinstance(bundle_values, list):
-        raise RunStateError(
-            "active round record.artifacts.bundle_inputs must be an array"
-        )
-    try:
-        bundle_inputs = tuple(
-            BundleArtifact.from_dict(
-                value,
-                label=f"active round bundle input {index}",
-            )
-            for index, value in enumerate(bundle_values)
-        )
-    except ArtifactValidationError as error:
-        raise RunStateError(str(error)) from error
+    bundle_inputs = round_record.bundle_inputs
     if bundle_inputs != expected_bundle_inputs:
         raise RunStateError(
             "active round bundle-input manifest does not match the request"
@@ -1494,15 +1319,6 @@ def _validate_active_review_artifacts(
             f"active review bundle input {artifact.path}",
         )
     return True
-
-
-def _round_artifact(value: object, label: str) -> BundleArtifact:
-    try:
-        return BundleArtifact.from_dict(value, label=label)
-    except ArtifactValidationError as error:
-        raise RunStateError(str(error)) from error
-
-
 def _assert_request_matches_active_round(
     *,
     request: ReviewRequest,
@@ -1575,85 +1391,6 @@ def _assert_request_matches_active_round(
         )
 
 
-def _handoff_details(value: object) -> _HandoffSummary:
-    if value is None:
-        return _HandoffSummary(None, None, None, None, None, None)
-    data = _require_object(value, "state.handoff")
-    _check_fields(
-        data,
-        required={
-            "kind",
-            "round",
-            "status",
-            "target",
-            "last_error",
-            "updated_at",
-            "herdr_version",
-            "herdr_protocol",
-        },
-        path="state.handoff",
-    )
-    if data["kind"] != "review_request":
-        raise RunStateError("state.handoff.kind must be review_request")
-    round_number = _require_nonnegative_int(
-        data["round"],
-        "state.handoff.round",
-    )
-    if round_number < 1:
-        raise RunStateError("state.handoff.round must be positive")
-    _require_timestamp(data["updated_at"], "state.handoff.updated_at")
-    version_value = data["herdr_version"]
-    version = (
-        None
-        if version_value is None
-        else _require_string(version_value, "state.handoff.herdr_version")
-    )
-    protocol_value = data["herdr_protocol"]
-    protocol = (
-        None
-        if protocol_value is None
-        else _require_int(protocol_value, "state.handoff.herdr_protocol")
-    )
-    if protocol is not None and protocol < 1:
-        raise RunStateError("state.handoff.herdr_protocol must be positive")
-    handoff_status = _VALIDATOR.require_enum(
-        data.get("status"),
-        "state.handoff.status",
-        HandoffStatus,
-    )
-    target = _require_string(data.get("target"), "state.handoff.target")
-    if REVIEWER_NAME_PATTERN.fullmatch(target) is None:
-        raise RunStateError(
-            "state.handoff.target must be a valid Herdr agent name"
-        )
-    last_error = _require_optional_string(
-        data.get("last_error"),
-        "state.handoff.last_error",
-    )
-    if handoff_status is HandoffStatus.FAILED and last_error is None:
-        raise RunStateError(
-            "state.handoff.last_error is required when handoff failed"
-        )
-    if handoff_status is not HandoffStatus.FAILED and last_error is not None:
-        raise RunStateError(
-            "state.handoff.last_error is allowed only when handoff failed"
-        )
-    if handoff_status is HandoffStatus.SENT and (
-        version is None or protocol is None
-    ):
-        raise RunStateError(
-            "a sent handoff must record Herdr version and protocol"
-        )
-    return _HandoffSummary(
-        round_number=round_number,
-        status=handoff_status.value,
-        target=target,
-        last_error=last_error,
-        herdr_version=version,
-        herdr_protocol=protocol,
-    )
-
-
 def _validate_active_state_shape(
     *,
     phase: RunPhase,
@@ -1662,7 +1399,7 @@ def _validate_active_state_shape(
     approved_head_oid: str | None,
     active_escalation_id: str | None,
     active_round: ActiveRoundRecord | None,
-    handoff: _HandoffSummary,
+    handoff: HandoffRecord | None,
     object_format: str,
 ) -> None:
     if current_head_oid is not None:
@@ -1681,7 +1418,7 @@ def _validate_active_state_shape(
                 "an unused implementing run must have no current round or "
                 "requested head"
             )
-        if active_round is not None or handoff.status is not None:
+        if active_round is not None or handoff is not None:
             raise RunStateError(
                 "an unused implementing run must have no active round or "
                 "handoff"
@@ -1712,6 +1449,8 @@ def _validate_active_state_shape(
         raise RunStateError(
             "a reviewing round cannot have an authoritative result ID"
         )
+    if handoff is None:
+        raise RunStateError("a reviewing run must record a handoff")
     if handoff.round_number != current_round:
         raise RunStateError(
             "state.handoff.round must match state.current_round"
@@ -1947,14 +1686,14 @@ def _idle_status(identity: RepositoryIdentity) -> RepositoryStatus:
 def _next_action(
     phase: RunPhase,
     *,
-    handoff_status: str | None = None,
+    handoff_status: HandoffStatus | None = None,
 ) -> str:
     if phase is RunPhase.IMPLEMENTING:
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:
-        if handoff_status == HandoffStatus.FAILED.value:
+        if handoff_status is HandoffStatus.FAILED:
             return "recover the preserved review-request handoff"
-        if handoff_status == HandoffStatus.PENDING.value:
+        if handoff_status is HandoffStatus.PENDING:
             return "finish or recover the pending review-request handoff"
         return "wait for the Reviewer result"
     raise RunStateError(

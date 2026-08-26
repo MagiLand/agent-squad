@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -21,7 +23,11 @@ from tests._support import (
 
 add_src_to_path()
 
-from agent_squad import submissions  # noqa: E402
+from agent_squad import runs, submissions  # noqa: E402
+from agent_squad.artifacts import (  # noqa: E402
+    ActiveRoundRecord,
+    HandoffRecord,
+)
 from agent_squad.herdr import HerdrInstallation  # noqa: E402
 
 
@@ -118,16 +124,20 @@ class SubmitCommandTests(unittest.TestCase):
             head_oid = _commit_candidate(repository)
             report_bytes = report.read_bytes()
 
-            submitted = run_cli(
-                repository,
-                "submit",
-                "--report",
-                str(report),
-                "--mode",
-                "new_revision",
-                data_home=data_home,
-                env_overrides=environment,
-            )
+            original_umask = os.umask(0o022)
+            try:
+                submitted = run_cli(
+                    repository,
+                    "submit",
+                    "--report",
+                    str(report),
+                    "--mode",
+                    "new_revision",
+                    data_home=data_home,
+                    env_overrides=environment,
+                )
+            finally:
+                os.umask(original_umask)
 
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             state, run_directory = _artifacts(repository)
@@ -136,6 +146,16 @@ class SubmitCommandTests(unittest.TestCase):
             self.assertEqual(state["current_head_oid"], head_oid)
             self.assertEqual(state["handoff"]["status"], "sent")
             self.assertEqual(state["handoff"]["herdr_protocol"], 20)
+            inspected = runs.inspect_status(repository)
+            active_status = inspected.active_run
+            self.assertIsNotNone(active_status)
+            if active_status is None:
+                self.fail("submitted run must remain active")
+            self.assertIsInstance(
+                active_status.active_round,
+                ActiveRoundRecord,
+            )
+            self.assertIsInstance(active_status.handoff, HandoffRecord)
             active_round = state["active_round"]
             request_id = active_round["request_id"]
             review_worktree = Path(active_round["review_worktree"])
@@ -181,6 +201,18 @@ class SubmitCommandTests(unittest.TestCase):
             self.assertFalse(Path(request["task"]["path"]).is_absolute())
 
             bundle = review_worktree / ".agent-squad-review"
+            for directory in (
+                bundle,
+                bundle / "input",
+                bundle / "input/context",
+                bundle / "input/context/001",
+                bundle / "output",
+            ):
+                with self.subTest(directory=directory):
+                    self.assertEqual(
+                        stat.S_IMODE(directory.stat().st_mode),
+                        0o700,
+                    )
             self.assertEqual(
                 (bundle / "input/request.json").read_bytes(),
                 request_bytes,

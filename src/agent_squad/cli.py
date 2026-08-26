@@ -191,19 +191,39 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         "Current round: "
         f"{run.current_round if run.current_round else 'none'}"
     )
-    print(f"Round status: {run.round_status or 'none'}")
-    print(f"Submission mode: {run.submission_mode or 'none'}")
-    print(f"Request ID: {run.request_id or 'none'}")
-    print(f"Reviewer session: {run.reviewer_name or 'none'}")
+    active_round = run.active_round
+    print(
+        "Round status: "
+        f"{active_round.status.value if active_round else 'none'}"
+    )
+    print(
+        "Submission mode: "
+        f"{active_round.mode.value if active_round else 'none'}"
+    )
+    print(
+        "Request ID: "
+        f"{active_round.request_id if active_round else 'none'}"
+    )
+    print(
+        "Reviewer session: "
+        f"{active_round.reviewer_name if active_round else 'none'}"
+    )
     print(f"Current requested head: {run.current_head_oid or 'none'}")
     print(f"Approved head: {run.approved_head_oid or 'none'}")
     print(f"Active escalation: {run.active_escalation_id or 'none'}")
-    print(f"Request handoff: {run.handoff_status or 'none'}")
-    if run.handoff_target is not None:
-        print(f"Request handoff target: {run.handoff_target}")
-    if run.handoff_error is not None:
-        print(f"Request handoff error: {run.handoff_error}")
-    print(f"Review worktree: {run.review_worktree or 'none'}")
+    handoff = run.handoff
+    print(
+        "Request handoff: "
+        f"{handoff.status.value if handoff else 'none'}"
+    )
+    if handoff is not None:
+        print(f"Request handoff target: {handoff.target}")
+        if handoff.last_error is not None:
+            print(f"Request handoff error: {handoff.last_error}")
+    print(
+        "Review worktree: "
+        f"{active_round.review_worktree if active_round else 'none'}"
+    )
     if run.review_worktree_available is not None:
         availability = "yes" if run.review_worktree_available else "no"
         print(f"Review worktree available: {availability}")
