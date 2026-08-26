@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -26,6 +27,26 @@ def decode_json(content: str) -> object:
         )
     except (json.JSONDecodeError, _DuplicateKeyError) as error:
         raise InvalidJsonError(str(error)) from error
+
+
+def utc_timestamp() -> str:
+    """Return the current time as a stable RFC 3339 UTC timestamp."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def encode_json(value: dict[str, object]) -> bytes:
+    """Encode one authoritative JSON object using the canonical format."""
+
+    return f"{json.dumps(value, indent=2)}\n".encode("utf-8")
+
+
+def encode_event(value: dict[str, object]) -> bytes:
+    """Encode one compact JSON Lines event record."""
+
+    return f"{json.dumps(value, separators=(',', ':'))}\n".encode("utf-8")
 
 
 def atomic_write(path: Path, content: bytes, *, mode: int) -> None:

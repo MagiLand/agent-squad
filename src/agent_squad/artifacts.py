@@ -3,25 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 import re
-import uuid
 
 from .initialization import AgentKind, SCHEMA_VERSION
+from .validation import JsonValidator, OID_LENGTHS
 
 
-OID_LENGTHS = {"sha1": 40, "sha256": 64}
-SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-TIMESTAMP_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
-)
 REVIEWER_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 class ArtifactValidationError(ValueError):
     """Raised when a protocol artifact does not satisfy its contract."""
+
+
+_VALIDATOR = JsonValidator(ArtifactValidationError)
+_require_object = _VALIDATOR.require_object
+_require_string = _VALIDATOR.require_string
+_require_int = _VALIDATOR.require_int
+_require_uuid = _VALIDATOR.require_uuid
+_require_digest = _VALIDATOR.require_digest
+_require_oid = _VALIDATOR.require_oid
+_require_timestamp = _VALIDATOR.require_timestamp
 
 
 class SubmissionMode(StrEnum):
@@ -67,7 +71,11 @@ class BundleArtifact:
         """Validate one serialized bundle artifact."""
 
         data = _require_object(value, label)
-        _check_fields(data, required={"path", "sha256"}, label=label)
+        _VALIDATOR.check_fields(
+            data,
+            required={"path", "sha256"},
+            path=label,
+        )
         return cls(
             path=_require_bundle_path(data["path"], f"{label}.path"),
             sha256=_require_digest(data["sha256"], f"{label}.sha256"),
@@ -109,7 +117,7 @@ class ReviewRequest:
         """Validate and construct a review request from decoded JSON."""
 
         data = _require_object(value, "review request")
-        _check_fields(
+        _VALIDATOR.check_fields(
             data,
             required={
                 "schema_version",
@@ -134,7 +142,7 @@ class ReviewRequest:
                 "reviewer_kind",
                 "reviewer_name",
             },
-            label="review request",
+            path="review request",
         )
         schema_version = _require_int(
             data["schema_version"],
@@ -313,13 +321,15 @@ class ReviewRequest:
                 data["implementer_agent"],
                 "review request.implementer_agent",
             ),
-            implementer_kind=_require_agent_kind(
+            implementer_kind=_VALIDATOR.require_enum(
                 data["implementer_kind"],
                 "review request.implementer_kind",
+                AgentKind,
             ),
-            reviewer_kind=_require_agent_kind(
+            reviewer_kind=_VALIDATOR.require_enum(
                 data["reviewer_kind"],
                 "review request.reviewer_kind",
+                AgentKind,
             ),
             reviewer_name=reviewer_name,
         )
@@ -352,105 +362,6 @@ class ReviewRequest:
             "reviewer_kind": self.reviewer_kind.value,
             "reviewer_name": self.reviewer_name,
         }
-
-
-def _require_object(value: object, label: str) -> dict[str, object]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
-        raise ArtifactValidationError(f"{label} must be a JSON object")
-    return value
-
-
-def _check_fields(
-    data: dict[str, object],
-    *,
-    required: set[str],
-    label: str,
-) -> None:
-    missing = sorted(required - data.keys())
-    if missing:
-        raise ArtifactValidationError(
-            f"{label} is missing required field(s): {', '.join(missing)}"
-        )
-    unknown = sorted(data.keys() - required)
-    if unknown:
-        noun = "field" if len(unknown) == 1 else "fields"
-        raise ArtifactValidationError(
-            f"{label} has unknown {noun}: {', '.join(unknown)}"
-        )
-
-
-def _require_string(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ArtifactValidationError(f"{label} must be a non-empty string")
-    if "\x00" in value:
-        raise ArtifactValidationError(f"{label} must not contain null bytes")
-    return value
-
-
-def _require_int(value: object, label: str) -> int:
-    if type(value) is not int:
-        raise ArtifactValidationError(f"{label} must be an integer")
-    return value
-
-
-def _require_uuid(value: object, label: str) -> str:
-    text = _require_string(value, label)
-    try:
-        parsed = uuid.UUID(text)
-    except ValueError:
-        raise ArtifactValidationError(
-            f"{label} must be a canonical UUID"
-        ) from None
-    if str(parsed) != text:
-        raise ArtifactValidationError(f"{label} must be a canonical UUID")
-    return text
-
-
-def _require_digest(value: object, label: str) -> str:
-    text = _require_string(value, label)
-    if SHA256_PATTERN.fullmatch(text) is None:
-        raise ArtifactValidationError(
-            f"{label} must be a lowercase SHA-256 digest"
-        )
-    return text
-
-
-def _require_oid(value: object, object_format: str, label: str) -> str:
-    text = _require_string(value, label)
-    expected_length = OID_LENGTHS[object_format]
-    if (
-        len(text) != expected_length
-        or re.fullmatch(r"[0-9a-f]+", text) is None
-    ):
-        raise ArtifactValidationError(
-            f"{label} must be a full lowercase {object_format} object ID"
-        )
-    return text
-
-
-def _require_timestamp(value: object, label: str) -> str:
-    text = _require_string(value, label)
-    message = f"{label} must be an RFC 3339 UTC timestamp"
-    if TIMESTAMP_PATTERN.fullmatch(text) is None:
-        raise ArtifactValidationError(message)
-    try:
-        datetime.fromisoformat(f"{text[:-1]}+00:00")
-    except ValueError:
-        raise ArtifactValidationError(message) from None
-    return text
-
-
-def _require_agent_kind(value: object, label: str) -> AgentKind:
-    text = _require_string(value, label)
-    try:
-        return AgentKind(text)
-    except ValueError:
-        supported = ", ".join(kind.value for kind in AgentKind)
-        raise ArtifactValidationError(
-            f"{label} must be one of: {supported}"
-        ) from None
 
 
 def _require_bundle_path(value: object, label: str) -> str:

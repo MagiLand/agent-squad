@@ -204,6 +204,9 @@ def _run_status(_arguments: argparse.Namespace) -> int:
     if run.handoff_error is not None:
         print(f"Request handoff error: {run.handoff_error}")
     print(f"Review worktree: {run.review_worktree or 'none'}")
+    if run.review_worktree_available is not None:
+        availability = "yes" if run.review_worktree_available else "no"
+        print(f"Review worktree available: {availability}")
     budget = run.review_budget
     print(
         "Review budget: "

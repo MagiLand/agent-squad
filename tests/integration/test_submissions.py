@@ -22,6 +22,7 @@ from tests._support import (
 add_src_to_path()
 
 from agent_squad import submissions  # noqa: E402
+from agent_squad.herdr import HerdrInstallation  # noqa: E402
 
 
 def _artifacts(repository: Path) -> tuple[dict[str, object], Path]:
@@ -396,6 +397,36 @@ class SubmitCommandTests(unittest.TestCase):
             self.assertEqual(request["base_oid"], base_oid)
             self.assertEqual(request["head_oid"], head_oid)
 
+    def test_submit_preserves_canonical_non_ascii_state_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = (
+                Path(temporary_directory)
+                / "caf\N{LATIN SMALL LETTER E WITH ACUTE}"
+            )
+            root.mkdir()
+            repository, data_home, report, environment, _ = _start_run(root)
+            state_path = repository / ".agent-squad/state.json"
+            escaped = b"caf\\u00e9"
+            encoded = "caf\N{LATIN SMALL LETTER E WITH ACUTE}".encode("utf-8")
+            self.assertIn(escaped, state_path.read_bytes())
+            self.assertNotIn(encoded, state_path.read_bytes())
+            _commit_candidate(repository)
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            self.assertIn(escaped, state_path.read_bytes())
+            self.assertNotIn(encoded, state_path.read_bytes())
+
     def test_head_advance_during_preparation_rolls_back_round(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -433,6 +464,276 @@ class SubmitCommandTests(unittest.TestCase):
                 cwd=repository,
             ).stdout
             self.assertEqual(worktrees.count("worktree "), 1)
+
+    def test_tracked_reserved_bundle_path_rolls_back_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            reserved_file = repository / ".agent-squad-review/tracked.txt"
+            reserved_file.parent.mkdir()
+            reserved_file.write_text("candidate content\n", encoding="utf-8")
+            run(
+                ["git", "add", "-f", ".agent-squad-review/tracked.txt"],
+                cwd=repository,
+            )
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "test: track reserved review path",
+                ],
+                cwd=repository,
+            )
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertNotEqual(submitted.returncode, 0)
+            self.assertIn(
+                "candidate revision already contains the reserved "
+                "review-bundle path",
+                submitted.stderr,
+            )
+            self.assertEqual(
+                reserved_file.read_text(encoding="utf-8"),
+                "candidate content\n",
+            )
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["phase"], "implementing")
+            self.assertFalse((run_directory / "rounds").exists())
+            worktrees = run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repository,
+            ).stdout
+            self.assertEqual(worktrees.count("worktree "), 1)
+
+    def test_postcommit_event_failure_preserves_pending_round(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            client = mock.Mock()
+
+            with (
+                mock.patch.object(
+                    submissions,
+                    "_append_event",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "review request is durable",
+                ),
+            ):
+                submissions.submit_candidate(
+                    repository,
+                    report_path=report,
+                    mode="new_revision",
+                    herdr_client=client,
+                )
+
+            client.discover.assert_not_called()
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["phase"], "reviewing")
+            self.assertEqual(state["current_round"], 1)
+            self.assertEqual(state["handoff"]["status"], "pending")
+            self.assertTrue(
+                Path(state["active_round"]["review_worktree"]).is_dir()
+            )
+            run_record = json.loads(
+                (run_directory / "run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(run_record["phase"], "reviewing")
+            events = (
+                (run_directory / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            self.assertEqual(len(events), 1)
+
+            status = run_cli(
+                repository,
+                "status",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("Request handoff: pending", status.stdout)
+            self.assertIn("Review worktree available: yes", status.stdout)
+
+    def test_handoff_guards_do_not_overwrite_changed_state(self) -> None:
+        cases = (
+            ("run", "active run changed"),
+            ("request", "active round changed"),
+        )
+        for mutation, message in cases:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository, _, report, _, _ = _start_run(root)
+                    _commit_candidate(repository)
+                    state_path = repository / ".agent-squad/state.json"
+                    changed_state: list[bytes] = []
+                    client = mock.Mock()
+                    client.discover.return_value = HerdrInstallation(
+                        executable=Path("/fake/herdr"),
+                        version="herdr test",
+                        protocol=20,
+                    )
+
+                    def mutate_state(**_arguments: object) -> None:
+                        state = json.loads(
+                            state_path.read_text(encoding="utf-8")
+                        )
+                        if mutation == "run":
+                            state["active_run_id"] = (
+                                "87654321-4321-6789-9234-567812345678"
+                            )
+                        else:
+                            state["active_round"]["request_id"] = (
+                                "87654321-4321-6789-9234-567812345678"
+                            )
+                        state_path.write_text(
+                            json.dumps(state, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                        changed_state.append(state_path.read_bytes())
+
+                    client.dispatch_review_request.side_effect = mutate_state
+
+                    with self.assertRaisesRegex(
+                        submissions.SubmissionError,
+                        message,
+                    ):
+                        submissions.submit_candidate(
+                            repository,
+                            report_path=report,
+                            mode="new_revision",
+                            herdr_client=client,
+                        )
+
+                    self.assertEqual(state_path.read_bytes(), changed_state[0])
+                    state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(state["handoff"]["status"], "pending")
+
+    def test_handoff_event_failure_preserves_sent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, _, report, _, _ = _start_run(root)
+            _commit_candidate(repository)
+            client = mock.Mock()
+            client.discover.return_value = HerdrInstallation(
+                executable=Path("/fake/herdr"),
+                version="herdr test",
+                protocol=20,
+            )
+            append_event = submissions._append_event
+
+            def fail_sent_event(
+                path: Path,
+                event: dict[str, object],
+            ) -> None:
+                if event["event"] == "review_request_sent":
+                    raise OSError("disk full")
+                append_event(path, event)
+
+            with (
+                mock.patch.object(
+                    submissions,
+                    "_append_event",
+                    side_effect=fail_sent_event,
+                ),
+                self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "handoff state is durable",
+                ),
+            ):
+                submissions.submit_candidate(
+                    repository,
+                    report_path=report,
+                    mode="new_revision",
+                    herdr_client=client,
+                )
+
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["handoff"]["status"], "sent")
+            events = [
+                json.loads(line)["event"]
+                for line in (run_directory / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                events,
+                ["run_started", "review_request_persisted"],
+            )
+
+    def test_status_reports_a_missing_disposable_review_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            head_oid = _commit_candidate(repository)
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            state, _ = _artifacts(repository)
+            review_worktree = Path(
+                state["active_round"]["review_worktree"]
+            )
+            run(
+                ["git", "worktree", "remove", str(review_worktree)],
+                cwd=repository,
+            )
+
+            status = run_cli(
+                repository,
+                "status",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("Phase: reviewing", status.stdout)
+            self.assertIn(f"Current requested head: {head_oid}", status.stdout)
+            self.assertIn("Request handoff: sent", status.stdout)
+            self.assertIn(f"Review worktree: {review_worktree}", status.stdout)
+            self.assertIn("Review worktree available: no", status.stdout)
+            self.assertIn("Next action: wait for the Reviewer", status.stdout)
+
+            target = root / "replacement-worktree"
+            target.mkdir()
+            review_worktree.parent.mkdir(parents=True, exist_ok=True)
+            review_worktree.symlink_to(target, target_is_directory=True)
+            invalid = run_cli(
+                repository,
+                "status",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("not a normal directory", invalid.stderr)
 
     def test_sensitive_change_warns_but_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

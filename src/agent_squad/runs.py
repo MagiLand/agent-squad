@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
-import json
 import os
 from pathlib import Path, PurePosixPath
-import re
 import shutil
 import stat
 import tempfile
@@ -38,8 +35,12 @@ from .storage import (
     InvalidJsonError,
     atomic_write,
     decode_json,
+    encode_event,
+    encode_json,
     exclusive_file_lock,
+    utc_timestamp,
 )
+from .validation import JsonValidator, OID_LENGTHS
 
 
 STATE_FILE_NAME = "state.json"
@@ -49,11 +50,6 @@ RUN_RECORD_FILE_NAME = "run.json"
 TASK_FILE_NAME = "task.md"
 EVENT_LOG_FILE_NAME = "events.jsonl"
 CONTEXT_DIRECTORY_NAME = "context"
-SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-UTC_TIMESTAMP_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
-)
-OID_LENGTHS = {"sha1": 40, "sha256": 64}
 
 
 class RunError(AgentSquadError):
@@ -66,6 +62,17 @@ class RunStartError(RunError):
 
 class RunStateError(RunError):
     """Raised when authoritative run artifacts are invalid or inconsistent."""
+
+
+_VALIDATOR = JsonValidator(RunStateError)
+_require_object = _VALIDATOR.require_object
+_check_fields = _VALIDATOR.check_fields
+_require_string = _VALIDATOR.require_string
+_require_int = _VALIDATOR.require_int
+_require_uuid = _VALIDATOR.require_uuid
+_require_digest = _VALIDATOR.require_digest
+_require_oid = _VALIDATOR.require_oid
+_require_timestamp = _VALIDATOR.require_timestamp
 
 
 class RunPhase(StrEnum):
@@ -259,7 +266,7 @@ class _RoundSummary:
     mode: str | None
     request_id: str | None
     result_id: str | None
-    review_worktree: str | None
+    review_worktree: Path | None
     reviewer_name: str | None
 
 
@@ -318,7 +325,8 @@ class ActiveRunStatus:
     handoff_status: str | None
     handoff_target: str | None
     handoff_error: str | None
-    review_worktree: str | None
+    review_worktree: Path | None
+    review_worktree_available: bool | None
     review_budget: ReviewBudget
 
 
@@ -394,20 +402,32 @@ def start_run(
         ) from error
 
 
-def inspect_status(
+def inspect_status(start: Path) -> RepositoryStatus:
+    """Return validated state while holding the active-run lock."""
+
+    return _inspect_status(start, lock_held=False)
+
+
+def inspect_status_locked(start: Path) -> RepositoryStatus:
+    """Return validated state when the caller holds the canonical lock."""
+
+    return _inspect_status(start, lock_held=True)
+
+
+def _inspect_status(
     start: Path,
     *,
-    _lock_held: bool = False,
+    lock_held: bool,
 ) -> RepositoryStatus:
-    """Return validated idle or active state for an initialized worktree."""
+    """Implement status inspection with explicit lock ownership."""
 
     repository = load_initialized_repository(start)
-    current_identity = _repository_identity(repository.worktree)
+    current_identity = repository_identity(repository.worktree)
     state_path = repository.control_root / STATE_FILE_NAME
     state = _load_existing_state(state_path)
     if state is None or state["active_run_id"] is None:
         return _idle_status(current_identity)
-    if not _lock_held:
+    if not lock_held:
         lock_path = repository.control_root / LOCK_FILE_NAME
         if lock_path.is_symlink() or not lock_path.is_file():
             raise RunStateError(
@@ -416,7 +436,7 @@ def inspect_status(
             )
         try:
             with exclusive_file_lock(lock_path):
-                return inspect_status(start, _lock_held=True)
+                return _inspect_status(start, lock_held=True)
         except RunError:
             raise
         except OSError as error:
@@ -472,9 +492,9 @@ def inspect_status(
     round_details = _round_status_details(state["active_round"])
     handoff = _handoff_details(state["handoff"])
 
-    run_directory = _safe_run_directory(repository.control_root, active_run_id)
+    run_directory = safe_run_directory(repository.control_root, active_run_id)
     run_record_path = run_directory / RUN_RECORD_FILE_NAME
-    run_record = _load_json_object(run_record_path, "active run record")
+    run_record = load_json_object(run_record_path, "active run record")
     record = _validate_run_record(run_record, run_directory, active_run_id)
 
     stored_identity = record.repository
@@ -533,8 +553,9 @@ def inspect_status(
         active_run_id,
         record.base_oid,
     )
+    review_worktree_available: bool | None = None
     if phase is RunPhase.REVIEWING:
-        _validate_active_review_artifacts(
+        review_worktree_available = _validate_active_review_artifacts(
             run_directory=run_directory,
             record=record,
             run_id=active_run_id,
@@ -571,6 +592,7 @@ def inspect_status(
             request_id=round_details.request_id,
             reviewer_name=round_details.reviewer_name,
             review_worktree=round_details.review_worktree,
+            review_worktree_available=review_worktree_available,
             handoff_status=handoff.status,
             handoff_target=handoff.target,
             handoff_error=handoff.last_error,
@@ -605,7 +627,7 @@ def _start_run_locked(
             "run agent-squad status before continuing"
         )
 
-    identity = _repository_identity(repository.worktree)
+    identity = repository_identity(repository.worktree)
     object_format = _git_object_format(repository.worktree.root)
     resolved_base_oid = _resolve_commit(
         repository.worktree.root,
@@ -631,7 +653,7 @@ def _start_run_locked(
     )
     _reject_duplicate_context_sources(contexts)
     run_id = str(uuid.uuid4())
-    timestamp = _utc_timestamp()
+    timestamp = utc_timestamp()
     budget = ReviewBudget.initial(
         repository.configuration.max_completed_change_reviews
     )
@@ -716,12 +738,12 @@ def _persist_new_run(
             atomic_write(destination, context.content, mode=0o400)
         atomic_write(
             staging_directory / RUN_RECORD_FILE_NAME,
-            _encode_json(run_record),
+            encode_json(run_record),
             mode=0o600,
         )
         atomic_write(
             staging_directory / EVENT_LOG_FILE_NAME,
-            _encode_event(event),
+            encode_event(event),
             mode=0o600,
         )
         staging_directory.replace(run_directory)
@@ -729,7 +751,7 @@ def _persist_new_run(
         run_directory_committed = True
         atomic_write(
             control_root / STATE_FILE_NAME,
-            _encode_json(state),
+            encode_json(state),
             mode=0o600,
         )
     except Exception as error:
@@ -1017,9 +1039,10 @@ def _validate_implementer(value: object) -> _ImplementerRecord:
             data["agent_name"],
             "run record.implementer.agent_name",
         ),
-        kind=_require_agent_kind(
+        kind=_VALIDATOR.require_enum(
             data["kind"],
             "run record.implementer.kind",
+            AgentKind,
         ),
     )
 
@@ -1040,9 +1063,10 @@ def _validate_reviewer(value: object) -> _ReviewerRecord:
             "non-empty strings"
         )
     return _ReviewerRecord(
-        kind=_require_agent_kind(
+        kind=_VALIDATOR.require_enum(
             data["kind"],
             "run record.reviewer.kind",
+            AgentKind,
         ),
         start_args=tuple(arguments),
     )
@@ -1175,7 +1199,7 @@ def _validate_active_review_artifacts(
     current_round: int,
     current_head_oid: str | None,
     round_details: _RoundSummary,
-) -> None:
+) -> bool:
     round_directory = (
         run_directory / "rounds" / f"{current_round:03d}"
     )
@@ -1184,7 +1208,7 @@ def _validate_active_review_artifacts(
             "active round directory must be a non-symlink directory: "
             f"{round_directory}"
         )
-    round_record = _load_json_object(
+    round_record = load_json_object(
         round_directory / "round.json",
         "active round record",
     )
@@ -1287,11 +1311,9 @@ def _validate_active_review_artifacts(
             "head OID",
         ),
         (
-            str(
-                _require_absolute_path(
-                    round_record["review_worktree"],
-                    "active round record.review_worktree",
-                )
+            _require_absolute_path(
+                round_record["review_worktree"],
+                "active round record.review_worktree",
             ),
             round_details.review_worktree,
             "review worktree",
@@ -1391,7 +1413,7 @@ def _validate_active_review_artifacts(
         report_artifact.sha256,
         "active round implementation report",
     )
-    request_data = _load_json_object(request_path, "active review request")
+    request_data = load_json_object(request_path, "active review request")
     try:
         request = ReviewRequest.from_dict(request_data)
     except ArtifactValidationError as error:
@@ -1438,12 +1460,19 @@ def _validate_active_review_artifacts(
             "active round bundle-input manifest does not match the request"
         )
 
-    review_worktree = Path(round_details.review_worktree or "")
-    bundle_root = review_worktree / ".agent-squad-review"
+    review_worktree = round_details.review_worktree
+    if review_worktree is None:
+        raise RunStateError(
+            "a reviewing run must record an active review worktree"
+        )
+    if not os.path.lexists(review_worktree):
+        return False
     if review_worktree.is_symlink() or not review_worktree.is_dir():
         raise RunStateError(
-            f"active review worktree does not exist: {review_worktree}"
+            "active review worktree is not a normal directory: "
+            f"{review_worktree}"
         )
+    bundle_root = review_worktree / ".agent-squad-review"
     for artifact in bundle_inputs:
         path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)
         if path.is_symlink() or not path.is_file():
@@ -1456,6 +1485,7 @@ def _validate_active_review_artifacts(
             artifact.sha256,
             f"active review bundle input {artifact.path}",
         )
+    return True
 
 
 def _round_artifact(value: object, label: str) -> BundleArtifact:
@@ -1611,7 +1641,7 @@ def _round_status_details(value: object) -> _RoundSummary:
         mode=mode.value,
         request_id=request_id,
         result_id=result_id,
-        review_worktree=str(worktree),
+        review_worktree=worktree,
         reviewer_name=reviewer_name,
     )
 
@@ -1753,6 +1783,10 @@ def _validate_active_state_shape(
             "the active round status must be reviewing while the run is "
             "reviewing"
         )
+    if round_details.review_worktree is None:
+        raise RunStateError(
+            "a reviewing run must record an active review worktree"
+        )
     if round_details.result_id is not None:
         raise RunStateError(
             "a reviewing round cannot have an authoritative result ID"
@@ -1767,7 +1801,9 @@ def _validate_active_state_shape(
         )
 
 
-def _repository_identity(worktree: GitWorktree) -> RepositoryIdentity:
+def repository_identity(worktree: GitWorktree) -> RepositoryIdentity:
+    """Return the current canonical Git and branch identity."""
+
     branch_result = run_git(worktree.root, "symbolic-ref", "--quiet", "HEAD")
     if branch_result.returncode == 0:
         branch_ref = branch_result.stdout.rstrip("\r\n")
@@ -1894,7 +1930,7 @@ def _reject_duplicate_context_sources(
 def _load_existing_state(path: Path) -> dict[str, object] | None:
     if not _path_exists(path):
         return None
-    data = _load_json_object(path, "authoritative state")
+    data = load_json_object(path, "authoritative state")
     _validate_schema_version(data, "state")
     if "active_run_id" not in data:
         raise RunStateError("state is missing required field: active_run_id")
@@ -1929,7 +1965,9 @@ def _ensure_runs_root(path: Path) -> bool:
     return True
 
 
-def _safe_run_directory(control_root: Path, run_id: str) -> Path:
+def safe_run_directory(control_root: Path, run_id: str) -> Path:
+    """Resolve one owned run directory without following unsafe paths."""
+
     runs_root = control_root / RUNS_DIRECTORY_NAME
     if runs_root.is_symlink() or not runs_root.is_dir():
         raise RunStateError(
@@ -2049,7 +2087,9 @@ def _assert_matching_state_value(
         raise RunStateError(f"state {label} does not match run metadata")
 
 
-def _load_json_object(path: Path, label: str) -> dict[str, object]:
+def load_json_object(path: Path, label: str) -> dict[str, object]:
+    """Load one authoritative run artifact as a validated JSON object."""
+
     if path.is_symlink() or not path.is_file():
         raise RunStateError(
             f"{label} must be a regular non-symlink file: {path}"
@@ -2076,51 +2116,10 @@ def _validate_schema_version(data: dict[str, object], path: str) -> None:
         raise RunStateError(f"{path}.schema_version must be {SCHEMA_VERSION}")
 
 
-def _require_object(value: object, path: str) -> dict[str, object]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
-        raise RunStateError(f"{path} must be a JSON object")
-    return value
-
-
-def _check_fields(
-    data: dict[str, object],
-    *,
-    required: set[str],
-    path: str,
-) -> None:
-    missing = sorted(required - data.keys())
-    if missing:
-        raise RunStateError(
-            f"{path} is missing required field(s): {', '.join(missing)}"
-        )
-    unknown = sorted(data.keys() - required)
-    if unknown:
-        label = "field" if len(unknown) == 1 else "fields"
-        raise RunStateError(
-            f"{path} has unknown {label}: {', '.join(unknown)}"
-        )
-
-
-def _require_string(value: object, path: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise RunStateError(f"{path} must be a non-empty string")
-    if "\x00" in value:
-        raise RunStateError(f"{path} must not contain null bytes")
-    return value
-
-
 def _require_optional_string(value: object, path: str) -> str | None:
     if value is None:
         return None
     return _require_string(value, path)
-
-
-def _require_int(value: object, path: str) -> int:
-    if type(value) is not int:
-        raise RunStateError(f"{path} must be an integer")
-    return value
 
 
 def _require_nonnegative_int(value: object, path: str) -> int:
@@ -2128,17 +2127,6 @@ def _require_nonnegative_int(value: object, path: str) -> int:
     if result < 0:
         raise RunStateError(f"{path} must not be negative")
     return result
-
-
-def _require_uuid(value: object, path: str) -> str:
-    text = _require_string(value, path)
-    try:
-        parsed = uuid.UUID(text)
-    except ValueError:
-        raise RunStateError(f"{path} must be a canonical UUID") from None
-    if str(parsed) != text:
-        raise RunStateError(f"{path} must be a canonical UUID")
-    return text
 
 
 def _require_phase(value: object, path: str) -> RunPhase:
@@ -2151,12 +2139,7 @@ def _require_phase(value: object, path: str) -> RunPhase:
 
 
 def _require_agent_kind(value: object, path: str) -> AgentKind:
-    text = _require_string(value, path)
-    try:
-        return AgentKind(text)
-    except ValueError:
-        supported = ", ".join(kind.value for kind in AgentKind)
-        raise RunStateError(f"{path} must be one of: {supported}") from None
+    return _VALIDATOR.require_enum(value, path, AgentKind)
 
 
 def _require_absolute_path(value: object, path: str) -> Path:
@@ -2165,13 +2148,6 @@ def _require_absolute_path(value: object, path: str) -> Path:
     if not result.is_absolute():
         raise RunStateError(f"{path} must be an absolute path")
     return result
-
-
-def _require_digest(value: object, path: str) -> str:
-    text = _require_string(value, path)
-    if SHA256_PATTERN.fullmatch(text) is None:
-        raise RunStateError(f"{path} must be a lowercase SHA-256 digest")
-    return text
 
 
 def _require_object_format(value: object) -> str:
@@ -2184,31 +2160,6 @@ def _require_object_format(value: object) -> str:
     return object_format
 
 
-def _require_oid(value: object, object_format: str, path: str) -> str:
-    text = _require_string(value, path)
-    expected_length = OID_LENGTHS[object_format]
-    if (
-        len(text) != expected_length
-        or re.fullmatch(r"[0-9a-f]+", text) is None
-    ):
-        raise RunStateError(
-            f"{path} must be a full lowercase {object_format} object ID"
-        )
-    return text
-
-
-def _require_timestamp(value: object, path: str) -> str:
-    text = _require_string(value, path)
-    message = f"{path} must be an RFC 3339 UTC timestamp"
-    if UTC_TIMESTAMP_PATTERN.fullmatch(text) is None:
-        raise RunStateError(message)
-    try:
-        datetime.fromisoformat(f"{text[:-1]}+00:00")
-    except ValueError:
-        raise RunStateError(message) from None
-    return text
-
-
 def _validate_selection(value: str, label: str) -> str:
     if not value or value != value.strip() or "\x00" in value:
         raise RunStartError(
@@ -2216,20 +2167,6 @@ def _validate_selection(value: str, label: str) -> str:
             "or null bytes"
         )
     return value
-
-
-def _utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def _encode_json(value: dict[str, object]) -> bytes:
-    return f"{json.dumps(value, indent=2)}\n".encode("utf-8")
-
-
-def _encode_event(value: dict[str, object]) -> bytes:
-    return f"{json.dumps(value, separators=(',', ':'))}\n".encode("utf-8")
 
 
 def _path_exists(path: Path) -> bool:

@@ -361,7 +361,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "run history path must be a non-symlink directory",
             ):
-                runs._safe_run_directory(control, "run-id")
+                runs.safe_run_directory(control, "run-id")
 
             other_control = root / "other-control"
             run_root = other_control / "runs"
@@ -374,7 +374,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "active run directory must be a non-symlink directory",
             ):
-                runs._safe_run_directory(other_control, "run-id")
+                runs.safe_run_directory(other_control, "run-id")
 
             symlink_control = root / "symlink-control"
             symlink_run_root = symlink_control / "runs"
@@ -386,7 +386,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "active run directory must be a non-symlink directory",
             ):
-                runs._safe_run_directory(symlink_control, "run-id")
+                runs.safe_run_directory(symlink_control, "run-id")
 
     def test_repository_and_reviewer_records_reject_inconsistent_data(
         self,
@@ -447,7 +447,7 @@ class RunArtifactValidationTests(unittest.TestCase):
         self.assertEqual(reviewer.start_args, ("--strict",))
         self.assertEqual(round_summary.status, "reviewing")
         self.assertEqual(round_summary.mode, "new_revision")
-        self.assertEqual(round_summary.review_worktree, "/tmp/review")
+        self.assertEqual(round_summary.review_worktree, Path("/tmp/review"))
         self.assertEqual(round_summary.round_number, 1)
         self.assertEqual(
             round_summary.request_id,
@@ -504,6 +504,40 @@ class RunArtifactValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._handoff_details(value)
+
+    def test_reviewing_state_requires_a_typed_worktree_path(self) -> None:
+        round_summary = runs._RoundSummary(
+            round_number=1,
+            status="reviewing",
+            mode="new_revision",
+            request_id="12345678-1234-5678-9234-567812345678",
+            result_id=None,
+            review_worktree=None,
+            reviewer_name="asq-12345678-r001-reviewer",
+        )
+        handoff = runs._HandoffSummary(
+            round_number=1,
+            status="sent",
+            target="asq-12345678-r001-reviewer",
+            last_error=None,
+            herdr_version="herdr test",
+            herdr_protocol=20,
+        )
+
+        with self.assertRaisesRegex(
+            runs.RunStateError,
+            "must record an active review worktree",
+        ):
+            runs._validate_active_state_shape(
+                phase=runs.RunPhase.REVIEWING,
+                current_round=1,
+                current_head_oid="a" * 40,
+                approved_head_oid=None,
+                active_escalation_id=None,
+                round_details=round_summary,
+                handoff=handoff,
+                object_format="sha1",
+            )
 
 
 if __name__ == "__main__":

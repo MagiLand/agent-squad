@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -32,7 +31,14 @@ from .initialization import (
     load_initialized_repository,
     run_git,
 )
-from .storage import atomic_write, exclusive_file_lock
+from .storage import (
+    atomic_write,
+    encode_event,
+    encode_json,
+    exclusive_file_lock,
+    utc_timestamp,
+)
+from .validation import JsonValidator, OID_LENGTHS
 
 
 ROUNDS_DIRECTORY_NAME = "rounds"
@@ -40,15 +46,14 @@ ROUND_RECORD_FILE_NAME = "round.json"
 REQUEST_FILE_NAME = "request.json"
 IMPLEMENTATION_REPORT_FILE_NAME = "implementation-report.md"
 REVIEW_BUNDLE_DIRECTORY_NAME = ".agent-squad-review"
-SENSITIVE_ROOT_FILES = {
-    "AGENTS.md",
-    "CLAUDE.md",
-    ".github/copilot-instructions.md",
-}
+SENSITIVE_ROOT_FILES = {".github/copilot-instructions.md"}
 
 
 class SubmissionError(AgentSquadError):
     """Raised when a review request cannot be prepared safely."""
+
+
+_VALIDATOR = JsonValidator(SubmissionError)
 
 
 @dataclass(frozen=True)
@@ -177,9 +182,8 @@ def _prepare_submission_locked(
     report_path: Path,
     mode: SubmissionMode,
 ) -> _PreparedSubmission:
-    status = runs.inspect_status(
-        repository.worktree.invocation_directory,
-        _lock_held=True,
+    status = runs.inspect_status_locked(
+        repository.worktree.invocation_directory
     )
     active = status.active_run
     if active is None:
@@ -233,19 +237,19 @@ def _prepare_submission_locked(
         head_oid,
     )
 
-    run_directory = runs._safe_run_directory(
+    run_directory = runs.safe_run_directory(
         repository.control_root,
         active.run_id,
     )
     state_path = repository.control_root / runs.STATE_FILE_NAME
     run_record_path = run_directory / runs.RUN_RECORD_FILE_NAME
-    state = runs._load_json_object(state_path, "authoritative state")
-    run_record = runs._load_json_object(run_record_path, "active run record")
+    state = runs.load_json_object(state_path, "authoritative state")
+    run_record = runs.load_json_object(run_record_path, "active run record")
     original_run_record = run_record_path.read_bytes()
 
     round_number = 1
     request_id = str(uuid.uuid4())
-    timestamp = _utc_timestamp()
+    timestamp = utc_timestamp()
     reviewer_name = deterministic_reviewer_name(
         active.run_id,
         round_number,
@@ -292,7 +296,7 @@ def _prepare_submission_locked(
         raise SubmissionError(
             f"cannot build review request: {error}"
         ) from error
-    request_bytes = _encode_json(request.to_dict())
+    request_bytes = encode_json(request.to_dict())
     request_digest = hashlib.sha256(request_bytes).hexdigest()
     pending_handoff = _handoff_record(
         round_number=round_number,
@@ -343,7 +347,7 @@ def _prepare_submission_locked(
         )
         atomic_write(
             staging_directory / ROUND_RECORD_FILE_NAME,
-            _encode_json(round_record),
+            encode_json(round_record),
             mode=0o600,
         )
 
@@ -409,13 +413,13 @@ def _prepare_submission_locked(
         round_directory_committed = True
         atomic_write(
             run_record_path,
-            _encode_json(next_run_record),
+            encode_json(next_run_record),
             mode=0o600,
         )
         run_record_written = True
         atomic_write(
             state_path,
-            _encode_json(next_state),
+            encode_json(next_state),
             mode=0o600,
         )
         commit_point_reached = True
@@ -509,7 +513,7 @@ def _record_handoff(
     error: str | None,
     installation: HerdrInstallation | None,
 ) -> None:
-    timestamp = _utc_timestamp()
+    timestamp = utc_timestamp()
     handoff = _handoff_record(
         round_number=prepared.round_number,
         target=prepared.request.reviewer_name,
@@ -519,7 +523,7 @@ def _record_handoff(
         installation=installation,
     )
     state_path = prepared.repository.control_root / runs.STATE_FILE_NAME
-    state = runs._load_json_object(state_path, "authoritative state")
+    state = runs.load_json_object(state_path, "authoritative state")
     if state.get("active_run_id") != prepared.run_id:
         raise SubmissionError(
             "active run changed before the review handoff was recorded"
@@ -536,7 +540,7 @@ def _record_handoff(
     next_state["updated_at"] = timestamp
     next_state["handoff"] = handoff
     try:
-        atomic_write(state_path, _encode_json(next_state), mode=0o600)
+        atomic_write(state_path, encode_json(next_state), mode=0o600)
     except OSError as write_error:
         raise SubmissionError(
             f"could not record review handoff state: {write_error}"
@@ -603,7 +607,7 @@ def _validate_branch_identity(
     stored: runs.RepositoryIdentity,
     worktree: GitWorktree,
 ) -> None:
-    current = runs._repository_identity(worktree)
+    current = runs.repository_identity(worktree)
     if (
         current.start_branch_ref != stored.start_branch_ref
         or current.start_head_detached != stored.start_head_detached
@@ -766,7 +770,7 @@ def _current_object_format(repository_root: Path) -> str:
             f"could not determine Git object format: {detail}"
         )
     value = result.stdout.rstrip("\r\n")
-    if value not in runs.OID_LENGTHS:
+    if value not in OID_LENGTHS:
         raise SubmissionError(f"unsupported Git object format: {value!r}")
     return value
 
@@ -781,14 +785,11 @@ def _resolve_head(repository_root: Path, object_format: str) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or "HEAD is not a commit"
         raise SubmissionError(f"cannot resolve candidate HEAD: {detail}")
-    try:
-        return runs._require_oid(
-            result.stdout.rstrip("\r\n"),
-            object_format,
-            "candidate HEAD",
-        )
-    except runs.RunStateError as error:
-        raise SubmissionError(str(error)) from error
+    return _VALIDATOR.require_oid(
+        result.stdout.rstrip("\r\n"),
+        object_format,
+        "candidate HEAD",
+    )
 
 
 def _require_base_ancestor(
@@ -1233,9 +1234,7 @@ def _review_request_prompt(prepared: _PreparedSubmission) -> str:
 
 
 def _append_event(path: Path, event: dict[str, object]) -> None:
-    content = (
-        f"{json.dumps(event, separators=(',', ':'))}\n".encode("utf-8")
-    )
+    content = encode_event(event)
     flags = os.O_WRONLY | os.O_APPEND
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1261,8 +1260,6 @@ def _remove_review_worktree(
     review_worktree: Path,
 ) -> list[str]:
     errors: list[str] = []
-    bundle = review_worktree / REVIEW_BUNDLE_DIRECTORY_NAME
-    errors.extend(_remove_owned_directory(bundle, "review bundle"))
     result = run_git(
         implementation.root,
         "worktree",
@@ -1302,18 +1299,6 @@ def _read_file(path: Path) -> bytes:
         raise SubmissionError(
             f"cannot read authoritative artifact {path}: {error}"
         ) from error
-
-
-def _utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def _encode_json(value: dict[str, object]) -> bytes:
-    return f"{json.dumps(value, indent=2, ensure_ascii=False)}\n".encode(
-        "utf-8"
-    )
 
 
 def _single_line(value: str) -> str:

@@ -72,6 +72,7 @@ class SubmissionHelperTests(unittest.TestCase):
         sensitive = (
             "AGENTS.md",
             "src/feature/AGENTS.md",
+            ".github/copilot-instructions.md",
             ".agents/reviewer.md",
             "src/agent_squad/cli.py",
             "scripts/herdr_bridge.sh",

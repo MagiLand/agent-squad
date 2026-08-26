@@ -12,7 +12,12 @@ from tests._support import add_src_to_path
 
 add_src_to_path()
 
-from agent_squad.storage import atomic_write, exclusive_file_lock  # noqa: E402
+from agent_squad.storage import (  # noqa: E402
+    atomic_write,
+    encode_event,
+    encode_json,
+    exclusive_file_lock,
+)
 
 
 class AtomicWriteTests(unittest.TestCase):
@@ -27,6 +32,18 @@ class AtomicWriteTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b'{"complete":true}\n')
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
             self.assertEqual(list(root.iterdir()), [destination])
+
+    def test_json_encodings_are_canonical(self) -> None:
+        value = {"message": "caf\N{LATIN SMALL LETTER E WITH ACUTE}"}
+
+        self.assertEqual(
+            encode_json(value),
+            b'{\n  "message": "caf\\u00e9"\n}\n',
+        )
+        self.assertEqual(
+            encode_event(value),
+            b'{"message":"caf\\u00e9"}\n',
+        )
 
 
 class ExclusiveFileLockTests(unittest.TestCase):

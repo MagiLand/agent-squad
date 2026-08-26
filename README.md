@@ -58,7 +58,7 @@ Inspect idle or active state from anywhere in the initialized worktree:
 agent-squad status
 ```
 
-Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action.
+Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action. If a disposable review worktree is absent, status still reports the authoritative run and marks that worktree unavailable; present bundle paths and contents remain subject to strict validation.
 
 ## Submit the first candidate
 
