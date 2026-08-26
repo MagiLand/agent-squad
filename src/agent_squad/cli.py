@@ -8,8 +8,10 @@ from pathlib import Path
 import sys
 
 from . import __version__
+from .artifacts import HandoffStatus, SubmissionMode
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .runs import inspect_status, start_run
+from .submissions import submit_candidate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +93,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     status_parser.set_defaults(handler=_run_status)
+
+    submit_parser = commands.add_parser(
+        "submit",
+        help="submit one exact committed revision for independent review",
+        description=(
+            "Validate the active run and committed candidate, create an "
+            "immutable detached review worktree and self-contained bundle, "
+            "then notify a deterministic round-scoped Reviewer through "
+            "Herdr."
+        ),
+    )
+    submit_parser.add_argument(
+        "--report",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="UTF-8 Markdown implementation report for this candidate",
+    )
+    submit_parser.add_argument(
+        "--mode",
+        required=True,
+        choices=[mode.value for mode in SubmissionMode],
+        help=(
+            "relationship between this candidate and prior review; the "
+            "first round requires new_revision"
+        ),
+    )
+    submit_parser.set_defaults(handler=_run_submit)
     return parser
 
 
@@ -161,13 +191,34 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         "Current round: "
         f"{run.current_round if run.current_round else 'none'}"
     )
-    print(f"Round status: {run.round_status or 'none'}")
-    print(f"Submission mode: {run.submission_mode or 'none'}")
+    active_round = run.active_round
+    if active_round is None:
+        print("Round status: none")
+        print("Submission mode: none")
+        print("Request ID: none")
+        print("Reviewer session: none")
+        review_worktree_text = "none"
+    else:
+        print(f"Round status: {active_round.status.value}")
+        print(f"Submission mode: {active_round.mode.value}")
+        print(f"Request ID: {active_round.request_id}")
+        print(f"Reviewer session: {active_round.reviewer_name}")
+        review_worktree_text = str(active_round.review_worktree)
     print(f"Current requested head: {run.current_head_oid or 'none'}")
     print(f"Approved head: {run.approved_head_oid or 'none'}")
     print(f"Active escalation: {run.active_escalation_id or 'none'}")
-    print(f"Request handoff: {run.handoff_status or 'none'}")
-    print(f"Review worktree: {run.review_worktree or 'none'}")
+    handoff = run.handoff
+    if handoff is None:
+        print("Request handoff: none")
+    else:
+        print(f"Request handoff: {handoff.status.value}")
+        print(f"Request handoff target: {handoff.target}")
+        if handoff.last_error is not None:
+            print(f"Request handoff error: {handoff.last_error}")
+    print(f"Review worktree: {review_worktree_text}")
+    if run.review_worktree_available is not None:
+        availability = "yes" if run.review_worktree_available else "no"
+        print(f"Review worktree available: {availability}")
     budget = run.review_budget
     print(
         "Review budget: "
@@ -177,6 +228,38 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         f"additional {budget.additional_rounds_granted})"
     )
     print(f"Next action: {status.next_action}")
+    return 0
+
+
+def _run_submit(arguments: argparse.Namespace) -> int:
+    result = submit_candidate(
+        _invocation_directory(),
+        report_path=arguments.report,
+        mode=SubmissionMode(arguments.mode),
+    )
+    for warning in result.warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
+    print(
+        f"Prepared Agent Squad review round {result.round_number} "
+        f"for run {result.run_id}"
+    )
+    print(f"Request ID: {result.request_id}")
+    print(f"Revision: {result.base_oid}..{result.head_oid}")
+    print(f"Review worktree: {result.review_worktree}")
+    print(f"Reviewer: {result.reviewer_name}")
+    print(f"Request handoff: {result.handoff_status.value}")
+    if result.handoff_status is HandoffStatus.FAILED:
+        print(
+            "The durable review round was preserved for recovery.",
+            file=sys.stderr,
+        )
+        print(
+            "agent-squad: error: review request handoff failed: "
+            f"{result.handoff_error}",
+            file=sys.stderr,
+        )
+        return 1
+    print("Next action: wait for the Reviewer result")
     return 0
 
 

@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, and inspect its status. Review submission and Herdr handoff commands are not implemented yet.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit its first exact committed revision to a round-scoped Reviewer through Herdr, and inspect local status. Reviewer-result submission and application are planned in later increments.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -58,7 +58,21 @@ Inspect idle or active state from anywhere in the initialized worktree:
 agent-squad status
 ```
 
-Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action.
+Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action. If a disposable review worktree is absent, status still reports the authoritative run and marks that worktree unavailable; present bundle paths and contents remain subject to strict validation.
+
+## Submit the first candidate
+
+Commit a coherent candidate and prepare a UTF-8 Markdown implementation report, then submit the exact current revision:
+
+```bash
+agent-squad submit \
+  --report path/to/implementation-report.md \
+  --mode new_revision
+```
+
+The first submission requires a clean tracked worktree, no unexpected untracked files, a current branch or detached state matching the run, a head different from the fixed base, and the fixed base as an ancestor of that head. Known generated paths may be configured through `allowed_generated_paths`.
+
+Before contacting Herdr, Agent Squad creates a durable round record, detached review worktree, self-contained `.agent-squad-review/` bundle, and pending handoff state. It discovers the installed Herdr schema and command capabilities, opens the exact worktree, and launches or adopts the deterministic Reviewer. If discovery, launch, or prompting fails, the same logical round and request remain recorded for recovery; another `submit` does not create a replacement round.
 
 ## Development
 

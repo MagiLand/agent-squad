@@ -276,6 +276,90 @@ class StartAndStatusCommandTests(unittest.TestCase):
                 status.stdout,
             )
 
+    def test_active_status_rejects_a_symlinked_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            seed_git_repository(repository)
+            data_home = root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "main",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            lock_path = repository / ".agent-squad/lock"
+            lock_path.unlink()
+            external = root / "external-lock"
+            external.write_bytes(b"untouched\n")
+            lock_path.symlink_to(external)
+
+            status = run_cli(repository, "status", data_home=data_home)
+
+            self.assertNotEqual(status.returncode, 0)
+            self.assertIn("regular non-symlink lock file", status.stderr)
+            self.assertEqual(external.read_bytes(), b"untouched\n")
+
+    def test_active_status_waits_for_the_canonical_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            seed_git_repository(repository)
+            data_home = root / "data"
+            initialized = run_cli(repository, "init", data_home=data_home)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            task = root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "main",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            lock_path = repository / ".agent-squad/lock"
+            original_lock = runs.exclusive_file_lock
+            attempted_paths: list[Path] = []
+            attempting = Barrier(2)
+
+            @contextmanager
+            def observed_lock(path: Path):
+                attempted_paths.append(path)
+                attempting.wait(timeout=5)
+                with original_lock(path):
+                    yield
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with mock.patch.object(
+                    runs,
+                    "exclusive_file_lock",
+                    observed_lock,
+                ):
+                    with original_lock(lock_path):
+                        future = executor.submit(
+                            runs.inspect_status,
+                            repository,
+                        )
+                        attempting.wait(timeout=5)
+                        self.assertFalse(future.done())
+                    status = future.result(timeout=5)
+
+            self.assertEqual(attempted_paths, [lock_path.resolve()])
+            self.assertIsNotNone(status.active_run)
+
     def test_start_uses_validated_repository_configuration_as_defaults(
         self,
     ) -> None:
@@ -691,6 +775,11 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     "finished_at must be set exactly when the phase is "
                     "terminal",
                 ),
+                (
+                    "object format",
+                    "error: run record.git_object_format must be sha1 or "
+                    "sha256: 'sha512'",
+                ),
             )
             for case, message in cases:
                 with self.subTest(case=case):
@@ -700,6 +789,8 @@ class StartAndStatusCommandTests(unittest.TestCase):
                         record["repository"]["start_head_detached"] = False
                     elif case == "reviewer arguments":
                         record["reviewer"]["start_args"] = [""]
+                    elif case == "object format":
+                        record["git_object_format"] = "sha512"
                     else:
                         record["finished_at"] = "2026-08-24T10:00:00Z"
                     record_path.write_text(

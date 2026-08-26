@@ -11,6 +11,7 @@ import stat
 import subprocess
 
 from .storage import InvalidJsonError, atomic_write, decode_json
+from .validation import JsonValidator
 
 
 SCHEMA_VERSION = 1
@@ -44,6 +45,16 @@ class AgentKind(StrEnum):
 
     CLAUDE = "claude"
     CODEX = "codex"
+
+
+_VALIDATOR = JsonValidator(
+    ConfigurationError,
+    reject_null_strings=False,
+)
+_require_object = _VALIDATOR.require_object
+_check_fields = _VALIDATOR.check_fields
+_require_string = _VALIDATOR.require_string
+_require_int = _VALIDATOR.require_int
 
 
 @dataclass(frozen=True)
@@ -115,8 +126,10 @@ class Configuration:
             implementer_data["agent_name"],
             "configuration.implementer.agent_name",
         )
-        implementer_kind = _require_agent_kind(
-            implementer_data["kind"], "configuration.implementer.kind"
+        implementer_kind = _VALIDATOR.require_enum(
+            implementer_data["kind"],
+            "configuration.implementer.kind",
+            AgentKind,
         )
 
         reviewer_data = _require_object(
@@ -128,8 +141,10 @@ class Configuration:
             optional={"start_args"},
             path="configuration.reviewer",
         )
-        reviewer_kind = _require_agent_kind(
-            reviewer_data["kind"], "configuration.reviewer.kind"
+        reviewer_kind = _VALIDATOR.require_enum(
+            reviewer_data["kind"],
+            "configuration.reviewer.kind",
+            AgentKind,
         )
         start_args_value = reviewer_data.get("start_args", [])
         start_args = _require_string_list(
@@ -448,57 +463,6 @@ def load_initialized_repository(start: Path) -> InitializedRepository:
         configuration_path=configuration_path,
         configuration=configuration,
     )
-
-
-def _require_object(value: object, path: str) -> dict[str, object]:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
-        raise ConfigurationError(f"{path} must be a JSON object")
-    return value
-
-
-def _check_fields(
-    data: dict[str, object],
-    *,
-    required: set[str],
-    optional: set[str],
-    path: str,
-) -> None:
-    missing = sorted(required - data.keys())
-    if missing:
-        raise ConfigurationError(
-            f"{path} is missing required field(s): {', '.join(missing)}"
-        )
-    unknown = sorted(data.keys() - required - optional)
-    if unknown:
-        label = "field" if len(unknown) == 1 else "fields"
-        raise ConfigurationError(
-            f"{path} has unknown {label}: {', '.join(unknown)}"
-        )
-
-
-def _require_string(value: object, path: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ConfigurationError(f"{path} must be a non-empty string")
-    return value
-
-
-def _require_int(value: object, path: str) -> int:
-    if type(value) is not int:
-        raise ConfigurationError(f"{path} must be an integer")
-    return value
-
-
-def _require_agent_kind(value: object, path: str) -> AgentKind:
-    kind = _require_string(value, path)
-    try:
-        return AgentKind(kind)
-    except ValueError:
-        supported = ", ".join(member.value for member in AgentKind)
-        raise ConfigurationError(
-            f"{path} must be one of: {supported}"
-        ) from None
 
 
 def _require_string_list(

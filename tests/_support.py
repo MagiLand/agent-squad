@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -121,6 +122,7 @@ def run_cli(
     repository: Path,
     *arguments: str,
     data_home: Path,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     existing_python_path = env.get("PYTHONPATH")
@@ -130,9 +132,31 @@ def run_cli(
         else os.pathsep.join((str(SRC_ROOT), existing_python_path))
     )
     env["XDG_DATA_HOME"] = str(data_home)
+    if env_overrides is not None:
+        env.update(env_overrides)
     return run(
         [sys.executable, "-m", "agent_squad.cli", *arguments],
         cwd=repository,
         env=env,
         check=False,
     )
+
+
+def install_fake_herdr(root: Path) -> tuple[Path, dict[str, str]]:
+    """Install the tracked fake as ``herdr`` and return its environment."""
+
+    binary_directory = root / "bin"
+    binary_directory.mkdir(parents=True)
+    executable = binary_directory / "herdr"
+    shutil.copyfile(PROJECT_ROOT / "tests/fixtures/fake_herdr.py", executable)
+    executable.chmod(0o755)
+    state_directory = root / "fake-herdr-state"
+    path_entries = [str(binary_directory)]
+    existing_path = os.environ.get("PATH")
+    if existing_path:
+        path_entries.append(existing_path)
+    path = os.pathsep.join(path_entries)
+    return executable, {
+        "PATH": path,
+        "FAKE_HERDR_STATE_DIR": str(state_directory),
+    }

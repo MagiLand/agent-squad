@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,58 @@ from tests._support import add_src_to_path
 add_src_to_path()
 
 from agent_squad import runs  # noqa: E402
+from agent_squad.artifacts import (  # noqa: E402
+    ActiveRoundRecord,
+    HandoffRecord,
+    HandoffStatus,
+    RoundStatus,
+    SubmissionMode,
+)
+
+
+def _active_round(
+    status: RoundStatus = RoundStatus.REVIEWING,
+) -> ActiveRoundRecord:
+    return ActiveRoundRecord(
+        round_number=1,
+        status=status,
+        mode=SubmissionMode.NEW_REVISION,
+        request_id="12345678-1234-5678-9234-567812345678",
+        result_id=(
+            "87654321-4321-6789-a234-678912345678"
+            if status is RoundStatus.APPLIED
+            else None
+        ),
+        review_worktree=Path("/tmp/review"),
+        reviewer_name="asq-12345678-r001-reviewer",
+    )
+
+
+def _handoff() -> HandoffRecord:
+    return HandoffRecord(
+        round_number=1,
+        status=HandoffStatus.SENT,
+        target="asq-12345678-r001-reviewer",
+        last_error=None,
+        updated_at="2026-08-26T12:00:00Z",
+        herdr_version="herdr test",
+        herdr_protocol=20,
+    )
+
+
+def _active_state_arguments(**overrides: object) -> dict[str, object]:
+    arguments: dict[str, object] = {
+        "phase": runs.RunPhase.REVIEWING,
+        "current_round": 1,
+        "current_head_oid": "a" * 40,
+        "approved_head_oid": None,
+        "active_escalation_id": None,
+        "active_round": _active_round(),
+        "handoff": _handoff(),
+        "object_format": "sha1",
+    }
+    arguments.update(overrides)
+    return arguments
 
 
 class ReviewBudgetTests(unittest.TestCase):
@@ -141,20 +194,8 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 "must be one of",
             ),
             (
-                lambda: runs._require_agent_kind("unknown", "kind"),
-                "must be one of",
-            ),
-            (
                 lambda: runs._require_digest("A" * 64, "digest"),
                 "lowercase SHA-256",
-            ),
-            (
-                lambda: runs._require_absolute_path("relative", "path"),
-                "absolute path",
-            ),
-            (
-                lambda: runs._require_object_format("sha512"),
-                "unsupported Git object format",
             ),
         )
         for validator, message in cases:
@@ -162,16 +203,27 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     validator()
 
-    def test_next_action_only_covers_the_reachable_active_phase(self) -> None:
+    def test_next_action_covers_implemented_active_phases(self) -> None:
         self.assertEqual(
             runs._next_action(runs.RunPhase.IMPLEMENTING),
             "continue implementing the captured task",
         )
+        self.assertEqual(
+            runs._next_action(runs.RunPhase.REVIEWING),
+            "wait for the Reviewer result",
+        )
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                handoff_status=runs.HandoffStatus.FAILED,
+            ),
+            "recover the preserved review-request handoff",
+        )
         with self.assertRaisesRegex(
             runs.RunStateError,
-            "reviewing is not supported",
+            "approved is not supported",
         ):
-            runs._next_action(runs.RunPhase.REVIEWING)
+            runs._next_action(runs.RunPhase.APPROVED)
 
 
 class RunArtifactValidationTests(unittest.TestCase):
@@ -350,7 +402,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "run history path must be a non-symlink directory",
             ):
-                runs._safe_run_directory(control, "run-id")
+                runs.safe_run_directory(control, "run-id")
 
             other_control = root / "other-control"
             run_root = other_control / "runs"
@@ -363,7 +415,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "active run directory must be a non-symlink directory",
             ):
-                runs._safe_run_directory(other_control, "run-id")
+                runs.safe_run_directory(other_control, "run-id")
 
             symlink_control = root / "symlink-control"
             symlink_run_root = symlink_control / "runs"
@@ -375,7 +427,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 runs.RunStateError,
                 "active run directory must be a non-symlink directory",
             ):
-                runs._safe_run_directory(symlink_control, "run-id")
+                runs.safe_run_directory(symlink_control, "run-id")
 
     def test_repository_and_reviewer_records_reject_inconsistent_data(
         self,
@@ -401,7 +453,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 {"kind": "codex", "start_args": [""]}
             )
 
-    def test_typed_role_and_round_summaries_preserve_field_names(self) -> None:
+    def test_typed_role_records_preserve_field_names(self) -> None:
         captured = runs._validate_captured_record(
             {
                 "source_path": "/tmp/task.md",
@@ -416,13 +468,6 @@ class RunArtifactValidationTests(unittest.TestCase):
         reviewer = runs._validate_reviewer(
             {"kind": "claude", "start_args": ["--strict"]}
         )
-        round_summary = runs._round_status_details(
-            {
-                "status": "pending",
-                "mode": "workspace",
-                "review_worktree": "/tmp/review",
-            }
-        )
         self.assertEqual(captured.source_path, Path("/tmp/task.md"))
         self.assertEqual(captured.run_path, "task.md")
         self.assertEqual(captured.sha256, "a" * 64)
@@ -430,9 +475,6 @@ class RunArtifactValidationTests(unittest.TestCase):
         self.assertEqual(implementer.kind.value, "codex")
         self.assertEqual(reviewer.kind.value, "claude")
         self.assertEqual(reviewer.start_args, ("--strict",))
-        self.assertEqual(round_summary.status, "pending")
-        self.assertEqual(round_summary.mode, "workspace")
-        self.assertEqual(round_summary.review_worktree, "/tmp/review")
 
     def test_state_match_errors_name_the_real_json_field(self) -> None:
         with self.assertRaisesRegex(
@@ -445,6 +487,191 @@ class RunArtifactValidationTests(unittest.TestCase):
                 field="git_common_dir",
                 label="Git common directory",
             )
+
+    def test_reviewing_state_requires_an_active_round_record(self) -> None:
+        with self.assertRaisesRegex(
+            runs.RunStateError,
+            "must record an active round",
+        ):
+            runs._validate_active_state_shape(
+                **_active_state_arguments(
+                    active_round=None,
+                    handoff=None,
+                )
+            )
+
+    def test_reviewing_state_returns_the_validated_active_round(self) -> None:
+        active_round = _active_round()
+
+        result = runs._validate_active_state_shape(
+            **_active_state_arguments(active_round=active_round)
+        )
+
+        self.assertIs(result, active_round)
+
+    def test_active_state_shape_rejects_inconsistent_relationships(
+        self,
+    ) -> None:
+        oid = "a" * 40
+        reviewing_round = _active_round()
+        handoff = _handoff()
+        valid_reviewing = _active_state_arguments(
+            active_round=reviewing_round,
+            handoff=handoff,
+        )
+        unused_implementing = _active_state_arguments(
+            phase=runs.RunPhase.IMPLEMENTING,
+            current_round=0,
+            current_head_oid=None,
+            active_round=None,
+            handoff=None,
+        )
+        cases = (
+            (
+                "unused implementing head",
+                {**unused_implementing, "current_head_oid": oid},
+                "an unused implementing run must have no current round or "
+                "requested head",
+            ),
+            (
+                "unused implementing active records",
+                {**unused_implementing, "active_round": reviewing_round},
+                "an unused implementing run must have no active round or "
+                "handoff",
+            ),
+            (
+                "unused implementing handoff",
+                {**unused_implementing, "handoff": handoff},
+                "an unused implementing run must have no active round or "
+                "handoff",
+            ),
+            (
+                "reviewing round number",
+                {**valid_reviewing, "current_round": 0},
+                "a reviewing run must identify a current round and head",
+            ),
+            (
+                "reviewing approval",
+                {**valid_reviewing, "approved_head_oid": "b" * 40},
+                "a reviewing run cannot retain approval or active escalation",
+            ),
+            (
+                "reviewing status",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        status=RoundStatus.APPLIED,
+                    ),
+                },
+                "the active round status must be reviewing while the run is "
+                "reviewing",
+            ),
+            (
+                "reviewing result",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        result_id="87654321-4321-6789-a234-678912345678",
+                    ),
+                },
+                "a reviewing round cannot have an authoritative result ID",
+            ),
+            (
+                "active round number",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        round_number=2,
+                    ),
+                },
+                "state.active_round.round must match state.current_round",
+            ),
+            (
+                "missing handoff",
+                {**valid_reviewing, "handoff": None},
+                "a reviewing run must record a handoff",
+            ),
+            (
+                "handoff round number",
+                {
+                    **valid_reviewing,
+                    "handoff": replace(handoff, round_number=2),
+                },
+                "state.handoff.round must match state.current_round",
+            ),
+            (
+                "handoff target",
+                {
+                    **valid_reviewing,
+                    "handoff": replace(handoff, target="asq-other-reviewer"),
+                },
+                "state.handoff.target must match the active Reviewer name",
+            ),
+        )
+
+        for case, arguments, message in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(runs.RunStateError) as error:
+                    runs._validate_active_state_shape(**arguments)
+                self.assertEqual(str(error.exception), message)
+
+    def test_implementing_state_requires_a_consistent_closed_round(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            runs.RunStateError,
+            "must record a closed active round",
+        ):
+            runs._validate_active_state_shape(
+                **_active_state_arguments(
+                    phase=runs.RunPhase.IMPLEMENTING,
+                    active_round=_active_round(),
+                )
+            )
+
+        cases = (
+            (
+                None,
+                None,
+                None,
+                "must identify a current head",
+            ),
+            (
+                "a" * 40,
+                "b" * 40,
+                None,
+                "cannot retain approval or active escalation",
+            ),
+            (
+                "a" * 40,
+                None,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "cannot retain approval or active escalation",
+            ),
+        )
+        for current_head, approved_head, escalation_id, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_active_state_shape(
+                        **_active_state_arguments(
+                            phase=runs.RunPhase.IMPLEMENTING,
+                            current_head_oid=current_head,
+                            approved_head_oid=approved_head,
+                            active_escalation_id=escalation_id,
+                            active_round=_active_round(RoundStatus.APPLIED),
+                        )
+                    )
+
+        result = runs._validate_active_state_shape(
+            **_active_state_arguments(
+                phase=runs.RunPhase.IMPLEMENTING,
+                active_round=_active_round(RoundStatus.APPLIED),
+            )
+        )
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
