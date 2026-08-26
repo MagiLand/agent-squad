@@ -192,38 +192,30 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         f"{run.current_round if run.current_round else 'none'}"
     )
     active_round = run.active_round
-    print(
-        "Round status: "
-        f"{active_round.status.value if active_round else 'none'}"
-    )
-    print(
-        "Submission mode: "
-        f"{active_round.mode.value if active_round else 'none'}"
-    )
-    print(
-        "Request ID: "
-        f"{active_round.request_id if active_round else 'none'}"
-    )
-    print(
-        "Reviewer session: "
-        f"{active_round.reviewer_name if active_round else 'none'}"
-    )
+    if active_round is None:
+        print("Round status: none")
+        print("Submission mode: none")
+        print("Request ID: none")
+        print("Reviewer session: none")
+        review_worktree_text = "none"
+    else:
+        print(f"Round status: {active_round.status.value}")
+        print(f"Submission mode: {active_round.mode.value}")
+        print(f"Request ID: {active_round.request_id}")
+        print(f"Reviewer session: {active_round.reviewer_name}")
+        review_worktree_text = str(active_round.review_worktree)
     print(f"Current requested head: {run.current_head_oid or 'none'}")
     print(f"Approved head: {run.approved_head_oid or 'none'}")
     print(f"Active escalation: {run.active_escalation_id or 'none'}")
     handoff = run.handoff
-    print(
-        "Request handoff: "
-        f"{handoff.status.value if handoff else 'none'}"
-    )
-    if handoff is not None:
+    if handoff is None:
+        print("Request handoff: none")
+    else:
+        print(f"Request handoff: {handoff.status.value}")
         print(f"Request handoff target: {handoff.target}")
         if handoff.last_error is not None:
             print(f"Request handoff error: {handoff.last_error}")
-    print(
-        "Review worktree: "
-        f"{active_round.review_worktree if active_round else 'none'}"
-    )
+    print(f"Review worktree: {review_worktree_text}")
     if run.review_worktree_available is not None:
         availability = "yes" if run.review_worktree_available else "no"
         print(f"Review worktree available: {availability}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 import re
 from typing import TypeVar
 import uuid
@@ -74,6 +75,33 @@ class JsonValidator:
         if self._reject_null_strings and "\x00" in value:
             raise self._error_type(f"{path} must not contain null bytes")
         return value
+
+    def require_optional_string(
+        self,
+        value: object,
+        path: str,
+    ) -> str | None:
+        """Require either null or a valid string."""
+
+        if value is None:
+            return None
+        return self.require_string(value, path)
+
+    def require_absolute_path(self, value: object, path: str) -> Path:
+        """Require a non-empty absolute filesystem path."""
+
+        result = Path(self.require_string(value, path))
+        if not result.is_absolute():
+            raise self._error_type(f"{path} must be an absolute path")
+        return result
+
+    def require_object_format(self, value: object, path: str) -> str:
+        """Require a supported Git object format."""
+
+        result = self.require_string(value, path)
+        if result not in OID_LENGTHS:
+            raise self._error_type(f"{path} must be sha1 or sha256")
+        return result
 
     def require_int(self, value: object, path: str) -> int:
         """Require an integer, excluding booleans."""

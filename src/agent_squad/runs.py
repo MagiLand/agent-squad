@@ -41,7 +41,7 @@ from .storage import (
     exclusive_file_lock,
     utc_timestamp,
 )
-from .validation import JsonValidator, OID_LENGTHS
+from .validation import JsonValidator
 
 
 STATE_FILE_NAME = "state.json"
@@ -74,6 +74,9 @@ _require_uuid = _VALIDATOR.require_uuid
 _require_digest = _VALIDATOR.require_digest
 _require_oid = _VALIDATOR.require_oid
 _require_timestamp = _VALIDATOR.require_timestamp
+_require_optional_string = _VALIDATOR.require_optional_string
+_require_absolute_path = _VALIDATOR.require_absolute_path
+_require_object_format = _VALIDATOR.require_object_format
 
 
 class RunPhase(StrEnum):
@@ -88,6 +91,12 @@ class RunPhase(StrEnum):
 
 
 TERMINAL_PHASES = {RunPhase.COMPLETED, RunPhase.CANCELLED}
+CLOSED_ROUND_STATUSES = {
+    RoundStatus.APPLIED,
+    RoundStatus.SUPERSEDED,
+    RoundStatus.STALE,
+    RoundStatus.INVALID,
+}
 
 
 @dataclass(frozen=True)
@@ -520,7 +529,7 @@ def _inspect_status(
         raise RunStateError(
             "state review-budget original limit does not match run metadata"
         )
-    _validate_active_state_shape(
+    reviewing_round = _validate_active_state_shape(
         phase=phase,
         current_round=current_round,
         current_head_oid=current_head_oid,
@@ -537,18 +546,14 @@ def _inspect_status(
         record.base_oid,
     )
     review_worktree_available: bool | None = None
-    if phase is RunPhase.REVIEWING:
-        if active_round is None:
-            raise RunStateError(
-                "a reviewing run must record an active round"
-            )
+    if reviewing_round is not None:
         review_worktree_available = _validate_active_review_artifacts(
             run_directory=run_directory,
             record=record,
             run_id=active_run_id,
             current_round=current_round,
             current_head_oid=current_head_oid,
-            active_round=active_round,
+            active_round=reviewing_round,
         )
     next_action = _next_action(
         phase,
@@ -928,7 +933,10 @@ def _validate_run_record(
 
     identity = _validate_repository_record(data["repository"])
     base_ref = _require_string(data["base_ref"], "run record.base_ref")
-    object_format = _require_object_format(data["git_object_format"])
+    object_format = _require_object_format(
+        data["git_object_format"],
+        "active run record.git_object_format",
+    )
     base_oid = _require_oid(
         data["base_oid"], object_format, "run record.base_oid"
     )
@@ -1210,7 +1218,11 @@ def _validate_active_review_artifacts(
         (round_record.mode, active_round.mode, "submission mode"),
         (round_record.request_id, active_round.request_id, "request ID"),
         (round_record.status, active_round.status, "round status"),
-        (round_record.object_format, record.object_format, "Git object format"),
+        (
+            round_record.object_format,
+            record.object_format,
+            "Git object format",
+        ),
         (round_record.base_oid, record.base_oid, "base OID"),
         (round_record.head_oid, current_head_oid, "head OID"),
         (
@@ -1319,6 +1331,8 @@ def _validate_active_review_artifacts(
             f"active review bundle input {artifact.path}",
         )
     return True
+
+
 def _assert_request_matches_active_round(
     *,
     request: ReviewRequest,
@@ -1401,7 +1415,9 @@ def _validate_active_state_shape(
     active_round: ActiveRoundRecord | None,
     handoff: HandoffRecord | None,
     object_format: str,
-) -> None:
+) -> ActiveRoundRecord | None:
+    """Validate state relationships and return a reviewing round."""
+
     if current_head_oid is not None:
         _require_oid(current_head_oid, object_format, "state.current_head_oid")
     if approved_head_oid is not None:
@@ -1411,21 +1427,43 @@ def _validate_active_state_shape(
             "state.approved_head_oid",
         )
     if phase is RunPhase.IMPLEMENTING:
-        if current_round != 0:
-            return
-        if current_head_oid is not None:
+        if approved_head_oid is not None or active_escalation_id is not None:
             raise RunStateError(
-                "an unused implementing run must have no current round or "
-                "requested head"
+                "an implementing run cannot retain approval or active "
+                "escalation"
             )
-        if active_round is not None or handoff is not None:
+        if current_round == 0:
+            if current_head_oid is not None:
+                raise RunStateError(
+                    "an unused implementing run must have no current round "
+                    "or requested head"
+                )
+            if active_round is not None or handoff is not None:
+                raise RunStateError(
+                    "an unused implementing run must have no active round or "
+                    "handoff"
+                )
+            return None
+        if current_head_oid is None:
             raise RunStateError(
-                "an unused implementing run must have no active round or "
-                "handoff"
+                "an implementing run with round history must identify a "
+                "current head"
             )
-        return
+        # Section 26.11 returns to implementing after closing a round, while
+        # Section 41.3 retains its request handoff for status and recovery.
+        closed_round = _require_linked_active_round(
+            current_round=current_round,
+            active_round=active_round,
+            handoff=handoff,
+            run_description="an implementing run with round history",
+        )
+        if closed_round.status not in CLOSED_ROUND_STATUSES:
+            raise RunStateError(
+                "an implementing run must record a closed active round"
+            )
+        return None
     if phase is not RunPhase.REVIEWING:
-        return
+        return None
     if current_round < 1 or current_head_oid is None:
         raise RunStateError(
             "a reviewing run must identify a current round and head"
@@ -1434,23 +1472,43 @@ def _validate_active_state_shape(
         raise RunStateError(
             "a reviewing run cannot retain approval or active escalation"
         )
-    if active_round is None:
-        raise RunStateError("a reviewing run must record an active round")
-    if active_round.round_number != current_round:
-        raise RunStateError(
-            "state.active_round.round must match state.current_round"
-        )
-    if active_round.status is not RoundStatus.REVIEWING:
+    reviewing_round = _require_linked_active_round(
+        current_round=current_round,
+        active_round=active_round,
+        handoff=handoff,
+        run_description="a reviewing run",
+    )
+    if reviewing_round.status is not RoundStatus.REVIEWING:
         raise RunStateError(
             "the active round status must be reviewing while the run is "
             "reviewing"
         )
-    if active_round.result_id is not None:
+    if reviewing_round.result_id is not None:
         raise RunStateError(
             "a reviewing round cannot have an authoritative result ID"
         )
+    return reviewing_round
+
+
+def _require_linked_active_round(
+    *,
+    current_round: int,
+    active_round: ActiveRoundRecord | None,
+    handoff: HandoffRecord | None,
+    run_description: str,
+) -> ActiveRoundRecord:
+    """Return records whose round and Reviewer identities agree."""
+
+    if active_round is None:
+        raise RunStateError(
+            f"{run_description} must record an active round"
+        )
+    if active_round.round_number != current_round:
+        raise RunStateError(
+            "state.active_round.round must match state.current_round"
+        )
     if handoff is None:
-        raise RunStateError("a reviewing run must record a handoff")
+        raise RunStateError(f"{run_description} must record a handoff")
     if handoff.round_number != current_round:
         raise RunStateError(
             "state.handoff.round must match state.current_round"
@@ -1459,6 +1517,7 @@ def _validate_active_state_shape(
         raise RunStateError(
             "state.handoff.target must match the active Reviewer name"
         )
+    return active_round
 
 
 def repository_identity(worktree: GitWorktree) -> RepositoryIdentity:
@@ -1498,7 +1557,10 @@ def _git_object_format(repository_root: Path) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or "unknown Git error"
         raise RunStartError(f"could not determine Git object format: {detail}")
-    return _require_object_format(result.stdout.rstrip("\r\n"))
+    return _require_object_format(
+        result.stdout.rstrip("\r\n"),
+        "Git object format",
+    )
 
 
 def _resolve_commit(
@@ -1776,12 +1838,6 @@ def _validate_schema_version(data: dict[str, object], path: str) -> None:
         raise RunStateError(f"{path}.schema_version must be {SCHEMA_VERSION}")
 
 
-def _require_optional_string(value: object, path: str) -> str | None:
-    if value is None:
-        return None
-    return _require_string(value, path)
-
-
 def _require_nonnegative_int(value: object, path: str) -> int:
     result = _require_int(value, path)
     if result < 0:
@@ -1791,24 +1847,6 @@ def _require_nonnegative_int(value: object, path: str) -> int:
 
 def _require_phase(value: object, path: str) -> RunPhase:
     return _VALIDATOR.require_enum(value, path, RunPhase)
-
-
-def _require_absolute_path(value: object, path: str) -> Path:
-    text = _require_string(value, path)
-    result = Path(text)
-    if not result.is_absolute():
-        raise RunStateError(f"{path} must be an absolute path")
-    return result
-
-
-def _require_object_format(value: object) -> str:
-    object_format = _require_string(value, "Git object format")
-    if object_format not in OID_LENGTHS:
-        raise RunStateError(
-            f"unsupported Git object format {object_format!r}; expected "
-            f"one of: {', '.join(OID_LENGTHS)}"
-        )
-    return object_format
 
 
 def _validate_selection(value: str, label: str) -> str:

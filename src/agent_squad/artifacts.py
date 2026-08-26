@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 
 from .initialization import AgentKind, SCHEMA_VERSION
-from .validation import JsonValidator, OID_LENGTHS
+from .validation import JsonValidator
 
 
 REVIEWER_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -26,6 +26,9 @@ _require_uuid = _VALIDATOR.require_uuid
 _require_digest = _VALIDATOR.require_digest
 _require_oid = _VALIDATOR.require_oid
 _require_timestamp = _VALIDATOR.require_timestamp
+_require_optional_string = _VALIDATOR.require_optional_string
+_require_absolute_path = _VALIDATOR.require_absolute_path
+_require_object_format = _VALIDATOR.require_object_format
 
 
 class SubmissionMode(StrEnum):
@@ -342,14 +345,10 @@ class ReviewRequest:
             SubmissionMode,
         )
 
-        object_format = _require_string(
+        object_format = _require_object_format(
             data["git_object_format"],
             "review request.git_object_format",
         )
-        if object_format not in OID_LENGTHS:
-            raise ArtifactValidationError(
-                "review request.git_object_format must be sha1 or sha256"
-            )
         base_oid = _require_oid(
             data["base_oid"],
             object_format,
@@ -821,12 +820,6 @@ def _require_optional_bundle_path(
     return _require_bundle_path(value, label)
 
 
-def _require_optional_string(value: object, label: str) -> str | None:
-    if value is None:
-        return None
-    return _require_string(value, label)
-
-
 def _require_optional_uuid(value: object, label: str) -> str | None:
     if value is None:
         return None
@@ -840,26 +833,12 @@ def _require_positive_int(value: object, label: str) -> int:
     return result
 
 
-def _require_absolute_path(value: object, label: str) -> Path:
-    result = Path(_require_string(value, label))
-    if not result.is_absolute():
-        raise ArtifactValidationError(f"{label} must be an absolute path")
-    return result
-
-
 def _require_reviewer_name(value: object, label: str) -> str:
     result = _require_string(value, label)
     if REVIEWER_NAME_PATTERN.fullmatch(result) is None:
         raise ArtifactValidationError(
             f"{label} must be a valid Herdr agent name"
         )
-    return result
-
-
-def _require_object_format(value: object, label: str) -> str:
-    result = _require_string(value, label)
-    if result not in OID_LENGTHS:
-        raise ArtifactValidationError(f"{label} must be sha1 or sha256")
     return result
 
 

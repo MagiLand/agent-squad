@@ -1076,6 +1076,56 @@ class SubmitCommandTests(unittest.TestCase):
             self.assertIn("bundle input input/task.md", status.stderr)
             self.assertIn("digest does not match", status.stderr)
 
+    def test_status_rejects_live_round_mislabeled_as_implementing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+            state, run_directory = _artifacts(repository)
+            state["phase"] = "implementing"
+            state_path = repository / ".agent-squad/state.json"
+            state_path.write_text(
+                json.dumps(state, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            run_record_path = run_directory / "run.json"
+            run_record = json.loads(
+                run_record_path.read_text(encoding="utf-8")
+            )
+            run_record["phase"] = "implementing"
+            run_record_path.write_text(
+                json.dumps(run_record, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            status = run_cli(
+                repository,
+                "status",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertNotEqual(status.returncode, 0)
+            self.assertEqual(status.stdout, "")
+            self.assertIn(
+                "implementing run must record a closed active round",
+                status.stderr,
+            )
+
     def test_start_or_prompt_failure_preserves_one_recoverable_round(
         self,
     ) -> None:

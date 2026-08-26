@@ -13,6 +13,43 @@ from tests._support import add_src_to_path
 add_src_to_path()
 
 from agent_squad import runs  # noqa: E402
+from agent_squad.artifacts import (  # noqa: E402
+    ActiveRoundRecord,
+    HandoffRecord,
+    HandoffStatus,
+    RoundStatus,
+    SubmissionMode,
+)
+
+
+def _active_round(
+    status: RoundStatus = RoundStatus.REVIEWING,
+) -> ActiveRoundRecord:
+    return ActiveRoundRecord(
+        round_number=1,
+        status=status,
+        mode=SubmissionMode.NEW_REVISION,
+        request_id="12345678-1234-5678-9234-567812345678",
+        result_id=(
+            "87654321-4321-6789-a234-678912345678"
+            if status is RoundStatus.APPLIED
+            else None
+        ),
+        review_worktree=Path("/tmp/review"),
+        reviewer_name="asq-12345678-r001-reviewer",
+    )
+
+
+def _handoff() -> HandoffRecord:
+    return HandoffRecord(
+        round_number=1,
+        status=HandoffStatus.SENT,
+        target="asq-12345678-r001-reviewer",
+        last_error=None,
+        updated_at="2026-08-26T12:00:00Z",
+        herdr_version="herdr test",
+        herdr_protocol=20,
+    )
 
 
 class ReviewBudgetTests(unittest.TestCase):
@@ -143,14 +180,6 @@ class ProtocolValueValidationTests(unittest.TestCase):
             (
                 lambda: runs._require_digest("A" * 64, "digest"),
                 "lowercase SHA-256",
-            ),
-            (
-                lambda: runs._require_absolute_path("relative", "path"),
-                "absolute path",
-            ),
-            (
-                lambda: runs._require_object_format("sha512"),
-                "unsupported Git object format",
             ),
         )
         for validator, message in cases:
@@ -458,6 +487,86 @@ class RunArtifactValidationTests(unittest.TestCase):
                 handoff=None,
                 object_format="sha1",
             )
+
+    def test_reviewing_state_returns_the_validated_active_round(self) -> None:
+        active_round = _active_round()
+
+        result = runs._validate_active_state_shape(
+            phase=runs.RunPhase.REVIEWING,
+            current_round=1,
+            current_head_oid="a" * 40,
+            approved_head_oid=None,
+            active_escalation_id=None,
+            active_round=active_round,
+            handoff=_handoff(),
+            object_format="sha1",
+        )
+
+        self.assertIs(result, active_round)
+
+    def test_implementing_state_requires_a_consistent_closed_round(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            runs.RunStateError,
+            "must record a closed active round",
+        ):
+            runs._validate_active_state_shape(
+                phase=runs.RunPhase.IMPLEMENTING,
+                current_round=1,
+                current_head_oid="a" * 40,
+                approved_head_oid=None,
+                active_escalation_id=None,
+                active_round=_active_round(),
+                handoff=_handoff(),
+                object_format="sha1",
+            )
+
+        cases = (
+            (
+                None,
+                None,
+                None,
+                "must identify a current head",
+            ),
+            (
+                "a" * 40,
+                "b" * 40,
+                None,
+                "cannot retain approval or active escalation",
+            ),
+            (
+                "a" * 40,
+                None,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "cannot retain approval or active escalation",
+            ),
+        )
+        for current_head, approved_head, escalation_id, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_active_state_shape(
+                        phase=runs.RunPhase.IMPLEMENTING,
+                        current_round=1,
+                        current_head_oid=current_head,
+                        approved_head_oid=approved_head,
+                        active_escalation_id=escalation_id,
+                        active_round=_active_round(RoundStatus.APPLIED),
+                        handoff=_handoff(),
+                        object_format="sha1",
+                    )
+
+        result = runs._validate_active_state_shape(
+            phase=runs.RunPhase.IMPLEMENTING,
+            current_round=1,
+            current_head_oid="a" * 40,
+            approved_head_oid=None,
+            active_escalation_id=None,
+            active_round=_active_round(RoundStatus.APPLIED),
+            handoff=_handoff(),
+            object_format="sha1",
+        )
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

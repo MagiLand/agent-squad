@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from pathlib import Path
 import unittest
 
 from tests._support import add_src_to_path
@@ -85,6 +86,21 @@ class JsonValidatorTests(unittest.TestCase):
             self.validator.require_enum("second", "kind", ExampleKind),
             ExampleKind.SECOND,
         )
+        self.assertIsNone(
+            self.validator.require_optional_string(None, "optional")
+        )
+        self.assertEqual(
+            self.validator.require_optional_string("value", "optional"),
+            "value",
+        )
+        self.assertEqual(
+            self.validator.require_absolute_path("/tmp/value", "path"),
+            Path("/tmp/value"),
+        )
+        self.assertEqual(
+            self.validator.require_object_format("sha256", "format"),
+            "sha256",
+        )
 
         cases = (
             (lambda: self.validator.require_uuid("bad", "run_id"), "UUID"),
@@ -115,6 +131,27 @@ class JsonValidatorTests(unittest.TestCase):
                     ExampleKind,
                 ),
                 "must be one of",
+            ),
+            (
+                lambda: self.validator.require_optional_string(
+                    1,
+                    "optional",
+                ),
+                "non-empty string",
+            ),
+            (
+                lambda: self.validator.require_absolute_path(
+                    "relative",
+                    "path",
+                ),
+                "absolute path",
+            ),
+            (
+                lambda: self.validator.require_object_format(
+                    "sha512",
+                    "format",
+                ),
+                "sha1 or sha256",
             ),
         )
         for operation, message in cases:
