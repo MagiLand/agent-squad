@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 import unittest
 
 from tests._support import add_src_to_path
@@ -9,8 +10,11 @@ from tests._support import add_src_to_path
 add_src_to_path()
 
 from agent_squad.artifacts import (  # noqa: E402
+    ActiveRoundRecord,
     ArtifactValidationError,
     ReviewRequest,
+    RoundStatus,
+    SubmissionMode,
 )
 
 
@@ -46,6 +50,62 @@ def _request() -> dict[str, object]:
         "reviewer_kind": "claude",
         "reviewer_name": "asq-87654321-r001-reviewer",
     }
+
+
+def _active_round() -> dict[str, object]:
+    return {
+        "round": 1,
+        "status": "reviewing",
+        "mode": "new_revision",
+        "request_id": "12345678-1234-5678-9234-567812345678",
+        "result_id": None,
+        "review_worktree": "/tmp/review",
+        "reviewer_name": "asq-12345678-r001-reviewer",
+    }
+
+
+class ActiveRoundRecordTests(unittest.TestCase):
+    def test_record_round_trips_with_typed_fields(self) -> None:
+        record = ActiveRoundRecord.from_dict(_active_round())
+
+        self.assertEqual(record.to_dict(), _active_round())
+        self.assertEqual(record.round_number, 1)
+        self.assertIs(record.status, RoundStatus.REVIEWING)
+        self.assertIs(record.mode, SubmissionMode.NEW_REVISION)
+        self.assertEqual(record.review_worktree, Path("/tmp/review"))
+
+    def test_record_rejects_invalid_shape_and_values(self) -> None:
+        cases = (
+            (lambda data: data.update(round=0), "round must be positive"),
+            (lambda data: data.update(status="waiting"), "must be one of"),
+            (lambda data: data.update(mode="initial"), "must be one of"),
+            (
+                lambda data: data.update(request_id="not-a-uuid"),
+                "canonical UUID",
+            ),
+            (
+                lambda data: data.update(result_id="not-a-uuid"),
+                "canonical UUID",
+            ),
+            (
+                lambda data: data.update(review_worktree="relative"),
+                "must be an absolute path",
+            ),
+            (
+                lambda data: data.update(reviewer_name="Reviewer Name"),
+                "valid Herdr agent name",
+            ),
+            (lambda data: data.update(unexpected=True), "unknown field"),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = _active_round()
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ActiveRoundRecord.from_dict(data)
 
 
 class ReviewRequestTests(unittest.TestCase):

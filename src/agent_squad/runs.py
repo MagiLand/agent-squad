@@ -14,13 +14,13 @@ import tempfile
 import uuid
 
 from .artifacts import (
+    ActiveRoundRecord,
     ArtifactValidationError,
     BundleArtifact,
     HandoffStatus,
     REVIEWER_NAME_PATTERN,
     ReviewRequest,
     RoundStatus,
-    SubmissionMode,
 )
 from .initialization import (
     AgentKind,
@@ -258,19 +258,6 @@ class _ValidatedRunRecord:
 
 
 @dataclass(frozen=True)
-class _RoundSummary:
-    """Validated status fields for the active review round."""
-
-    round_number: int | None
-    status: str | None
-    mode: str | None
-    request_id: str | None
-    result_id: str | None
-    review_worktree: Path | None
-    reviewer_name: str | None
-
-
-@dataclass(frozen=True)
 class _HandoffSummary:
     """Validated current request-handoff details."""
 
@@ -489,7 +476,15 @@ def _inspect_status(
     active_escalation_id = _require_optional_string(
         state["active_escalation_id"], "state.active_escalation_id"
     )
-    round_details = _round_status_details(state["active_round"])
+    active_round_value = state["active_round"]
+    try:
+        active_round = (
+            None
+            if active_round_value is None
+            else ActiveRoundRecord.from_dict(active_round_value)
+        )
+    except ArtifactValidationError as error:
+        raise RunStateError(str(error)) from error
     handoff = _handoff_details(state["handoff"])
 
     run_directory = safe_run_directory(repository.control_root, active_run_id)
@@ -543,7 +538,7 @@ def _inspect_status(
         current_head_oid=current_head_oid,
         approved_head_oid=approved_head_oid,
         active_escalation_id=active_escalation_id,
-        round_details=round_details,
+        active_round=active_round,
         handoff=handoff,
         object_format=record.object_format,
     )
@@ -555,13 +550,14 @@ def _inspect_status(
     )
     review_worktree_available: bool | None = None
     if phase is RunPhase.REVIEWING:
+        assert active_round is not None
         review_worktree_available = _validate_active_review_artifacts(
             run_directory=run_directory,
             record=record,
             run_id=active_run_id,
             current_round=current_round,
             current_head_oid=current_head_oid,
-            round_details=round_details,
+            active_round=active_round,
         )
     next_action = _next_action(phase, handoff_status=handoff.status)
     return RepositoryStatus(
@@ -587,11 +583,25 @@ def _inspect_status(
             current_head_oid=current_head_oid,
             approved_head_oid=approved_head_oid,
             active_escalation_id=active_escalation_id,
-            round_status=round_details.status,
-            submission_mode=round_details.mode,
-            request_id=round_details.request_id,
-            reviewer_name=round_details.reviewer_name,
-            review_worktree=round_details.review_worktree,
+            round_status=(
+                active_round.status.value if active_round is not None else None
+            ),
+            submission_mode=(
+                active_round.mode.value if active_round is not None else None
+            ),
+            request_id=(
+                active_round.request_id if active_round is not None else None
+            ),
+            reviewer_name=(
+                active_round.reviewer_name
+                if active_round is not None
+                else None
+            ),
+            review_worktree=(
+                active_round.review_worktree
+                if active_round is not None
+                else None
+            ),
             review_worktree_available=review_worktree_available,
             handoff_status=handoff.status,
             handoff_target=handoff.target,
@@ -1198,8 +1208,10 @@ def _validate_active_review_artifacts(
     run_id: str,
     current_round: int,
     current_head_oid: str | None,
-    round_details: _RoundSummary,
+    active_round: ActiveRoundRecord,
 ) -> bool:
+    """Validate round artifacts and report review-worktree availability."""
+
     round_directory = (
         run_directory / "rounds" / f"{current_round:03d}"
     )
@@ -1265,7 +1277,7 @@ def _validate_active_review_artifacts(
                 round_record["mode"],
                 "active round record.mode",
             ),
-            round_details.mode,
+            active_round.mode.value,
             "submission mode",
         ),
         (
@@ -1273,7 +1285,7 @@ def _validate_active_review_artifacts(
                 round_record["request_id"],
                 "active round record.request_id",
             ),
-            round_details.request_id,
+            active_round.request_id,
             "request ID",
         ),
         (
@@ -1281,7 +1293,7 @@ def _validate_active_review_artifacts(
                 round_record["status"],
                 "active round record.status",
             ),
-            round_details.status,
+            active_round.status.value,
             "round status",
         ),
         (
@@ -1315,7 +1327,7 @@ def _validate_active_review_artifacts(
                 round_record["review_worktree"],
                 "active round record.review_worktree",
             ),
-            round_details.review_worktree,
+            active_round.review_worktree,
             "review worktree",
         ),
     )
@@ -1343,7 +1355,7 @@ def _validate_active_review_artifacts(
         },
         path="active round record.reviewer",
     )
-    if reviewer["name"] != round_details.reviewer_name:
+    if reviewer["name"] != active_round.reviewer_name:
         raise RunStateError(
             "active round Reviewer name does not match state"
         )
@@ -1426,7 +1438,7 @@ def _validate_active_review_artifacts(
         run_id=run_id,
         current_round=current_round,
         current_head_oid=current_head_oid,
-        round_details=round_details,
+        active_round=active_round,
         report_artifact=report_artifact,
     )
 
@@ -1460,11 +1472,7 @@ def _validate_active_review_artifacts(
             "active round bundle-input manifest does not match the request"
         )
 
-    review_worktree = round_details.review_worktree
-    if review_worktree is None:
-        raise RunStateError(
-            "a reviewing run must record an active review worktree"
-        )
+    review_worktree = active_round.review_worktree
     if not os.path.lexists(review_worktree):
         return False
     if review_worktree.is_symlink() or not review_worktree.is_dir():
@@ -1502,7 +1510,7 @@ def _assert_request_matches_active_round(
     run_id: str,
     current_round: int,
     current_head_oid: str | None,
-    round_details: _RoundSummary,
+    active_round: ActiveRoundRecord,
     report_artifact: BundleArtifact,
 ) -> None:
     expected_context = tuple(
@@ -1515,8 +1523,8 @@ def _assert_request_matches_active_round(
     comparisons = (
         (request.run_id, run_id, "run ID"),
         (request.round_number, current_round, "round number"),
-        (request.mode.value, round_details.mode, "submission mode"),
-        (request.request_id, round_details.request_id, "request ID"),
+        (request.mode, active_round.mode, "submission mode"),
+        (request.request_id, active_round.request_id, "request ID"),
         (request.object_format, record.object_format, "Git object format"),
         (request.base_oid, record.base_oid, "base OID"),
         (request.head_oid, current_head_oid, "head OID"),
@@ -1540,7 +1548,7 @@ def _assert_request_matches_active_round(
         (request.reviewer_kind, record.reviewer.kind, "Reviewer kind"),
         (
             request.reviewer_name,
-            round_details.reviewer_name,
+            active_round.reviewer_name,
             "Reviewer name",
         ),
     )
@@ -1565,85 +1573,6 @@ def _assert_request_matches_active_round(
             "this first-round implementation does not support Developer "
             "resolution inputs"
         )
-
-
-def _round_status_details(value: object) -> _RoundSummary:
-    if value is None:
-        return _RoundSummary(None, None, None, None, None, None, None)
-    data = _require_object(value, "state.active_round")
-    _check_fields(
-        data,
-        required={
-            "round",
-            "status",
-            "mode",
-            "request_id",
-            "result_id",
-            "review_worktree",
-            "reviewer_name",
-        },
-        path="state.active_round",
-    )
-    round_number = _require_nonnegative_int(
-        data.get("round"),
-        "state.active_round.round",
-    )
-    if round_number < 1:
-        raise RunStateError("state.active_round.round must be positive")
-    status_text = _require_string(
-        data.get("status"),
-        "state.active_round.status",
-    )
-    try:
-        status = RoundStatus(status_text)
-    except ValueError:
-        supported = ", ".join(item.value for item in RoundStatus)
-        raise RunStateError(
-            f"state.active_round.status must be one of: {supported}"
-        ) from None
-    mode_text = _require_string(
-        data.get("mode"),
-        "state.active_round.mode",
-    )
-    try:
-        mode = SubmissionMode(mode_text)
-    except ValueError:
-        supported = ", ".join(item.value for item in SubmissionMode)
-        raise RunStateError(
-            f"state.active_round.mode must be one of: {supported}"
-        ) from None
-    request_id = _require_uuid(
-        data.get("request_id"),
-        "state.active_round.request_id",
-    )
-    result_value = data.get("result_id")
-    result_id = (
-        None
-        if result_value is None
-        else _require_uuid(result_value, "state.active_round.result_id")
-    )
-    worktree = _require_absolute_path(
-        data.get("review_worktree"),
-        "state.active_round.review_worktree",
-    )
-    reviewer_name = _require_string(
-        data.get("reviewer_name"),
-        "state.active_round.reviewer_name",
-    )
-    if REVIEWER_NAME_PATTERN.fullmatch(reviewer_name) is None:
-        raise RunStateError(
-            "state.active_round.reviewer_name must be a valid Herdr agent "
-            "name"
-        )
-    return _RoundSummary(
-        round_number=round_number,
-        status=status.value,
-        mode=mode.value,
-        request_id=request_id,
-        result_id=result_id,
-        review_worktree=worktree,
-        reviewer_name=reviewer_name,
-    )
 
 
 def _handoff_details(value: object) -> _HandoffSummary:
@@ -1687,14 +1616,11 @@ def _handoff_details(value: object) -> _HandoffSummary:
     )
     if protocol is not None and protocol < 1:
         raise RunStateError("state.handoff.herdr_protocol must be positive")
-    status_text = _require_string(data.get("status"), "state.handoff.status")
-    try:
-        handoff_status = HandoffStatus(status_text)
-    except ValueError:
-        supported = ", ".join(item.value for item in HandoffStatus)
-        raise RunStateError(
-            f"state.handoff.status must be one of: {supported}"
-        ) from None
+    handoff_status = _VALIDATOR.require_enum(
+        data.get("status"),
+        "state.handoff.status",
+        HandoffStatus,
+    )
     target = _require_string(data.get("target"), "state.handoff.target")
     if REVIEWER_NAME_PATTERN.fullmatch(target) is None:
         raise RunStateError(
@@ -1735,7 +1661,7 @@ def _validate_active_state_shape(
     current_head_oid: str | None,
     approved_head_oid: str | None,
     active_escalation_id: str | None,
-    round_details: _RoundSummary,
+    active_round: ActiveRoundRecord | None,
     handoff: _HandoffSummary,
     object_format: str,
 ) -> None:
@@ -1755,10 +1681,7 @@ def _validate_active_state_shape(
                 "an unused implementing run must have no current round or "
                 "requested head"
             )
-        if (
-            round_details.round_number is not None
-            or handoff.status is not None
-        ):
+        if active_round is not None or handoff.status is not None:
             raise RunStateError(
                 "an unused implementing run must have no active round or "
                 "handoff"
@@ -1774,20 +1697,18 @@ def _validate_active_state_shape(
         raise RunStateError(
             "a reviewing run cannot retain approval or active escalation"
         )
-    if round_details.round_number != current_round:
+    if active_round is None:
+        raise RunStateError("a reviewing run must record an active round")
+    if active_round.round_number != current_round:
         raise RunStateError(
             "state.active_round.round must match state.current_round"
         )
-    if round_details.status != RoundStatus.REVIEWING.value:
+    if active_round.status is not RoundStatus.REVIEWING:
         raise RunStateError(
             "the active round status must be reviewing while the run is "
             "reviewing"
         )
-    if round_details.review_worktree is None:
-        raise RunStateError(
-            "a reviewing run must record an active review worktree"
-        )
-    if round_details.result_id is not None:
+    if active_round.result_id is not None:
         raise RunStateError(
             "a reviewing round cannot have an authoritative result ID"
         )
@@ -1795,7 +1716,7 @@ def _validate_active_state_shape(
         raise RunStateError(
             "state.handoff.round must match state.current_round"
         )
-    if handoff.target != round_details.reviewer_name:
+    if handoff.target != active_round.reviewer_name:
         raise RunStateError(
             "state.handoff.target must match the active Reviewer name"
         )
@@ -2130,16 +2051,7 @@ def _require_nonnegative_int(value: object, path: str) -> int:
 
 
 def _require_phase(value: object, path: str) -> RunPhase:
-    text = _require_string(value, path)
-    try:
-        return RunPhase(text)
-    except ValueError:
-        supported = ", ".join(phase.value for phase in RunPhase)
-        raise RunStateError(f"{path} must be one of: {supported}") from None
-
-
-def _require_agent_kind(value: object, path: str) -> AgentKind:
-    return _VALIDATOR.require_enum(value, path, AgentKind)
+    return _VALIDATOR.require_enum(value, path, RunPhase)
 
 
 def _require_absolute_path(value: object, path: str) -> Path:

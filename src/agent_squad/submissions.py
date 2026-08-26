@@ -15,6 +15,7 @@ import uuid
 
 from . import runs
 from .artifacts import (
+    ActiveRoundRecord,
     ArtifactValidationError,
     BundleArtifact,
     HandoffStatus,
@@ -319,6 +320,8 @@ def _prepare_submission_locked(
     staging_directory: Path | None = None
     round_directory = rounds_root / f"{round_number:03d}"
     worktree_created = False
+    bundle_created = False
+    bundle_root = review_worktree / REVIEW_BUNDLE_DIRECTORY_NAME
     round_directory_committed = False
     run_record_written = False
     commit_point_reached = False
@@ -357,8 +360,10 @@ def _prepare_submission_locked(
             head_oid,
         )
         worktree_created = True
+        _create_review_bundle_root(bundle_root)
+        bundle_created = True
         _build_review_bundle(
-            review_worktree=review_worktree,
+            bundle_root=bundle_root,
             run_directory=run_directory,
             staging_directory=staging_directory,
             request=request,
@@ -389,6 +394,15 @@ def _prepare_submission_locked(
 
         next_run_record = copy.deepcopy(run_record)
         next_run_record["phase"] = runs.RunPhase.REVIEWING.value
+        active_round = ActiveRoundRecord(
+            round_number=round_number,
+            status=RoundStatus.REVIEWING,
+            mode=mode,
+            request_id=request_id,
+            result_id=None,
+            review_worktree=review_worktree,
+            reviewer_name=reviewer_name,
+        )
         next_state = copy.deepcopy(state)
         next_state.update(
             updated_at=timestamp,
@@ -396,15 +410,7 @@ def _prepare_submission_locked(
             current_round=round_number,
             current_head_oid=head_oid,
             approved_head_oid=None,
-            active_round={
-                "round": round_number,
-                "status": RoundStatus.REVIEWING.value,
-                "mode": mode.value,
-                "request_id": request_id,
-                "result_id": None,
-                "review_worktree": str(review_worktree),
-                "reviewer_name": reviewer_name,
-            },
+            active_round=active_round.to_dict(),
             handoff=pending_handoff,
         )
 
@@ -465,6 +471,10 @@ def _prepare_submission_locked(
         if staging_directory is not None:
             cleanup_errors.extend(
                 _remove_owned_directory(staging_directory, "staged round")
+            )
+        if bundle_created:
+            cleanup_errors.extend(
+                _remove_owned_directory(bundle_root, "review bundle")
             )
         if worktree_created:
             cleanup_errors.extend(
@@ -592,15 +602,7 @@ def _submission_result(
 
 
 def _submission_mode(value: SubmissionMode | str) -> SubmissionMode:
-    if isinstance(value, SubmissionMode):
-        return value
-    try:
-        return SubmissionMode(value)
-    except ValueError:
-        supported = ", ".join(mode.value for mode in SubmissionMode)
-        raise SubmissionError(
-            f"submission mode must be one of: {supported}"
-        ) from None
+    return _VALIDATOR.require_enum(value, "submission mode", SubmissionMode)
 
 
 def _validate_branch_identity(
@@ -975,24 +977,32 @@ def _create_detached_review_worktree(
         )
 
 
+def _create_review_bundle_root(bundle_root: Path) -> None:
+    try:
+        bundle_root.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise SubmissionError(
+            "candidate revision already contains the reserved review-bundle "
+            f"path: {bundle_root}"
+        ) from error
+    except OSError as error:
+        raise SubmissionError(
+            f"cannot create review-bundle directory {bundle_root}: {error}"
+        ) from error
+
+
 def _build_review_bundle(
     *,
-    review_worktree: Path,
+    bundle_root: Path,
     run_directory: Path,
     staging_directory: Path,
     request: ReviewRequest,
     request_bytes: bytes,
     report: ImplementationReport,
 ) -> None:
-    bundle_root = review_worktree / REVIEW_BUNDLE_DIRECTORY_NAME
-    if os.path.lexists(bundle_root):
-        raise SubmissionError(
-            "candidate revision already contains the reserved review-bundle "
-            f"path: {bundle_root}"
-        )
     input_root = bundle_root / "input"
     output_root = bundle_root / "output"
-    input_root.mkdir(parents=True, mode=0o700)
+    input_root.mkdir(mode=0o700)
     output_root.mkdir(mode=0o700)
     atomic_write(input_root / "request.json", request_bytes, mode=0o400)
     atomic_write(

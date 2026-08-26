@@ -1,10 +1,10 @@
-"""Typed protocol artifacts shared across review-request commands."""
+"""Typed protocol records shared across review-workflow commands."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 
 from .initialization import AgentKind, SCHEMA_VERSION
@@ -52,6 +52,100 @@ class HandoffStatus(StrEnum):
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ActiveRoundRecord:
+    """Serializable current-round state shared by readers and writers."""
+
+    round_number: int
+    status: RoundStatus
+    mode: SubmissionMode
+    request_id: str
+    result_id: str | None
+    review_worktree: Path
+    reviewer_name: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ActiveRoundRecord":
+        """Validate one non-null ``state.active_round`` record."""
+
+        label = "state.active_round"
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "round",
+                "status",
+                "mode",
+                "request_id",
+                "result_id",
+                "review_worktree",
+                "reviewer_name",
+            },
+            path=label,
+        )
+        round_number = _require_int(data["round"], f"{label}.round")
+        if round_number < 1:
+            raise ArtifactValidationError(
+                f"{label}.round must be positive"
+            )
+        result_value = data["result_id"]
+        result_id = (
+            None
+            if result_value is None
+            else _require_uuid(result_value, f"{label}.result_id")
+        )
+        worktree_text = _require_string(
+            data["review_worktree"],
+            f"{label}.review_worktree",
+        )
+        review_worktree = Path(worktree_text)
+        if not review_worktree.is_absolute():
+            raise ArtifactValidationError(
+                f"{label}.review_worktree must be an absolute path"
+            )
+        reviewer_name = _require_string(
+            data["reviewer_name"],
+            f"{label}.reviewer_name",
+        )
+        if REVIEWER_NAME_PATTERN.fullmatch(reviewer_name) is None:
+            raise ArtifactValidationError(
+                f"{label}.reviewer_name must be a valid Herdr agent name"
+            )
+        return cls(
+            round_number=round_number,
+            status=_VALIDATOR.require_enum(
+                data["status"],
+                f"{label}.status",
+                RoundStatus,
+            ),
+            mode=_VALIDATOR.require_enum(
+                data["mode"],
+                f"{label}.mode",
+                SubmissionMode,
+            ),
+            request_id=_require_uuid(
+                data["request_id"],
+                f"{label}.request_id",
+            ),
+            result_id=result_id,
+            review_worktree=review_worktree,
+            reviewer_name=reviewer_name,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable JSON representation."""
+
+        return {
+            "round": self.round_number,
+            "status": self.status.value,
+            "mode": self.mode.value,
+            "request_id": self.request_id,
+            "result_id": self.result_id,
+            "review_worktree": str(self.review_worktree),
+            "reviewer_name": self.reviewer_name,
+        }
 
 
 @dataclass(frozen=True)
@@ -153,14 +247,11 @@ class ReviewRequest:
                 f"review request.schema_version must be {SCHEMA_VERSION}"
             )
 
-        mode_text = _require_string(data["mode"], "review request.mode")
-        try:
-            mode = SubmissionMode(mode_text)
-        except ValueError:
-            supported = ", ".join(item.value for item in SubmissionMode)
-            raise ArtifactValidationError(
-                f"review request.mode must be one of: {supported}"
-            ) from None
+        mode = _VALIDATOR.require_enum(
+            data["mode"],
+            "review request.mode",
+            SubmissionMode,
+        )
 
         object_format = _require_string(
             data["git_object_format"],

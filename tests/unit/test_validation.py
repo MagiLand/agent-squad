@@ -97,6 +97,14 @@ class JsonValidatorTests(unittest.TestCase):
                 "full lowercase",
             ),
             (
+                lambda: self.validator.require_oid(
+                    "b" * 40,
+                    "sha512",
+                    "head",
+                ),
+                "unsupported Git object format",
+            ),
+            (
                 lambda: self.validator.require_timestamp("not-time", "time"),
                 "RFC 3339",
             ),

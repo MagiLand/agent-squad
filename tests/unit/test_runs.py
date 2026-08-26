@@ -141,10 +141,6 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 "must be one of",
             ),
             (
-                lambda: runs._require_agent_kind("unknown", "kind"),
-                "must be one of",
-            ),
-            (
                 lambda: runs._require_digest("A" * 64, "digest"),
                 "lowercase SHA-256",
             ),
@@ -412,7 +408,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 {"kind": "codex", "start_args": [""]}
             )
 
-    def test_typed_role_and_round_summaries_preserve_field_names(self) -> None:
+    def test_typed_role_records_preserve_field_names(self) -> None:
         captured = runs._validate_captured_record(
             {
                 "source_path": "/tmp/task.md",
@@ -427,17 +423,6 @@ class RunArtifactValidationTests(unittest.TestCase):
         reviewer = runs._validate_reviewer(
             {"kind": "claude", "start_args": ["--strict"]}
         )
-        round_summary = runs._round_status_details(
-            {
-                "round": 1,
-                "status": "reviewing",
-                "mode": "new_revision",
-                "request_id": "12345678-1234-5678-9234-567812345678",
-                "result_id": None,
-                "review_worktree": "/tmp/review",
-                "reviewer_name": "asq-12345678-r001-reviewer",
-            }
-        )
         self.assertEqual(captured.source_path, Path("/tmp/task.md"))
         self.assertEqual(captured.run_path, "task.md")
         self.assertEqual(captured.sha256, "a" * 64)
@@ -445,18 +430,6 @@ class RunArtifactValidationTests(unittest.TestCase):
         self.assertEqual(implementer.kind.value, "codex")
         self.assertEqual(reviewer.kind.value, "claude")
         self.assertEqual(reviewer.start_args, ("--strict",))
-        self.assertEqual(round_summary.status, "reviewing")
-        self.assertEqual(round_summary.mode, "new_revision")
-        self.assertEqual(round_summary.review_worktree, Path("/tmp/review"))
-        self.assertEqual(round_summary.round_number, 1)
-        self.assertEqual(
-            round_summary.request_id,
-            "12345678-1234-5678-9234-567812345678",
-        )
-        self.assertEqual(
-            round_summary.reviewer_name,
-            "asq-12345678-r001-reviewer",
-        )
 
     def test_state_match_errors_name_the_real_json_field(self) -> None:
         with self.assertRaisesRegex(
@@ -505,16 +478,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._handoff_details(value)
 
-    def test_reviewing_state_requires_a_typed_worktree_path(self) -> None:
-        round_summary = runs._RoundSummary(
-            round_number=1,
-            status="reviewing",
-            mode="new_revision",
-            request_id="12345678-1234-5678-9234-567812345678",
-            result_id=None,
-            review_worktree=None,
-            reviewer_name="asq-12345678-r001-reviewer",
-        )
+    def test_reviewing_state_requires_an_active_round_record(self) -> None:
         handoff = runs._HandoffSummary(
             round_number=1,
             status="sent",
@@ -526,7 +490,7 @@ class RunArtifactValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             runs.RunStateError,
-            "must record an active review worktree",
+            "must record an active round",
         ):
             runs._validate_active_state_shape(
                 phase=runs.RunPhase.REVIEWING,
@@ -534,7 +498,7 @@ class RunArtifactValidationTests(unittest.TestCase):
                 current_head_oid="a" * 40,
                 approved_head_oid=None,
                 active_escalation_id=None,
-                round_details=round_summary,
+                active_round=None,
                 handoff=handoff,
                 object_format="sha1",
             )

@@ -519,6 +519,185 @@ class SubmitCommandTests(unittest.TestCase):
             ).stdout
             self.assertEqual(worktrees.count("worktree "), 1)
 
+    def test_case_colliding_tracked_bundle_path_is_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            collision_file = (
+                repository / ".Agent-Squad-Review/tracked.txt"
+            )
+            collision_file.parent.mkdir()
+            collision_file.write_text(
+                "candidate content\n",
+                encoding="utf-8",
+            )
+            lowercase_alias = repository / ".agent-squad-review"
+            if not lowercase_alias.exists():
+                self.skipTest("requires a case-insensitive filesystem")
+            run(
+                ["git", "add", "-f", ".Agent-Squad-Review/tracked.txt"],
+                cwd=repository,
+            )
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "test: track colliding review path",
+                ],
+                cwd=repository,
+            )
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertNotEqual(submitted.returncode, 0)
+            self.assertIn(
+                "candidate revision already contains the reserved "
+                "review-bundle path",
+                submitted.stderr,
+            )
+            self.assertEqual(
+                collision_file.read_text(encoding="utf-8"),
+                "candidate content\n",
+            )
+            worktrees = run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repository,
+            ).stdout
+            self.assertEqual(worktrees.count("worktree "), 1)
+
+    def test_partially_built_owned_bundle_is_removed_on_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, _, report, _, _ = _start_run(root)
+            _commit_candidate(repository)
+
+            def fail_after_partial_write(**arguments: object) -> None:
+                bundle_root = arguments["bundle_root"]
+                if not isinstance(bundle_root, Path):
+                    raise AssertionError("bundle root must be a path")
+                (bundle_root / "partial.txt").write_text(
+                    "partial\n",
+                    encoding="utf-8",
+                )
+                raise submissions.SubmissionError("injected bundle failure")
+
+            with (
+                mock.patch.object(
+                    submissions,
+                    "_build_review_bundle",
+                    side_effect=fail_after_partial_write,
+                ),
+                self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "injected bundle failure",
+                ),
+            ):
+                submissions.submit_candidate(
+                    repository,
+                    report_path=report,
+                    mode="new_revision",
+                )
+
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["phase"], "implementing")
+            self.assertFalse((run_directory / "rounds").exists())
+            worktrees = run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repository,
+            ).stdout
+            self.assertEqual(worktrees.count("worktree "), 1)
+
+    def test_unignored_review_bundle_rolls_back_and_allows_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            ignore_file = repository / ".gitignore"
+            ignore_file.write_text(
+                "!.agent-squad-review/\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", ".gitignore"], cwd=repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "test: expose review bundle",
+                ],
+                cwd=repository,
+            )
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertNotEqual(submitted.returncode, 0)
+            self.assertIn(
+                ".agent-squad-review is not excluded",
+                submitted.stderr,
+            )
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["phase"], "implementing")
+            self.assertFalse((run_directory / "rounds").exists())
+            worktrees = run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repository,
+            ).stdout
+            self.assertEqual(worktrees.count("worktree "), 1)
+
+            ignore_file.write_text(
+                ".agent-squad-review/\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", ".gitignore"], cwd=repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "test: exclude review bundle",
+                ],
+                cwd=repository,
+            )
+
+            retried = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertEqual(retried.returncode, 0, retried.stderr)
+
     def test_postcommit_event_failure_preserves_pending_round(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
