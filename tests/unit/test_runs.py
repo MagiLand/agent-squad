@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -503,6 +504,116 @@ class RunArtifactValidationTests(unittest.TestCase):
         )
 
         self.assertIs(result, active_round)
+
+    def test_active_state_shape_rejects_inconsistent_relationships(
+        self,
+    ) -> None:
+        oid = "a" * 40
+        reviewing_round = _active_round()
+        handoff = _handoff()
+        valid_reviewing = {
+            "phase": runs.RunPhase.REVIEWING,
+            "current_round": 1,
+            "current_head_oid": oid,
+            "approved_head_oid": None,
+            "active_escalation_id": None,
+            "active_round": reviewing_round,
+            "handoff": handoff,
+            "object_format": "sha1",
+        }
+        unused_implementing = {
+            **valid_reviewing,
+            "phase": runs.RunPhase.IMPLEMENTING,
+            "current_round": 0,
+            "current_head_oid": None,
+            "active_round": None,
+            "handoff": None,
+        }
+        cases = (
+            (
+                "unused implementing head",
+                {**unused_implementing, "current_head_oid": oid},
+                "an unused implementing run must have no current round or "
+                "requested head",
+            ),
+            (
+                "unused implementing active records",
+                {**unused_implementing, "active_round": reviewing_round},
+                "an unused implementing run must have no active round or "
+                "handoff",
+            ),
+            (
+                "reviewing round number",
+                {**valid_reviewing, "current_round": 0},
+                "a reviewing run must identify a current round and head",
+            ),
+            (
+                "reviewing approval",
+                {**valid_reviewing, "approved_head_oid": "b" * 40},
+                "a reviewing run cannot retain approval or active escalation",
+            ),
+            (
+                "reviewing status",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        status=RoundStatus.APPLIED,
+                    ),
+                },
+                "the active round status must be reviewing while the run is "
+                "reviewing",
+            ),
+            (
+                "reviewing result",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        result_id="87654321-4321-6789-a234-678912345678",
+                    ),
+                },
+                "a reviewing round cannot have an authoritative result ID",
+            ),
+            (
+                "active round number",
+                {
+                    **valid_reviewing,
+                    "active_round": replace(
+                        reviewing_round,
+                        round_number=2,
+                    ),
+                },
+                "state.active_round.round must match state.current_round",
+            ),
+            (
+                "missing handoff",
+                {**valid_reviewing, "handoff": None},
+                "a reviewing run must record a handoff",
+            ),
+            (
+                "handoff round number",
+                {
+                    **valid_reviewing,
+                    "handoff": replace(handoff, round_number=2),
+                },
+                "state.handoff.round must match state.current_round",
+            ),
+            (
+                "handoff target",
+                {
+                    **valid_reviewing,
+                    "handoff": replace(handoff, target="asq-other-reviewer"),
+                },
+                "state.handoff.target must match the active Reviewer name",
+            ),
+        )
+
+        for case, arguments, message in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(runs.RunStateError) as error:
+                    runs._validate_active_state_shape(**arguments)
+                self.assertEqual(str(error.exception), message)
 
     def test_implementing_state_requires_a_consistent_closed_round(
         self,

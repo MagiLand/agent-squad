@@ -935,7 +935,7 @@ def _validate_run_record(
     base_ref = _require_string(data["base_ref"], "run record.base_ref")
     object_format = _require_object_format(
         data["git_object_format"],
-        "active run record.git_object_format",
+        "run record.git_object_format",
     )
     base_oid = _require_oid(
         data["base_oid"], object_format, "run record.base_oid"

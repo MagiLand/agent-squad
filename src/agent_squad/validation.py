@@ -100,7 +100,9 @@ class JsonValidator:
 
         result = self.require_string(value, path)
         if result not in OID_LENGTHS:
-            raise self._error_type(f"{path} must be sha1 or sha256")
+            raise self._error_type(
+                f"{path} must be sha1 or sha256: {result!r}"
+            )
         return result
 
     def require_int(self, value: object, path: str) -> int:

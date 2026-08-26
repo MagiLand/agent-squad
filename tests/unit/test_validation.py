@@ -151,7 +151,7 @@ class JsonValidatorTests(unittest.TestCase):
                     "sha512",
                     "format",
                 ),
-                "sha1 or sha256",
+                "sha1 or sha256: 'sha512'",
             ),
         )
         for operation, message in cases:

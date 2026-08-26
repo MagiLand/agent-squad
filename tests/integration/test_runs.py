@@ -775,6 +775,11 @@ class StartAndStatusCommandTests(unittest.TestCase):
                     "finished_at must be set exactly when the phase is "
                     "terminal",
                 ),
+                (
+                    "object format",
+                    "run record.git_object_format must be sha1 or sha256: "
+                    "'sha512'",
+                ),
             )
             for case, message in cases:
                 with self.subTest(case=case):
@@ -784,6 +789,8 @@ class StartAndStatusCommandTests(unittest.TestCase):
                         record["repository"]["start_head_detached"] = False
                     elif case == "reviewer arguments":
                         record["reviewer"]["start_args"] = [""]
+                    elif case == "object format":
+                        record["git_object_format"] = "sha512"
                     else:
                         record["finished_at"] = "2026-08-24T10:00:00Z"
                     record_path.write_text(
