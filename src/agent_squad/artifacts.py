@@ -282,6 +282,122 @@ class BundleArtifact:
 
 
 @dataclass(frozen=True)
+class DeveloperResolution:
+    """One authoritative Developer decision and its companion artifact."""
+
+    created_at: str
+    resolution_id: str
+    run_id: str
+    resolves_escalation_id: str
+    applies_to_finding_ids: tuple[str, ...]
+    resolution_path: str
+    resolution_sha256: str
+    additional_rounds_granted: int
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "DeveloperResolution":
+        """Validate and construct one Developer resolution artifact."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "resolution_id",
+                "run_id",
+                "resolves_escalation_id",
+                "applies_to_finding_ids",
+                "resolution_path",
+                "resolution_sha256",
+                "additional_rounds_granted",
+            },
+            path=label,
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        finding_ids = _require_string_list(
+            data["applies_to_finding_ids"],
+            f"{label}.applies_to_finding_ids",
+        )
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ArtifactValidationError(
+                f"{label}.applies_to_finding_ids contains duplicates"
+            )
+        resolution_path = _require_string(
+            data["resolution_path"],
+            f"{label}.resolution_path",
+        )
+        parsed_path = PurePosixPath(resolution_path)
+        if (
+            parsed_path.is_absolute()
+            or ".." in parsed_path.parts
+            or len(parsed_path.parts) != 1
+            or str(parsed_path) != resolution_path
+        ):
+            raise ArtifactValidationError(
+                f"{label}.resolution_path must name a companion file in "
+                "the same bundle directory"
+            )
+        additional_rounds = _require_int(
+            data["additional_rounds_granted"],
+            f"{label}.additional_rounds_granted",
+        )
+        if additional_rounds < 0:
+            raise ArtifactValidationError(
+                f"{label}.additional_rounds_granted must not be negative"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            resolution_id=_require_uuid(
+                data["resolution_id"],
+                f"{label}.resolution_id",
+            ),
+            run_id=_require_uuid(data["run_id"], f"{label}.run_id"),
+            resolves_escalation_id=_require_uuid(
+                data["resolves_escalation_id"],
+                f"{label}.resolves_escalation_id",
+            ),
+            applies_to_finding_ids=finding_ids,
+            resolution_path=resolution_path,
+            resolution_sha256=_require_digest(
+                data["resolution_sha256"],
+                f"{label}.resolution_sha256",
+            ),
+            additional_rounds_granted=additional_rounds,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable resolution representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "resolution_id": self.resolution_id,
+            "run_id": self.run_id,
+            "resolves_escalation_id": self.resolves_escalation_id,
+            "applies_to_finding_ids": list(self.applies_to_finding_ids),
+            "resolution_path": self.resolution_path,
+            "resolution_sha256": self.resolution_sha256,
+            "additional_rounds_granted": self.additional_rounds_granted,
+        }
+
+
+@dataclass(frozen=True)
 class ReviewFinding:
     """One structured finding in a Reviewer result."""
 
@@ -355,9 +471,10 @@ class ReviewFinding:
                 data["category"],
                 f"{label}.category",
             ),
-            file=_require_repository_path(
+            file=_require_bundle_path(
                 data["file"],
                 f"{label}.file",
+                kind="repository",
             ),
             line_start=line_start,
             line_end=line_end,
@@ -674,6 +791,7 @@ class ReviewRequest:
     implementer_kind: AgentKind
     reviewer_kind: AgentKind
     reviewer_name: str
+    allowed_generated_paths: tuple[str, ...]
 
     @classmethod
     def from_dict(cls, value: object) -> "ReviewRequest":
@@ -704,6 +822,7 @@ class ReviewRequest:
                 "implementer_kind",
                 "reviewer_kind",
                 "reviewer_name",
+                "allowed_generated_paths",
             },
             path="review request",
         )
@@ -888,6 +1007,10 @@ class ReviewRequest:
                 AgentKind,
             ),
             reviewer_name=reviewer_name,
+            allowed_generated_paths=_require_allowed_generated_paths(
+                data["allowed_generated_paths"],
+                "review request.allowed_generated_paths",
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -917,6 +1040,7 @@ class ReviewRequest:
             "implementer_kind": self.implementer_kind.value,
             "reviewer_kind": self.reviewer_kind.value,
             "reviewer_name": self.reviewer_name,
+            "allowed_generated_paths": list(self.allowed_generated_paths),
         }
 
 
@@ -1173,7 +1297,12 @@ class ReviewRoundRecord:
         }
 
 
-def _require_bundle_path(value: object, label: str) -> str:
+def _require_bundle_path(
+    value: object,
+    label: str,
+    *,
+    kind: str = "bundle",
+) -> str:
     text = _require_string(value, label)
     path = PurePosixPath(text)
     if (
@@ -1183,7 +1312,7 @@ def _require_bundle_path(value: object, label: str) -> str:
         or str(path) != text
     ):
         raise ArtifactValidationError(
-            f"{label} must be a normalized bundle-relative path"
+            f"{label} must be a normalized {kind}-relative path"
         )
     return text
 
@@ -1237,21 +1366,6 @@ def _require_meaningful_string_list(
     )
 
 
-def _require_repository_path(value: object, label: str) -> str:
-    text = _require_string(value, label)
-    path = PurePosixPath(text)
-    if (
-        path.is_absolute()
-        or path == PurePosixPath(".")
-        or ".." in path.parts
-        or str(path) != text
-    ):
-        raise ArtifactValidationError(
-            f"{label} must be a normalized repository-relative path"
-        )
-    return text
-
-
 def _require_reviewer_name(value: object, label: str) -> str:
     result = _require_string(value, label)
     if REVIEWER_NAME_PATTERN.fullmatch(result) is None:
@@ -1292,6 +1406,36 @@ def _require_path_list(value: object, label: str) -> tuple[str, ...]:
     if len(paths) != len(set(paths)):
         raise ArtifactValidationError(f"{label} contains duplicate paths")
     return paths
+
+
+def _require_allowed_generated_paths(
+    value: object,
+    label: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ArtifactValidationError(f"{label} must be a JSON array")
+    paths: list[str] = []
+    seen: set[PurePosixPath] = set()
+    for index, item in enumerate(value):
+        item_label = f"{label}[{index}]"
+        text = _require_string(item, item_label)
+        path = PurePosixPath(text)
+        if (
+            path == PurePosixPath(".")
+            or path.is_absolute()
+            or ".." in path.parts
+        ):
+            raise ArtifactValidationError(
+                f"{item_label} must be a narrow repository-relative path "
+                "without '..'"
+            )
+        if path in seen:
+            raise ArtifactValidationError(
+                f"{label} contains duplicate path: {text}"
+            )
+        seen.add(path)
+        paths.append(text)
+    return tuple(paths)
 
 
 def _reject_duplicate_paths(

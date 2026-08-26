@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from tests._support import (
     add_src_to_path,
@@ -19,6 +21,17 @@ from tests._support import (
 
 add_src_to_path()
 
+from agent_squad.artifacts import ReviewRequest  # noqa: E402
+from agent_squad.initialization import AgentKind  # noqa: E402
+from agent_squad.review_submissions import (  # noqa: E402
+    ReviewSubmissionError,
+    _validate_bundle_inputs,
+    submit_review_result,
+)
+from agent_squad.submissions import (  # noqa: E402
+    deterministic_reviewer_name,
+)
+
 
 @dataclass(frozen=True)
 class _PreparedRound:
@@ -30,7 +43,12 @@ class _PreparedRound:
     request: dict[str, object]
 
 
-def _prepare_round(root: Path) -> _PreparedRound:
+def _prepare_round(
+    root: Path,
+    *,
+    allowed_generated_paths: tuple[str, ...] = (),
+    include_tracked_symlink: bool = False,
+) -> _PreparedRound:
     repository = root / "repository"
     seed_git_repository(repository)
     data_home = root / "data"
@@ -43,6 +61,18 @@ def _prepare_round(root: Path) -> _PreparedRound:
     )
     if initialized.returncode != 0:
         raise AssertionError(initialized.stderr)
+    if allowed_generated_paths:
+        configuration_path = repository / ".agent-squad/config.json"
+        configuration = json.loads(
+            configuration_path.read_text(encoding="utf-8")
+        )
+        configuration["allowed_generated_paths"] = list(
+            allowed_generated_paths
+        )
+        configuration_path.write_text(
+            f"{json.dumps(configuration, indent=2)}\n",
+            encoding="utf-8",
+        )
     task = root / "task.md"
     task.write_text(
         "# Task\n\nReview the exact candidate.\n",
@@ -61,7 +91,11 @@ def _prepare_round(root: Path) -> _PreparedRound:
     if started.returncode != 0:
         raise AssertionError(started.stderr)
     (repository / "feature.txt").write_text("candidate\n", encoding="utf-8")
-    run(["git", "add", "feature.txt"], cwd=repository)
+    candidate_paths = ["feature.txt"]
+    if include_tracked_symlink:
+        (repository / "feature-link").symlink_to("feature.txt")
+        candidate_paths.append("feature-link")
+    run(["git", "add", *candidate_paths], cwd=repository)
     run(
         [
             "git",
@@ -174,6 +208,118 @@ def _write_review(
     return review
 
 
+def _write_request(
+    prepared: _PreparedRound,
+    request: dict[str, object],
+) -> _PreparedRound:
+    request_path = prepared.bundle / "input/request.json"
+    request_path.chmod(0o600)
+    request_path.write_text(
+        f"{json.dumps(request, indent=2)}\n",
+        encoding="utf-8",
+    )
+    request_path.chmod(0o400)
+    return _PreparedRound(
+        repository=prepared.repository,
+        data_home=prepared.data_home,
+        environment=prepared.environment,
+        review_worktree=prepared.review_worktree,
+        bundle=prepared.bundle,
+        request=request,
+    )
+
+
+def _write_json_fixture(path: Path, value: object) -> None:
+    path.write_text(
+        f"{json.dumps(value, indent=2)}\n",
+        encoding="utf-8",
+    )
+
+
+def _prepare_multi_input_round(
+    root: Path,
+) -> tuple[_PreparedRound, list[dict[str, object]]]:
+    first_round = _prepare_round(root)
+    review_worktree = first_round.review_worktree.parent / "round-002"
+    run(
+        [
+            "git",
+            "worktree",
+            "move",
+            str(first_round.review_worktree),
+            str(review_worktree),
+        ],
+        cwd=first_round.repository,
+    )
+    prepared = _PreparedRound(
+        repository=first_round.repository,
+        data_home=first_round.data_home,
+        environment=first_round.environment,
+        review_worktree=review_worktree,
+        bundle=review_worktree / ".agent-squad-review",
+        request=copy.deepcopy(first_round.request),
+    )
+    input_root = prepared.bundle / "input"
+    previous_review = _review_result(first_round.request, "approved")
+    previous_review["result_id"] = (
+        "44444444-4444-4444-8444-444444444444"
+    )
+    (input_root / "previous-review.json").write_text(
+        f"{json.dumps(previous_review, indent=2)}\n",
+        encoding="utf-8",
+    )
+    (input_root / "previous-response.json").write_text(
+        f"{json.dumps({'schema_version': 1}, indent=2)}\n",
+        encoding="utf-8",
+    )
+    resolution_root = input_root / "resolutions"
+    resolution_root.mkdir()
+    resolutions: list[dict[str, object]] = []
+    resolution_paths: list[str] = []
+    for index in (1, 2):
+        companion_name = f"{index:03d}-resolution.md"
+        companion = f"# Resolution {index}\n\nUse policy {index}.\n".encode()
+        (resolution_root / companion_name).write_bytes(companion)
+        resolution_name = f"{index:03d}-resolution.json"
+        resolution = {
+            "schema_version": 1,
+            "created_at": f"2026-08-26T12:0{index}:00Z",
+            "resolution_id": (
+                f"{index:08d}-1111-4111-8111-{index:012d}"
+            ),
+            "run_id": prepared.request["run_id"],
+            "resolves_escalation_id": (
+                f"{index + 2:08d}-2222-4222-8222-"
+                f"{index + 2:012d}"
+            ),
+            "applies_to_finding_ids": [f"REV-{index:03d}"],
+            "resolution_path": companion_name,
+            "resolution_sha256": hashlib.sha256(companion).hexdigest(),
+            "additional_rounds_granted": 0,
+        }
+        (resolution_root / resolution_name).write_text(
+            f"{json.dumps(resolution, indent=2)}\n",
+            encoding="utf-8",
+        )
+        resolutions.append(resolution)
+        resolution_paths.append(f"input/resolutions/{resolution_name}")
+
+    request = copy.deepcopy(prepared.request)
+    request.update(
+        round=2,
+        reviewer_name=deterministic_reviewer_name(
+            str(request["run_id"]),
+            2,
+        ),
+        previous_review_path="input/previous-review.json",
+        previous_response_path="input/previous-response.json",
+        resolution_paths=resolution_paths,
+    )
+    prepared = _write_request(prepared, request)
+    _write_review(prepared)
+    return prepared, resolutions
+
+
 def _result_prompt_events(prepared: _PreparedRound) -> list[dict[str, object]]:
     events_path = (
         Path(prepared.environment["FAKE_HERDR_STATE_DIR"])
@@ -193,6 +339,46 @@ def _result_prompt_events(prepared: _PreparedRound) -> list[dict[str, object]]:
 
 
 class ReviewSubmitCommandTests(unittest.TestCase):
+    def test_notification_preflights_the_implementer_integration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            _write_review(prepared)
+            client = mock.Mock()
+
+            result = submit_review_result(
+                prepared.review_worktree,
+                herdr_client=client,
+            )
+
+            self.assertTrue(result.notification_sent)
+            client.discover.assert_called_once_with(AgentKind.CODEX)
+            client.dispatch_review_result.assert_called_once()
+
+    def test_configured_generated_output_is_carried_and_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(
+                Path(temporary_directory),
+                allowed_generated_paths=("build/",),
+            )
+            self.assertEqual(
+                prepared.request["allowed_generated_paths"],
+                ["build/"],
+            )
+            generated = prepared.review_worktree / "build/output.bin"
+            generated.parent.mkdir()
+            generated.write_bytes(b"generated output\n")
+            _write_review(prepared)
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            self.assertTrue((prepared.bundle / "local-state.json").is_file())
+
     def test_all_verdicts_are_marker_confirmed_before_neutral_notification(
         self,
     ) -> None:
@@ -341,6 +527,143 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertEqual(corrected.returncode, 0, corrected.stderr)
             self.assertTrue((prepared.bundle / "local-state.json").is_file())
 
+    def test_multi_input_bundle_and_resolution_integrity_are_verified(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, resolutions = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            request = ReviewRequest.from_dict(prepared.request)
+            resolution_root = prepared.bundle / "input/resolutions"
+            previous_review_path = (
+                prepared.bundle / "input/previous-review.json"
+            )
+            previous_response_path = (
+                prepared.bundle / "input/previous-response.json"
+            )
+            previous_review = json.loads(
+                previous_review_path.read_text(encoding="utf-8")
+            )
+
+            def restore_inputs() -> None:
+                _write_json_fixture(previous_review_path, previous_review)
+                _write_json_fixture(
+                    previous_response_path,
+                    {"schema_version": 1},
+                )
+                for index, resolution in enumerate(resolutions, start=1):
+                    resolution_json = (
+                        resolution_root / f"{index:03d}-resolution.json"
+                    )
+                    resolution_json.write_text(
+                        f"{json.dumps(resolution, indent=2)}\n",
+                        encoding="utf-8",
+                    )
+                    resolution_markdown = (
+                        resolution_root / f"{index:03d}-resolution.md"
+                    )
+                    resolution_markdown.write_text(
+                        f"# Resolution {index}\n\nUse policy {index}.\n",
+                        encoding="utf-8",
+                    )
+
+            _validate_bundle_inputs(prepared.bundle, request)
+
+            invalid_cases = (
+                (
+                    "previous review from another run",
+                    lambda: _write_json_fixture(
+                        previous_review_path,
+                        {
+                            **previous_review,
+                            "run_id": (
+                                "99999999-9999-4999-8999-999999999999"
+                            ),
+                        },
+                    ),
+                    "previous review run ID does not match",
+                ),
+                (
+                    "previous review from current round",
+                    lambda: _write_json_fixture(
+                        previous_review_path,
+                        {**previous_review, "round": 2},
+                    ),
+                    "previous review round must precede",
+                ),
+                (
+                    "invalid previous response",
+                    lambda: _write_json_fixture(
+                        previous_response_path,
+                        {"schema_version": 2},
+                    ),
+                    "previous response.schema_version must be 1",
+                ),
+                (
+                    "tampered companion",
+                    lambda: (
+                        resolution_root / "001-resolution.md"
+                    ).write_text("tampered\n", encoding="utf-8"),
+                    "digest",
+                ),
+                (
+                    "wrong run",
+                    lambda: _write_json_fixture(
+                        resolution_root / "001-resolution.json",
+                        {
+                            **resolutions[0],
+                            "run_id": (
+                                "99999999-9999-4999-8999-999999999999"
+                            ),
+                        },
+                    ),
+                    "run ID does not match",
+                ),
+                (
+                    "duplicate IDs",
+                    lambda: _write_json_fixture(
+                        resolution_root / "002-resolution.json",
+                        {
+                            **resolutions[1],
+                            "resolution_id": resolutions[0]["resolution_id"],
+                        },
+                    ),
+                    "duplicate Developer resolution IDs",
+                ),
+                (
+                    "non-increasing timestamps",
+                    lambda: _write_json_fixture(
+                        resolution_root / "002-resolution.json",
+                        {
+                            **resolutions[1],
+                            "created_at": resolutions[0]["created_at"],
+                        },
+                    ),
+                    "strictly increasing created_at",
+                ),
+            )
+            for label, mutate, message in invalid_cases:
+                with self.subTest(case=label):
+                    restore_inputs()
+                    mutate()
+                    with self.assertRaisesRegex(
+                        ReviewSubmissionError,
+                        message,
+                    ):
+                        _validate_bundle_inputs(prepared.bundle, request)
+
+            restore_inputs()
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            self.assertEqual(len(_result_prompt_events(prepared)), 1)
+
     def test_integrity_violations_create_no_marker_or_prompt(self) -> None:
         cases = (
             "request identity",
@@ -348,9 +671,12 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             "task digest",
             "tracked file",
             "assume-unchanged tracked file",
+            "assume-unchanged tracked symlink",
             "changed head",
             "unexpected bundle location",
             "unexpected worktree file",
+            "case-colliding input paths",
+            "symlinked bundle directory",
             "symlinked review",
             "missing Markdown",
         )
@@ -358,7 +684,12 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     root = Path(temporary_directory)
-                    prepared = _prepare_round(root)
+                    prepared = _prepare_round(
+                        root,
+                        include_tracked_symlink=(
+                            case == "assume-unchanged tracked symlink"
+                        ),
+                    )
                     review = _write_review(prepared)
                     if case == "request identity":
                         request_path = prepared.bundle / "input/request.json"
@@ -400,6 +731,21 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             "hidden change\n",
                             encoding="utf-8",
                         )
+                    elif case == "assume-unchanged tracked symlink":
+                        run(
+                            [
+                                "git",
+                                "update-index",
+                                "--assume-unchanged",
+                                "feature-link",
+                            ],
+                            cwd=prepared.review_worktree,
+                        )
+                        tracked_link = (
+                            prepared.review_worktree / "feature-link"
+                        )
+                        tracked_link.unlink()
+                        tracked_link.symlink_to("README.md")
                     elif case == "changed head":
                         run(
                             [
@@ -428,6 +774,29 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             "unexpected\n",
                             encoding="utf-8",
                         )
+                    elif case == "case-colliding input paths":
+                        context_root = prepared.bundle / "input/context"
+                        context_root.mkdir()
+                        content = b"same content\n"
+                        (context_root / "Plan.md").write_bytes(content)
+                        (context_root / "plan.md").write_bytes(content)
+                        request = copy.deepcopy(prepared.request)
+                        request["context_files"] = [
+                            {
+                                "path": "input/context/Plan.md",
+                                "sha256": hashlib.sha256(content).hexdigest(),
+                            },
+                            {
+                                "path": "input/context/plan.md",
+                                "sha256": hashlib.sha256(content).hexdigest(),
+                            },
+                        ]
+                        prepared = _write_request(prepared, request)
+                    elif case == "symlinked bundle directory":
+                        nested = prepared.bundle / "input/nested"
+                        nested.mkdir()
+                        nested.rmdir()
+                        nested.symlink_to(root, target_is_directory=True)
                     elif case == "symlinked review":
                         review_markdown = prepared.bundle / "output/review.md"
                         review_markdown.unlink()
@@ -443,6 +812,19 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     )
 
                     self.assertEqual(submitted.returncode, 1)
+                    if case == "assume-unchanged tracked symlink":
+                        self.assertIn(
+                            "tracked review file differs from HEAD: "
+                            "feature-link",
+                            submitted.stderr,
+                        )
+                    elif case == "case-colliding input paths":
+                        self.assertIn("case-colliding paths", submitted.stderr)
+                    elif case == "symlinked bundle directory":
+                        self.assertIn(
+                            "review bundle directory must not be a symlink",
+                            submitted.stderr,
+                        )
                     self.assertFalse(
                         (prepared.bundle / "local-state.json").exists()
                     )

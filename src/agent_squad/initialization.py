@@ -279,6 +279,23 @@ def default_review_worktree_root() -> Path:
         ) from error
 
 
+def matches_allowed_generated_path(
+    candidate: str,
+    configured_paths: tuple[str, ...],
+) -> bool:
+    """Return whether a repository-relative path is explicitly allowed."""
+
+    path = PurePosixPath(candidate)
+    for configured in configured_paths:
+        allowed = PurePosixPath(configured)
+        if (
+            path == allowed
+            or path.parts[: len(allowed.parts)] == allowed.parts
+        ):
+            return True
+    return False
+
+
 def default_configuration(review_worktree_root: Path) -> Configuration:
     """Build the minimal default configuration defined by the specification."""
 

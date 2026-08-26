@@ -12,6 +12,9 @@ from tests._support import add_src_to_path
 add_src_to_path()
 
 from agent_squad import submissions  # noqa: E402
+from agent_squad.initialization import (  # noqa: E402
+    matches_allowed_generated_path,
+)
 
 
 class SubmissionHelperTests(unittest.TestCase):
@@ -31,19 +34,19 @@ class SubmissionHelperTests(unittest.TestCase):
         configured = ("build/", "coverage/report/")
 
         self.assertTrue(
-            submissions._matches_allowed_generated_path(
+            matches_allowed_generated_path(
                 "build/output.bin",
                 configured,
             )
         )
         self.assertTrue(
-            submissions._matches_allowed_generated_path(
+            matches_allowed_generated_path(
                 "coverage/report/index.html",
                 configured,
             )
         )
         self.assertFalse(
-            submissions._matches_allowed_generated_path(
+            matches_allowed_generated_path(
                 "building/output.bin",
                 configured,
             )
@@ -60,7 +63,7 @@ class SubmissionHelperTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            submissions._matches_allowed_generated_path(
+            matches_allowed_generated_path(
                 "coverage/other.txt",
                 configured,
             )

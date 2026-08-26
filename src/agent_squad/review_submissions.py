@@ -12,17 +12,20 @@ import stat
 from .artifacts import (
     ArtifactValidationError,
     BundleArtifact,
+    DeveloperResolution,
     ReviewRequest,
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
 )
-from .herdr import HerdrClient, HerdrError
+from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
     AgentSquadError,
     GitWorktree,
+    REVIEW_DIRECTORY_NAME,
     SCHEMA_VERSION,
     discover_git_worktree,
+    matches_allowed_generated_path,
     run_git,
 )
 from .storage import (
@@ -37,7 +40,6 @@ from .submissions import deterministic_reviewer_name
 from .validation import JsonValidator
 
 
-REVIEW_BUNDLE_DIRECTORY_NAME = ".agent-squad-review"
 REQUEST_PATH = PurePosixPath("input/request.json")
 MARKER_PATH = PurePosixPath("local-state.json")
 SUBMISSION_LOCK_PATH = PurePosixPath("output/.review-submit.lock")
@@ -67,111 +69,6 @@ class ReviewSubmitResult:
     notification_error: str | None
 
 
-@dataclass(frozen=True)
-class _DeveloperResolution:
-    """Bundle-local Developer resolution needed for integrity checks."""
-
-    created_at: str
-    resolution_id: str
-    run_id: str
-    resolution_path: str
-    resolution_sha256: str
-
-    @classmethod
-    def from_dict(
-        cls,
-        value: object,
-        *,
-        label: str,
-    ) -> "_DeveloperResolution":
-        data = _VALIDATOR.require_object(value, label)
-        _VALIDATOR.check_fields(
-            data,
-            required={
-                "schema_version",
-                "created_at",
-                "resolution_id",
-                "run_id",
-                "resolves_escalation_id",
-                "applies_to_finding_ids",
-                "resolution_path",
-                "resolution_sha256",
-                "additional_rounds_granted",
-            },
-            path=label,
-        )
-        schema_version = _VALIDATOR.require_int(
-            data["schema_version"],
-            f"{label}.schema_version",
-        )
-        if schema_version != SCHEMA_VERSION:
-            raise ReviewSubmissionError(
-                f"{label}.schema_version must be {SCHEMA_VERSION}"
-            )
-        _VALIDATOR.require_uuid(
-            data["resolves_escalation_id"],
-            f"{label}.resolves_escalation_id",
-        )
-        finding_ids = data["applies_to_finding_ids"]
-        if not isinstance(finding_ids, list):
-            raise ReviewSubmissionError(
-                f"{label}.applies_to_finding_ids must be a JSON array"
-            )
-        validated_finding_ids = tuple(
-            _VALIDATOR.require_string(
-                finding_id,
-                f"{label}.applies_to_finding_ids[{index}]",
-            )
-            for index, finding_id in enumerate(finding_ids)
-        )
-        if len(validated_finding_ids) != len(set(validated_finding_ids)):
-            raise ReviewSubmissionError(
-                f"{label}.applies_to_finding_ids contains duplicates"
-            )
-        additional_rounds = _VALIDATOR.require_int(
-            data["additional_rounds_granted"],
-            f"{label}.additional_rounds_granted",
-        )
-        if additional_rounds < 0:
-            raise ReviewSubmissionError(
-                f"{label}.additional_rounds_granted must not be negative"
-            )
-        resolution_path = _VALIDATOR.require_string(
-            data["resolution_path"],
-            f"{label}.resolution_path",
-        )
-        parsed_path = PurePosixPath(resolution_path)
-        if (
-            parsed_path.is_absolute()
-            or ".." in parsed_path.parts
-            or len(parsed_path.parts) != 1
-            or str(parsed_path) != resolution_path
-        ):
-            raise ReviewSubmissionError(
-                f"{label}.resolution_path must name a companion file in "
-                "the same bundle directory"
-            )
-        return cls(
-            created_at=_VALIDATOR.require_timestamp(
-                data["created_at"],
-                f"{label}.created_at",
-            ),
-            resolution_id=_VALIDATOR.require_uuid(
-                data["resolution_id"],
-                f"{label}.resolution_id",
-            ),
-            run_id=_VALIDATOR.require_uuid(
-                data["run_id"],
-                f"{label}.run_id",
-            ),
-            resolution_path=resolution_path,
-            resolution_sha256=_VALIDATOR.require_digest(
-                data["resolution_sha256"],
-                f"{label}.resolution_sha256",
-            ),
-        )
-
-
 def submit_review_result(
     start: Path,
     *,
@@ -180,7 +77,7 @@ def submit_review_result(
     """Validate, marker-confirm, and notify one prepared review result."""
 
     worktree = discover_git_worktree(start)
-    bundle_root = worktree.root / REVIEW_BUNDLE_DIRECTORY_NAME
+    bundle_root = worktree.root / REVIEW_DIRECTORY_NAME
     _require_normal_directory(bundle_root, "review bundle")
     input_root = bundle_root / "input"
     output_root = bundle_root / "output"
@@ -214,7 +111,7 @@ def submit_review_result(
 
             client = herdr_client or HerdrClient(worktree.root)
             try:
-                client.discover(request.reviewer_kind)
+                client.discover(request.implementer_kind)
                 client.dispatch_review_result(
                     implementer_name=request.implementer_agent,
                     implementer_kind=request.implementer_kind,
@@ -236,7 +133,7 @@ def submit_review_result(
                     marker_path=marker_path,
                     marker_created=marker_created,
                     notification_sent=False,
-                    notification_error=_single_line(str(error)),
+                    notification_error=format_herdr_error(str(error)),
                 )
 
             return ReviewSubmitResult(
@@ -412,7 +309,11 @@ def _validate_worktree_integrity(
         raise ReviewSubmissionError(
             f"could not inspect review worktree output: {detail}"
         )
-    if visible.stdout:
+    unexpected_visible = _unexpected_worktree_entries(
+        visible.stdout,
+        request.allowed_generated_paths,
+    )
+    if unexpected_visible:
         raise ReviewSubmissionError(
             "review worktree contains tracked changes or unexpected "
             "non-ignored files outside the review bundle"
@@ -423,12 +324,31 @@ def _validate_worktree_integrity(
         "--quiet",
         "--no-index",
         "--",
-        str(PurePosixPath(REVIEW_BUNDLE_DIRECTORY_NAME) / REQUEST_PATH),
+        str(PurePosixPath(REVIEW_DIRECTORY_NAME) / REQUEST_PATH),
     )
     if ignored.returncode != 0:
         raise ReviewSubmissionError(
             ".agent-squad-review is not Git-excluded in the review worktree"
         )
+
+
+def _unexpected_worktree_entries(
+    status_output: str,
+    allowed_generated_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return visible entries not covered by the generated-path policy."""
+
+    unexpected: list[str] = []
+    for entry in status_output.split("\0"):
+        if not entry:
+            continue
+        if entry.startswith("?? ") and matches_allowed_generated_path(
+            entry[3:],
+            allowed_generated_paths,
+        ):
+            continue
+        unexpected.append(entry)
+    return tuple(unexpected)
 
 
 def _verify_flagged_tracked_files(
@@ -635,10 +555,16 @@ def _validate_bundle_inputs(
             bundle_root.joinpath(*resolution_path.parts),
             f"Developer resolution {index + 1}",
         )
-        resolution = _DeveloperResolution.from_dict(
-            value,
-            label=f"Developer resolution {index + 1}",
-        )
+        try:
+            resolution = DeveloperResolution.from_dict(
+                value,
+                label=f"Developer resolution {index + 1}",
+            )
+        except ArtifactValidationError as error:
+            raise ReviewSubmissionError(
+                f"Developer resolution {index + 1} failed validation: "
+                f"{error}"
+            ) from error
         if resolution.run_id != request.run_id:
             raise ReviewSubmissionError(
                 f"Developer resolution {index + 1} run ID does not match "
@@ -976,7 +902,3 @@ def _git_output(
             f"could not {action}: Git returned no value"
         )
     return output
-
-
-def _single_line(value: str) -> str:
-    return " ".join(value.splitlines()).strip()

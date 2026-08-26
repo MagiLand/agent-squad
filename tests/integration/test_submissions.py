@@ -1013,6 +1013,13 @@ class SubmitCommandTests(unittest.TestCase):
             review_worktree = Path(
                 state["active_round"]["review_worktree"]
             )
+            request = json.loads(
+                (
+                    review_worktree
+                    / ".agent-squad-review/input/request.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(request["allowed_generated_paths"], ["build/"])
             self.assertFalse(
                 (review_worktree / "implementation-report.md").exists()
             )

@@ -16,6 +16,12 @@ class HerdrError(AgentSquadError):
     """Raised when installed Herdr capabilities or delivery are unusable."""
 
 
+def format_herdr_error(value: str) -> str:
+    """Flatten a Herdr failure for stable one-line status output."""
+
+    return " ".join(value.splitlines()).strip() or "unknown Herdr error"
+
+
 @dataclass(frozen=True)
 class HerdrInstallation:
     """Validated facts discovered from the installed Herdr command."""
@@ -80,8 +86,8 @@ class HerdrClient:
         self._timeout_seconds = timeout_seconds
         self._executable: Path | None = None
 
-    def discover(self, reviewer_kind: AgentKind) -> HerdrInstallation:
-        """Validate schema, live protocol, commands, and role integration."""
+    def discover(self, agent_kind: AgentKind) -> HerdrInstallation:
+        """Validate schema, live protocol, commands, and agent integration."""
 
         executable = self._resolve_executable()
         version_result = self._run(("--version",))
@@ -139,7 +145,7 @@ class HerdrClient:
             (
                 line
                 for line in integration.splitlines()
-                if line.startswith(f"{reviewer_kind.value}:")
+                if line.startswith(f"{agent_kind.value}:")
             ),
             None,
         )
@@ -150,8 +156,8 @@ class HerdrClient:
         )
         if role_status is None or not role_status.startswith("current"):
             raise HerdrError(
-                f"Herdr integration for Reviewer kind "
-                f"{reviewer_kind.value!r} is not current"
+                f"Herdr integration for agent kind "
+                f"{agent_kind.value!r} is not current"
             )
 
         return HerdrInstallation(

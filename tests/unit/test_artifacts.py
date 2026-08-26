@@ -12,6 +12,7 @@ add_src_to_path()
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
     ArtifactValidationError,
+    DeveloperResolution,
     HandoffRecord,
     HandoffStatus,
     ReviewRequest,
@@ -56,6 +57,23 @@ def _request() -> dict[str, object]:
         "implementer_kind": "codex",
         "reviewer_kind": "claude",
         "reviewer_name": "asq-87654321-r001-reviewer",
+        "allowed_generated_paths": ["build/", "coverage/"],
+    }
+
+
+def _developer_resolution() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T13:00:00Z",
+        "resolution_id": "11111111-1111-4111-8111-111111111111",
+        "run_id": "87654321-4321-6789-a234-678912345678",
+        "resolves_escalation_id": (
+            "22222222-2222-4222-8222-222222222222"
+        ),
+        "applies_to_finding_ids": ["REV-001", "REV-002"],
+        "resolution_path": "001-resolution.md",
+        "resolution_sha256": "a" * 64,
+        "additional_rounds_granted": 1,
     }
 
 
@@ -306,6 +324,94 @@ class ReviewRoundRecordTests(unittest.TestCase):
                     ReviewRoundRecord.from_dict(data, label="round record")
 
 
+class DeveloperResolutionTests(unittest.TestCase):
+    def test_resolution_round_trips_with_all_protocol_fields(self) -> None:
+        resolution = DeveloperResolution.from_dict(
+            _developer_resolution(),
+            label="Developer resolution",
+        )
+
+        self.assertEqual(resolution.to_dict(), _developer_resolution())
+        self.assertEqual(
+            resolution.applies_to_finding_ids,
+            ("REV-001", "REV-002"),
+        )
+
+    def test_resolution_rejects_invalid_protocol_values(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                lambda data: data.update(created_at="yesterday"),
+                "RFC 3339 UTC timestamp",
+            ),
+            (
+                lambda data: data.update(resolution_id="not-a-uuid"),
+                "resolution_id must be a canonical UUID",
+            ),
+            (
+                lambda data: data.update(run_id="not-a-uuid"),
+                "run_id must be a canonical UUID",
+            ),
+            (
+                lambda data: data.update(
+                    resolves_escalation_id="not-a-uuid"
+                ),
+                "resolves_escalation_id must be a canonical UUID",
+            ),
+            (
+                lambda data: data.update(applies_to_finding_ids="REV-001"),
+                "applies_to_finding_ids must be a JSON array",
+            ),
+            (
+                lambda data: data.update(applies_to_finding_ids=[""]),
+                r"applies_to_finding_ids\[0\] must be a non-empty string",
+            ),
+            (
+                lambda data: data.update(
+                    applies_to_finding_ids=["REV-001", "REV-001"]
+                ),
+                "applies_to_finding_ids contains duplicates",
+            ),
+            (
+                lambda data: data.update(
+                    resolution_path="nested/001-resolution.md"
+                ),
+                "must name a companion file in the same bundle directory",
+            ),
+            (
+                lambda data: data.update(resolution_sha256="A" * 64),
+                "lowercase SHA-256 digest",
+            ),
+            (
+                lambda data: data.update(additional_rounds_granted=True),
+                "additional_rounds_granted must be an integer",
+            ),
+            (
+                lambda data: data.update(additional_rounds_granted=-1),
+                "additional_rounds_granted must not be negative",
+            ),
+            (
+                lambda data: data.update(unexpected=True),
+                "unknown field",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = copy.deepcopy(_developer_resolution())
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    DeveloperResolution.from_dict(
+                        data,
+                        label="Developer resolution",
+                    )
+
+
 class ReviewRequestTests(unittest.TestCase):
     def test_first_round_request_round_trips(self) -> None:
         request = ReviewRequest.from_dict(_request())
@@ -366,6 +472,22 @@ class ReviewRequestTests(unittest.TestCase):
                     resolution_paths=["input/not-resolutions/value.json"]
                 ),
                 "below input/resolutions",
+            ),
+            (
+                lambda data: data.update(
+                    allowed_generated_paths=["../outside"]
+                ),
+                "narrow repository-relative path",
+            ),
+            (
+                lambda data: data.update(
+                    allowed_generated_paths=["build", "build/"]
+                ),
+                "contains duplicate path",
+            ),
+            (
+                lambda data: data.pop("allowed_generated_paths"),
+                "missing required field",
             ),
             (
                 lambda data: data.update(unexpected=True),

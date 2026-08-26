@@ -25,12 +25,19 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
 )
-from .herdr import HerdrClient, HerdrError, HerdrInstallation
+from .herdr import (
+    HerdrClient,
+    HerdrError,
+    HerdrInstallation,
+    format_herdr_error,
+)
 from .initialization import (
     AgentSquadError,
     GitWorktree,
     InitializedRepository,
+    REVIEW_DIRECTORY_NAME,
     load_initialized_repository,
+    matches_allowed_generated_path,
     run_git,
 )
 from .storage import (
@@ -47,7 +54,6 @@ ROUNDS_DIRECTORY_NAME = "rounds"
 ROUND_RECORD_FILE_NAME = "round.json"
 REQUEST_FILE_NAME = "request.json"
 IMPLEMENTATION_REPORT_FILE_NAME = "implementation-report.md"
-REVIEW_BUNDLE_DIRECTORY_NAME = ".agent-squad-review"
 SENSITIVE_ROOT_FILES = {".github/copilot-instructions.md"}
 
 
@@ -128,7 +134,7 @@ def submit_candidate(
                     prompt=_review_request_prompt(prepared),
                 )
             except HerdrError as error:
-                detail = _single_line(str(error))
+                detail = format_herdr_error(str(error))
                 _record_handoff(
                     prepared,
                     status=HandoffStatus.FAILED,
@@ -291,6 +297,9 @@ def _prepare_submission_locked(
         implementer_kind=active.implementer_kind,
         reviewer_kind=active.reviewer_kind,
         reviewer_name=reviewer_name,
+        allowed_generated_paths=(
+            repository.configuration.allowed_generated_paths
+        ),
     )
     try:
         request = ReviewRequest.from_dict(request.to_dict())
@@ -322,7 +331,7 @@ def _prepare_submission_locked(
     round_directory = rounds_root / f"{round_number:03d}"
     worktree_created = False
     bundle_created = False
-    bundle_root = review_worktree / REVIEW_BUNDLE_DIRECTORY_NAME
+    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     round_directory_committed = False
     run_record_written = False
     commit_point_reached = False
@@ -720,7 +729,7 @@ def _validate_implementation_cleanliness(
         if entry
         and entry != report_relative
         and not _is_agent_squad_runtime_path(entry)
-        and not _matches_allowed_generated_path(
+        and not matches_allowed_generated_path(
             entry,
             repository.configuration.allowed_generated_paths,
         )
@@ -748,21 +757,6 @@ def _relative_to_repository(path: Path, root: Path) -> str | None:
         return path.relative_to(root).as_posix()
     except ValueError:
         return None
-
-
-def _matches_allowed_generated_path(
-    candidate: str,
-    configured_paths: tuple[str, ...],
-) -> bool:
-    path = PurePosixPath(candidate)
-    for configured in configured_paths:
-        allowed = PurePosixPath(configured)
-        if (
-            path == allowed
-            or path.parts[: len(allowed.parts)] == allowed.parts
-        ):
-            return True
-    return False
 
 
 def _current_object_format(repository_root: Path) -> str:
@@ -1089,7 +1083,7 @@ def _verify_review_worktree(
             "review worktree contains unexpected visible files before launch"
         )
 
-    bundle_root = review_worktree / REVIEW_BUNDLE_DIRECTORY_NAME
+    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     expected = (
         (request.task, _read_file(run_directory / "task.md")),
         (request.implementation_report, report.content),
@@ -1171,7 +1165,7 @@ def _review_request_prompt(prepared: _PreparedSubmission) -> str:
     request = prepared.request
     request_path = (
         prepared.review_worktree
-        / REVIEW_BUNDLE_DIRECTORY_NAME
+        / REVIEW_DIRECTORY_NAME
         / "input"
         / REQUEST_FILE_NAME
     )
@@ -1259,7 +1253,3 @@ def _read_file(path: Path) -> bytes:
         raise SubmissionError(
             f"cannot read authoritative artifact {path}: {error}"
         ) from error
-
-
-def _single_line(value: str) -> str:
-    return " ".join(value.splitlines()) or "unknown Herdr error"
