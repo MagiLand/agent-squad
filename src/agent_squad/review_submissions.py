@@ -827,15 +827,19 @@ def _load_json_file(path: Path, label: str) -> tuple[object, bytes]:
         ) from error
 
 
-def _read_regular_file(path: Path, label: str) -> bytes:
+def _lstat_or_reject(path: Path, label: str) -> os.stat_result:
     try:
-        status = path.lstat()
+        return path.lstat()
     except FileNotFoundError as error:
         raise ReviewSubmissionError(f"{label} is missing: {path}") from error
     except OSError as error:
         raise ReviewSubmissionError(
             f"cannot inspect {label}: {error}"
         ) from error
+
+
+def _read_regular_file(path: Path, label: str) -> bytes:
+    status = _lstat_or_reject(path, label)
     if not stat.S_ISREG(status.st_mode):
         raise ReviewSubmissionError(
             f"{label} must be a regular non-symlink file: {path}"
@@ -844,14 +848,7 @@ def _read_regular_file(path: Path, label: str) -> bytes:
 
 
 def _require_normal_directory(path: Path, label: str) -> None:
-    try:
-        status = path.lstat()
-    except FileNotFoundError as error:
-        raise ReviewSubmissionError(f"{label} is missing: {path}") from error
-    except OSError as error:
-        raise ReviewSubmissionError(
-            f"cannot inspect {label}: {error}"
-        ) from error
+    status = _lstat_or_reject(path, label)
     if not stat.S_ISDIR(status.st_mode):
         raise ReviewSubmissionError(
             f"{label} must be a normal directory: {path}"
