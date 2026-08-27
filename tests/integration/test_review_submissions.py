@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 import unittest
@@ -1012,6 +1013,18 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             ),
             ("changed head", "review worktree HEAD is"),
             (
+                "missing review bundle",
+                "review bundle is missing: ",
+            ),
+            (
+                "bundle input replaced by a file",
+                "review bundle input must be a normal directory: ",
+            ),
+            (
+                "missing bundle output directory",
+                "review bundle output is missing: ",
+            ),
+            (
                 "unexpected bundle location",
                 "review bundle contains files outside documented input, "
                 "output, and marker locations: scratch.txt",
@@ -1260,6 +1273,16 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             ],
                             cwd=prepared.review_worktree,
                         )
+                    elif case == "missing review bundle":
+                        shutil.rmtree(prepared.bundle)
+                    elif case == "bundle input replaced by a file":
+                        shutil.rmtree(prepared.bundle / "input")
+                        (prepared.bundle / "input").write_text(
+                            "not a directory\n",
+                            encoding="utf-8",
+                        )
+                    elif case == "missing bundle output directory":
+                        shutil.rmtree(prepared.bundle / "output")
                     elif case == "unexpected bundle location":
                         (prepared.bundle / "scratch.txt").write_text(
                             "unexpected\n",
