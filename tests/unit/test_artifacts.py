@@ -608,6 +608,16 @@ class ReviewResultTests(unittest.TestCase):
                 "must be a non-empty string",
             ),
             (
+                lambda data: data.update(findings="REV-001"),
+                "findings must be a JSON array",
+            ),
+            (
+                lambda data: data.update(
+                    non_blocking_observations="note"
+                ),
+                "non_blocking_observations must be a JSON array",
+            ),
+            (
                 lambda data: data.update(unexpected=True),
                 "unknown field",
             ),
@@ -629,8 +639,12 @@ class ReviewerLocalMarkerTests(unittest.TestCase):
 
         self.assertEqual(marker.to_dict(), _review_marker())
 
-    def test_marker_rejects_invalid_status_path_and_digest(self) -> None:
+    def test_marker_rejects_invalid_protocol_values(self) -> None:
         cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
             (
                 lambda data: data.update(status="draft"),
                 "status must be result_submitted",
@@ -638,6 +652,12 @@ class ReviewerLocalMarkerTests(unittest.TestCase):
             (
                 lambda data: data.update(review_json_path="../review.json"),
                 "bundle-relative path",
+            ),
+            (
+                lambda data: data.update(
+                    review_json_path="output/other.json"
+                ),
+                "review_json_path must be output/review.json",
             ),
             (
                 lambda data: data.update(review_sha256="A" * 64),
