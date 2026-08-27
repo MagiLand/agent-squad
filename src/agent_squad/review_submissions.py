@@ -90,7 +90,7 @@ def submit_review_result(
             request = _load_review_request(bundle_root)
             _validate_request_identity(worktree, request)
             _validate_worktree_integrity(worktree, request)
-            _validate_bundle_inputs(bundle_root, request)
+            previous_review = _validate_bundle_inputs(bundle_root, request)
             _validate_bundle_root_entries(bundle_root)
             _validate_output_tree(output_root)
             review, review_bytes, review_path = _load_review_result(
@@ -99,6 +99,7 @@ def submit_review_result(
             )
             _validate_review_markdown(bundle_root, request)
             _assert_result_identity(request, review)
+            _assert_fresh_result_id(previous_review, review)
 
             review_digest = hashlib.sha256(review_bytes).hexdigest()
             marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
@@ -473,7 +474,7 @@ def _blob_oid(content: bytes, object_format: str) -> str:
 def _validate_bundle_inputs(
     bundle_root: Path,
     request: ReviewRequest,
-) -> None:
+) -> ReviewResult | None:
     input_root = bundle_root / "input"
     actual_paths, actual_directories = _walk_tree(input_root)
     actual_paths = {
@@ -483,6 +484,7 @@ def _validate_bundle_inputs(
         PurePosixPath("input") / path for path in actual_directories
     }
     expected_paths = {REQUEST_PATH}
+    previous_review: ReviewResult | None = None
     artifacts = (
         request.task,
         request.implementation_report,
@@ -610,6 +612,7 @@ def _validate_bundle_inputs(
         raise ReviewSubmissionError(
             "review bundle input contains unexpected or missing directories"
         )
+    return previous_review
 
 
 def _load_review_result(
@@ -670,6 +673,20 @@ def _assert_result_identity(
             raise ReviewSubmissionError(
                 f"review result {label} does not match the review request"
             )
+
+
+def _assert_fresh_result_id(
+    previous_review: ReviewResult | None,
+    review: ReviewResult,
+) -> None:
+    if (
+        previous_review is not None
+        and previous_review.result_id == review.result_id
+    ):
+        raise ReviewSubmissionError(
+            "review result.result_id repeats the result ID of round "
+            f"{previous_review.round_number}; each result needs a fresh ID"
+        )
 
 
 def _write_or_validate_marker(

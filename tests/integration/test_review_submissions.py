@@ -685,6 +685,39 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             self.assertEqual(len(_result_prompt_events(prepared)), 1)
 
+    def test_previous_round_result_id_is_rejected_before_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            previous_review = json.loads(
+                (
+                    prepared.bundle / "input/previous-review.json"
+                ).read_text(encoding="utf-8")
+            )
+            review = _write_review(prepared, verdict="changes_requested")
+            review["result_id"] = previous_review["result_id"]
+            _write_json_fixture(
+                prepared.bundle / "output/review.json",
+                review,
+            )
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertIn(
+                "review result.result_id repeats the result ID of round 1; "
+                "each result needs a fresh ID",
+                submitted.stderr,
+            )
+            self.assertFalse((prepared.bundle / "local-state.json").exists())
+            self.assertEqual(_result_prompt_events(prepared), [])
+
     def test_bundle_input_and_review_shape_violations_are_rejected(
         self,
     ) -> None:
@@ -693,6 +726,11 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 "extra bundle input file",
                 "review bundle input files do not match the request "
                 "(unexpected: input/context/notes.md)",
+            ),
+            (
+                "unlistable bundle input directory",
+                "review bundle input files do not match the request "
+                "(missing: input/context/notes.md)",
             ),
             (
                 "extra bundle input directory",
@@ -717,13 +755,31 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     prepared = _prepare_round(Path(temporary_directory))
                     _write_review(prepared)
+                    context = prepared.bundle / "input/context"
                     if case == "extra bundle input file":
-                        context = prepared.bundle / "input/context"
                         context.mkdir()
                         (context / "notes.md").write_text(
                             "smuggled reviewer input\n",
                             encoding="utf-8",
                         )
+                    elif case == "unlistable bundle input directory":
+                        context.mkdir()
+                        notes = context / "notes.md"
+                        notes.write_text(
+                            "declared reviewer context\n",
+                            encoding="utf-8",
+                        )
+                        request = copy.deepcopy(prepared.request)
+                        request["context_files"] = [
+                            {
+                                "path": "input/context/notes.md",
+                                "sha256": hashlib.sha256(
+                                    notes.read_bytes()
+                                ).hexdigest(),
+                            }
+                        ]
+                        _write_request(prepared, request)
+                        context.chmod(0o111)
                     elif case == "extra bundle input directory":
                         (prepared.bundle / "input/scratch").mkdir()
                     elif case == "missing required bundle input":
@@ -739,12 +795,16 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             encoding="utf-8",
                         )
 
-                    submitted = run_cli(
-                        prepared.review_worktree,
-                        "review-submit",
-                        data_home=prepared.data_home,
-                        env_overrides=prepared.environment,
-                    )
+                    try:
+                        submitted = run_cli(
+                            prepared.review_worktree,
+                            "review-submit",
+                            data_home=prepared.data_home,
+                            env_overrides=prepared.environment,
+                        )
+                    finally:
+                        if case == "unlistable bundle input directory":
+                            context.chmod(0o755)
 
                     self.assertEqual(submitted.returncode, 1)
                     self.assertIn(message, submitted.stderr)
@@ -755,24 +815,71 @@ class ReviewSubmitCommandTests(unittest.TestCase):
 
     def test_integrity_violations_create_no_marker_or_prompt(self) -> None:
         cases = (
-            "request identity",
-            "review identity",
-            "task digest",
-            "tracked file",
-            "assume-unchanged tracked file",
-            "assume-unchanged tracked symlink",
-            "assume-unchanged tracked symlink changed type",
-            "assume-unchanged tracked executable mode",
-            "skip-worktree tracked parent changed type",
-            "changed head",
-            "unexpected bundle location",
-            "unexpected worktree file",
-            "case-colliding input paths",
-            "symlinked bundle directory",
-            "symlinked review",
-            "missing Markdown",
+            (
+                "request identity",
+                "review request Reviewer name does not match its run and "
+                "round",
+            ),
+            (
+                "round worktree identity",
+                "review-submit must run from round-002, not round-001",
+            ),
+            (
+                "run worktree identity",
+                "review worktree path does not match the request run ID",
+            ),
+            (
+                "review identity",
+                "review result request ID does not match the review request",
+            ),
+            ("task digest", "review bundle digest mismatch for input/task.md"),
+            (
+                "tracked file",
+                "review worktree tracked files differ from HEAD",
+            ),
+            (
+                "assume-unchanged tracked file",
+                "tracked review file differs from HEAD: feature.txt",
+            ),
+            (
+                "assume-unchanged tracked symlink",
+                "tracked review file differs from HEAD: feature-link",
+            ),
+            (
+                "assume-unchanged tracked symlink changed type",
+                "tracked review symlink changed type: feature-link",
+            ),
+            (
+                "assume-unchanged tracked executable mode",
+                "tracked review file mode differs from HEAD: feature.txt",
+            ),
+            (
+                "skip-worktree tracked parent changed type",
+                "tracked review directory changed type:",
+            ),
+            ("changed head", "review worktree HEAD is"),
+            (
+                "unexpected bundle location",
+                "review bundle contains files outside documented input, "
+                "output, and marker locations: scratch.txt",
+            ),
+            (
+                "unexpected worktree file",
+                "review worktree contains tracked changes or unexpected "
+                "non-ignored files outside the review bundle",
+            ),
+            ("case-colliding input paths", "case-colliding paths"),
+            (
+                "symlinked bundle directory",
+                "review bundle directory must not be a symlink",
+            ),
+            (
+                "symlinked review",
+                "review bundle file must be a regular non-symlink file",
+            ),
+            ("missing Markdown", "human-readable review is missing"),
         )
-        for case in cases:
+        for case, message in cases:
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     root = Path(temporary_directory)
@@ -790,14 +897,27 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     )
                     review = _write_review(prepared)
                     if case == "request identity":
-                        request_path = prepared.bundle / "input/request.json"
-                        request_path.chmod(0o600)
                         request = dict(prepared.request)
                         request["reviewer_name"] = "asq-wrong-r001-reviewer"
-                        request_path.write_text(
-                            f"{json.dumps(request, indent=2)}\n",
-                            encoding="utf-8",
+                        _write_request(prepared, request)
+                    elif case == "round worktree identity":
+                        request = dict(prepared.request)
+                        request["round"] = 2
+                        request["reviewer_name"] = deterministic_reviewer_name(
+                            str(request["run_id"]),
+                            2,
                         )
+                        _write_request(prepared, request)
+                    elif case == "run worktree identity":
+                        request = dict(prepared.request)
+                        request["run_id"] = (
+                            "99999999-9999-4999-8999-999999999999"
+                        )
+                        request["reviewer_name"] = deterministic_reviewer_name(
+                            str(request["run_id"]),
+                            int(request["round"]),
+                        )
+                        _write_request(prepared, request)
                     elif case == "review identity":
                         review["request_id"] = (
                             "99999999-9999-4999-8999-999999999999"
@@ -939,39 +1059,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     )
 
                     self.assertEqual(submitted.returncode, 1)
-                    if case == "assume-unchanged tracked symlink":
-                        self.assertIn(
-                            "tracked review file differs from HEAD: "
-                            "feature-link",
-                            submitted.stderr,
-                        )
-                    elif case == (
-                        "assume-unchanged tracked symlink changed type"
-                    ):
-                        self.assertIn(
-                            "tracked review symlink changed type: "
-                            "feature-link",
-                            submitted.stderr,
-                        )
-                    elif case == "assume-unchanged tracked executable mode":
-                        self.assertIn(
-                            "tracked review file mode differs from HEAD: "
-                            "feature.txt",
-                            submitted.stderr,
-                        )
-                    elif case == "skip-worktree tracked parent changed type":
-                        self.assertIn(
-                            "tracked review directory changed type:",
-                            submitted.stderr,
-                        )
-                        self.assertIn("/nested", submitted.stderr)
-                    elif case == "case-colliding input paths":
-                        self.assertIn("case-colliding paths", submitted.stderr)
-                    elif case == "symlinked bundle directory":
-                        self.assertIn(
-                            "review bundle directory must not be a symlink",
-                            submitted.stderr,
-                        )
+                    self.assertIn(message, submitted.stderr)
                     self.assertFalse(
                         (prepared.bundle / "local-state.json").exists()
                     )
