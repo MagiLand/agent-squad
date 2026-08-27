@@ -94,10 +94,11 @@ def _prepare_round(
         (repository / "feature-link").symlink_to("feature.txt")
         candidate_paths.append("feature-link")
     if include_nested_tracked_file:
-        nested_file = repository / "nested/feature.txt"
-        nested_file.parent.mkdir()
+        nested_path = "nested/deeper/leaf/feature.txt"
+        nested_file = repository / nested_path
+        nested_file.parent.mkdir(parents=True)
         nested_file.write_text("nested candidate\n", encoding="utf-8")
-        candidate_paths.append("nested/feature.txt")
+        candidate_paths.append(nested_path)
     run(["git", "add", *candidate_paths], cwd=repository)
     run(
         [
@@ -811,6 +812,33 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 "review worktree path does not match the request run ID",
             ),
             (
+                "object format mismatch",
+                "review worktree Git object format does not match the "
+                "request",
+            ),
+            (
+                "attached review worktree",
+                "review-submit requires the expected detached review "
+                "worktree",
+            ),
+            (
+                "unavailable base commit",
+                "review request base object is not an available commit",
+            ),
+            (
+                "base outside review history",
+                "review request base is not an ancestor of its head",
+            ),
+            (
+                "staged tracked file",
+                "review worktree index differs from HEAD",
+            ),
+            (
+                "missing bundle exclusion",
+                ".agent-squad-review is not Git-excluded in the review "
+                "worktree",
+            ),
+            (
                 "review identity",
                 "review result request ID does not match the review request",
             ),
@@ -837,7 +865,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             ),
             (
                 "skip-worktree tracked parent changed type",
-                "tracked review directory changed type: nested",
+                "tracked review directory changed type: nested/deeper\n",
             ),
             ("changed head", "review worktree HEAD is"),
             (
@@ -900,6 +928,81 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             int(request["round"]),
                         )
                         _write_request(prepared, request)
+                    elif case == "object format mismatch":
+                        request = dict(prepared.request)
+                        object_format = str(request["git_object_format"])
+                        mismatched_format = (
+                            "sha256" if object_format == "sha1" else "sha1"
+                        )
+                        oid_length = (
+                            64 if mismatched_format == "sha256" else 40
+                        )
+                        request["git_object_format"] = mismatched_format
+                        request["base_oid"] = "0" * oid_length
+                        request["head_oid"] = "1" * oid_length
+                        _write_request(prepared, request)
+                    elif case == "attached review worktree":
+                        run(
+                            ["git", "checkout", "-b", "attached-review"],
+                            cwd=prepared.review_worktree,
+                        )
+                    elif case == "unavailable base commit":
+                        request = dict(prepared.request)
+                        request["base_oid"] = "f" * len(
+                            str(request["base_oid"])
+                        )
+                        _write_request(prepared, request)
+                    elif case == "base outside review history":
+                        run(
+                            [
+                                "git",
+                                "-c",
+                                "commit.gpgSign=false",
+                                "commit",
+                                "--allow-empty",
+                                "--no-verify",
+                                "-m",
+                                "test: create non-ancestor base",
+                            ],
+                            cwd=prepared.repository,
+                        )
+                        non_ancestor = run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=prepared.repository,
+                        ).stdout.strip()
+                        request = dict(prepared.request)
+                        request["base_oid"] = non_ancestor
+                        _write_request(prepared, request)
+                    elif case == "staged tracked file":
+                        tracked_file = prepared.review_worktree / "feature.txt"
+                        tracked_file.write_text(
+                            "staged change\n",
+                            encoding="utf-8",
+                        )
+                        run(
+                            ["git", "add", "feature.txt"],
+                            cwd=prepared.review_worktree,
+                        )
+                    elif case == "missing bundle exclusion":
+                        request = dict(prepared.request)
+                        request["allowed_generated_paths"] = [
+                            ".agent-squad-review/"
+                        ]
+                        _write_request(prepared, request)
+                        exclude_path = (
+                            prepared.repository / ".git/info/exclude"
+                        )
+                        exclude_lines = exclude_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines(keepends=True)
+                        exclude_path.write_text(
+                            "".join(
+                                line
+                                for line in exclude_lines
+                                if line.strip() != ".agent-squad-review/"
+                            ),
+                            encoding="utf-8",
+                        )
                     elif case == "review identity":
                         review["request_id"] = (
                             "99999999-9999-4999-8999-999999999999"
@@ -962,16 +1065,19 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     elif case == "skip-worktree tracked parent changed type":
                         _hide_tracked_path(
                             prepared.review_worktree,
-                            "nested/feature.txt",
+                            "nested/deeper/leaf/feature.txt",
                             flag="--skip-worktree",
                         )
                         nested_file = (
-                            prepared.review_worktree / "nested/feature.txt"
+                            prepared.review_worktree
+                            / "nested/deeper/leaf/feature.txt"
                         )
                         nested_file.unlink()
-                        nested_directory = nested_file.parent
-                        nested_directory.rmdir()
-                        nested_directory.symlink_to(
+                        leaf_directory = nested_file.parent
+                        leaf_directory.rmdir()
+                        deeper_directory = leaf_directory.parent
+                        deeper_directory.rmdir()
+                        deeper_directory.symlink_to(
                             root,
                             target_is_directory=True,
                         )
