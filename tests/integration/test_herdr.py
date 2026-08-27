@@ -28,7 +28,10 @@ class FakeHerdrAdapterTests(unittest.TestCase):
 
             with mock.patch.dict(os.environ, environment):
                 client = HerdrClient(root)
-                installation = client.discover(AgentKind.CLAUDE)
+                installation = client.discover(
+                    AgentKind.CLAUDE,
+                    role="Reviewer",
+                )
                 launched = client.dispatch_review_request(
                     reviewer_name="asq-12345678-r001-reviewer",
                     reviewer_kind=AgentKind.CLAUDE,
@@ -82,7 +85,28 @@ class FakeHerdrAdapterTests(unittest.TestCase):
                     HerdrError,
                     "missing required method contract agent.prompt",
                 ):
-                    HerdrClient(root).discover(AgentKind.CLAUDE)
+                    HerdrClient(root).discover(
+                        AgentKind.CLAUDE,
+                        role="Reviewer",
+                    )
+
+    def test_stale_integration_error_identifies_the_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _, environment = install_fake_herdr(root)
+            environment["FAKE_HERDR_STALE_KIND"] = "codex"
+
+            for role in ("Reviewer", "Implementer"):
+                with self.subTest(role=role):
+                    with mock.patch.dict(os.environ, environment):
+                        with self.assertRaisesRegex(
+                            HerdrError,
+                            rf"integration for {role} kind 'codex'",
+                        ):
+                            HerdrClient(root).discover(
+                                AgentKind.CODEX,
+                                role=role,
+                            )
 
 
 if __name__ == "__main__":

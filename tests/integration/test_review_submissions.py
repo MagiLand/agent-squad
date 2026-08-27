@@ -48,6 +48,7 @@ def _prepare_round(
     *,
     allowed_generated_paths: tuple[str, ...] = (),
     include_tracked_symlink: bool = False,
+    include_nested_tracked_file: bool = False,
 ) -> _PreparedRound:
     repository = root / "repository"
     seed_git_repository(repository)
@@ -95,6 +96,11 @@ def _prepare_round(
     if include_tracked_symlink:
         (repository / "feature-link").symlink_to("feature.txt")
         candidate_paths.append("feature-link")
+    if include_nested_tracked_file:
+        nested_file = repository / "nested/feature.txt"
+        nested_file.parent.mkdir()
+        nested_file.write_text("nested candidate\n", encoding="utf-8")
+        candidate_paths.append("nested/feature.txt")
     run(["git", "add", *candidate_paths], cwd=repository)
     run(
         [
@@ -236,6 +242,18 @@ def _write_json_fixture(path: Path, value: object) -> None:
     )
 
 
+def _hide_tracked_path(
+    review_worktree: Path,
+    path: str,
+    *,
+    flag: str = "--assume-unchanged",
+) -> None:
+    run(
+        ["git", "update-index", flag, path],
+        cwd=review_worktree,
+    )
+
+
 def _prepare_multi_input_round(
     root: Path,
 ) -> tuple[_PreparedRound, list[dict[str, object]]]:
@@ -351,7 +369,10 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             )
 
             self.assertTrue(result.notification_sent)
-            client.discover.assert_called_once_with(AgentKind.CODEX)
+            client.discover.assert_called_once_with(
+                AgentKind.CODEX,
+                role="Implementer",
+            )
             client.dispatch_review_result.assert_called_once()
 
     def test_configured_generated_output_is_carried_and_accepted(self) -> None:
@@ -664,6 +685,74 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             self.assertEqual(len(_result_prompt_events(prepared)), 1)
 
+    def test_bundle_input_and_review_shape_violations_are_rejected(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "extra bundle input file",
+                "review bundle input files do not match the request "
+                "(unexpected: input/context/notes.md)",
+            ),
+            (
+                "extra bundle input directory",
+                "review bundle input contains unexpected or missing "
+                "directories",
+            ),
+            (
+                "missing required bundle input",
+                "input/task.md is missing",
+            ),
+            (
+                "blank human-readable review",
+                "human-readable review must contain non-whitespace text",
+            ),
+            (
+                "malformed review JSON",
+                "review result contains invalid JSON",
+            ),
+        )
+        for case, message in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    _write_review(prepared)
+                    if case == "extra bundle input file":
+                        context = prepared.bundle / "input/context"
+                        context.mkdir()
+                        (context / "notes.md").write_text(
+                            "smuggled reviewer input\n",
+                            encoding="utf-8",
+                        )
+                    elif case == "extra bundle input directory":
+                        (prepared.bundle / "input/scratch").mkdir()
+                    elif case == "missing required bundle input":
+                        (prepared.bundle / "input/task.md").unlink()
+                    elif case == "blank human-readable review":
+                        (prepared.bundle / "output/review.md").write_text(
+                            "   \n\n",
+                            encoding="utf-8",
+                        )
+                    elif case == "malformed review JSON":
+                        (prepared.bundle / "output/review.json").write_text(
+                            "{not json",
+                            encoding="utf-8",
+                        )
+
+                    submitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(submitted.returncode, 1)
+                    self.assertIn(message, submitted.stderr)
+                    self.assertFalse(
+                        (prepared.bundle / "local-state.json").exists()
+                    )
+                    self.assertEqual(_result_prompt_events(prepared), [])
+
     def test_integrity_violations_create_no_marker_or_prompt(self) -> None:
         cases = (
             "request identity",
@@ -672,6 +761,9 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             "tracked file",
             "assume-unchanged tracked file",
             "assume-unchanged tracked symlink",
+            "assume-unchanged tracked symlink changed type",
+            "assume-unchanged tracked executable mode",
+            "skip-worktree tracked parent changed type",
             "changed head",
             "unexpected bundle location",
             "unexpected worktree file",
@@ -684,11 +776,17 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     root = Path(temporary_directory)
+                    include_tracked_symlink = case in {
+                        "assume-unchanged tracked symlink",
+                        "assume-unchanged tracked symlink changed type",
+                    }
+                    include_nested_file = (
+                        case == "skip-worktree tracked parent changed type"
+                    )
                     prepared = _prepare_round(
                         root,
-                        include_tracked_symlink=(
-                            case == "assume-unchanged tracked symlink"
-                        ),
+                        include_tracked_symlink=include_tracked_symlink,
+                        include_nested_tracked_file=include_nested_file,
                     )
                     review = _write_review(prepared)
                     if case == "request identity":
@@ -718,34 +816,63 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             encoding="utf-8",
                         )
                     elif case == "assume-unchanged tracked file":
-                        run(
-                            [
-                                "git",
-                                "update-index",
-                                "--assume-unchanged",
-                                "feature.txt",
-                            ],
-                            cwd=prepared.review_worktree,
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature.txt",
                         )
                         (prepared.review_worktree / "feature.txt").write_text(
                             "hidden change\n",
                             encoding="utf-8",
                         )
                     elif case == "assume-unchanged tracked symlink":
-                        run(
-                            [
-                                "git",
-                                "update-index",
-                                "--assume-unchanged",
-                                "feature-link",
-                            ],
-                            cwd=prepared.review_worktree,
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature-link",
                         )
                         tracked_link = (
                             prepared.review_worktree / "feature-link"
                         )
                         tracked_link.unlink()
                         tracked_link.symlink_to("README.md")
+                    elif case == (
+                        "assume-unchanged tracked symlink changed type"
+                    ):
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature-link",
+                        )
+                        tracked_link = (
+                            prepared.review_worktree / "feature-link"
+                        )
+                        tracked_link.unlink()
+                        tracked_link.write_text(
+                            "not a symlink\n",
+                            encoding="utf-8",
+                        )
+                    elif case == "assume-unchanged tracked executable mode":
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature.txt",
+                        )
+                        (prepared.review_worktree / "feature.txt").chmod(
+                            0o755
+                        )
+                    elif case == "skip-worktree tracked parent changed type":
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "nested/feature.txt",
+                            flag="--skip-worktree",
+                        )
+                        nested_file = (
+                            prepared.review_worktree / "nested/feature.txt"
+                        )
+                        nested_file.unlink()
+                        nested_directory = nested_file.parent
+                        nested_directory.rmdir()
+                        nested_directory.symlink_to(
+                            root,
+                            target_is_directory=True,
+                        )
                     elif case == "changed head":
                         run(
                             [
@@ -818,6 +945,26 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             "feature-link",
                             submitted.stderr,
                         )
+                    elif case == (
+                        "assume-unchanged tracked symlink changed type"
+                    ):
+                        self.assertIn(
+                            "tracked review symlink changed type: "
+                            "feature-link",
+                            submitted.stderr,
+                        )
+                    elif case == "assume-unchanged tracked executable mode":
+                        self.assertIn(
+                            "tracked review file mode differs from HEAD: "
+                            "feature.txt",
+                            submitted.stderr,
+                        )
+                    elif case == "skip-worktree tracked parent changed type":
+                        self.assertIn(
+                            "tracked review directory changed type:",
+                            submitted.stderr,
+                        )
+                        self.assertIn("/nested", submitted.stderr)
                     elif case == "case-colliding input paths":
                         self.assertIn("case-colliding paths", submitted.stderr)
                     elif case == "symlinked bundle directory":

@@ -111,7 +111,10 @@ def submit_review_result(
 
             client = herdr_client or HerdrClient(worktree.root)
             try:
-                client.discover(request.implementer_kind)
+                client.discover(
+                    request.implementer_kind,
+                    role="Implementer",
+                )
                 client.dispatch_review_result(
                     implementer_name=request.implementer_agent,
                     implementer_kind=request.implementer_kind,
@@ -122,19 +125,9 @@ def submit_review_result(
                     ),
                 )
             except HerdrError as error:
-                return ReviewSubmitResult(
-                    run_id=request.run_id,
-                    round_number=request.round_number,
-                    request_id=request.request_id,
-                    result_id=marker.result_id,
-                    head_oid=request.head_oid,
-                    verdict=review.verdict,
-                    review_path=review_path,
-                    marker_path=marker_path,
-                    marker_created=marker_created,
-                    notification_sent=False,
-                    notification_error=format_herdr_error(str(error)),
-                )
+                notification_error = format_herdr_error(str(error))
+            else:
+                notification_error = None
 
             return ReviewSubmitResult(
                 run_id=request.run_id,
@@ -146,8 +139,8 @@ def submit_review_result(
                 review_path=review_path,
                 marker_path=marker_path,
                 marker_created=marker_created,
-                notification_sent=True,
-                notification_error=None,
+                notification_sent=notification_error is None,
+                notification_error=notification_error,
             )
     except AgentSquadError:
         raise

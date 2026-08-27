@@ -29,6 +29,9 @@ _require_timestamp = _VALIDATOR.require_timestamp
 _require_optional_string = _VALIDATOR.require_optional_string
 _require_absolute_path = _VALIDATOR.require_absolute_path
 _require_object_format = _VALIDATOR.require_object_format
+_require_narrow_relative_paths = (
+    _VALIDATOR.require_narrow_relative_paths
+)
 
 
 class SubmissionMode(StrEnum):
@@ -1007,7 +1010,7 @@ class ReviewRequest:
                 AgentKind,
             ),
             reviewer_name=reviewer_name,
-            allowed_generated_paths=_require_allowed_generated_paths(
+            allowed_generated_paths=_require_narrow_relative_paths(
                 data["allowed_generated_paths"],
                 "review request.allowed_generated_paths",
             ),
@@ -1406,36 +1409,6 @@ def _require_path_list(value: object, label: str) -> tuple[str, ...]:
     if len(paths) != len(set(paths)):
         raise ArtifactValidationError(f"{label} contains duplicate paths")
     return paths
-
-
-def _require_allowed_generated_paths(
-    value: object,
-    label: str,
-) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ArtifactValidationError(f"{label} must be a JSON array")
-    paths: list[str] = []
-    seen: set[PurePosixPath] = set()
-    for index, item in enumerate(value):
-        item_label = f"{label}[{index}]"
-        text = _require_string(item, item_label)
-        path = PurePosixPath(text)
-        if (
-            path == PurePosixPath(".")
-            or path.is_absolute()
-            or ".." in path.parts
-        ):
-            raise ArtifactValidationError(
-                f"{item_label} must be a narrow repository-relative path "
-                "without '..'"
-            )
-        if path in seen:
-            raise ArtifactValidationError(
-                f"{label} contains duplicate path: {text}"
-            )
-        seen.add(path)
-        paths.append(text)
-    return tuple(paths)
 
 
 def _reject_duplicate_paths(

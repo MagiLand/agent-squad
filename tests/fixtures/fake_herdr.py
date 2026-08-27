@@ -123,8 +123,10 @@ def main() -> int:
         )
         return 0
     if arguments == ["integration", "status"]:
-        print("claude: current (test)")
-        print("codex: current (test)")
+        stale_kind = os.environ.get("FAKE_HERDR_STALE_KIND")
+        for kind in ("claude", "codex"):
+            status = "stale (test)" if kind == stale_kind else "current (test)"
+            print(f"{kind}: {status}")
         return 0
     if arguments == ["agent", "--help"]:
         print("Commands: list get start prompt")

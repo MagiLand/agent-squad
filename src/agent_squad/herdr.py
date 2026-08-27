@@ -86,7 +86,12 @@ class HerdrClient:
         self._timeout_seconds = timeout_seconds
         self._executable: Path | None = None
 
-    def discover(self, agent_kind: AgentKind) -> HerdrInstallation:
+    def discover(
+        self,
+        agent_kind: AgentKind,
+        *,
+        role: str,
+    ) -> HerdrInstallation:
         """Validate schema, live protocol, commands, and agent integration."""
 
         executable = self._resolve_executable()
@@ -156,7 +161,7 @@ class HerdrClient:
         )
         if role_status is None or not role_status.startswith("current"):
             raise HerdrError(
-                f"Herdr integration for agent kind "
+                f"Herdr integration for {role} kind "
                 f"{agent_kind.value!r} is not current"
             )
 

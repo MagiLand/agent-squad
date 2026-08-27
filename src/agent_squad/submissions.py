@@ -124,7 +124,8 @@ def submit_candidate(
             installation: HerdrInstallation | None = None
             try:
                 installation = client.discover(
-                    prepared.request.reviewer_kind
+                    prepared.request.reviewer_kind,
+                    role="Reviewer",
                 )
                 client.dispatch_review_request(
                     reviewer_name=prepared.request.reviewer_name,
