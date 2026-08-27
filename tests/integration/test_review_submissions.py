@@ -499,6 +499,34 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 )
             )
 
+    def test_invalid_existing_marker_is_preserved_without_notification(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            _write_review(prepared)
+            marker_path = prepared.bundle / "local-state.json"
+            _write_json_fixture(marker_path, {"schema_version": 1})
+            marker_bytes = marker_path.read_bytes()
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertEqual(
+                submitted.stderr,
+                "agent-squad: error: existing review marker failed "
+                "validation: review marker is missing required field(s): "
+                "request_id, result_id, review_json_path, review_sha256, "
+                "status, submitted_at\n",
+            )
+            self.assertEqual(marker_path.read_bytes(), marker_bytes)
+            self.assertEqual(_result_prompt_events(prepared), [])
+
     def test_rejected_result_can_be_corrected_before_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             prepared = _prepare_round(Path(temporary_directory))
@@ -668,6 +696,72 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             self.assertEqual(len(_result_prompt_events(prepared)), 1)
 
+    def test_multi_input_document_validation_failures_are_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            previous_review_path = (
+                prepared.bundle / "input/previous-review.json"
+            )
+            resolution_path = (
+                prepared.bundle / "input/resolutions/001-resolution.json"
+            )
+            previous_review = json.loads(
+                previous_review_path.read_text(encoding="utf-8")
+            )
+            resolution = json.loads(
+                resolution_path.read_text(encoding="utf-8")
+            )
+            cases = (
+                (
+                    "shape-invalid previous review",
+                    previous_review_path,
+                    {"schema_version": 1, "verdict": "approved"},
+                    "previous review failed validation: review result is "
+                    "missing required field(s): base_oid, created_at, "
+                    "findings, head_oid, non_blocking_observations, "
+                    "request_id, result_id, round, run_id, summary",
+                ),
+                (
+                    "shape-invalid Developer resolution",
+                    resolution_path,
+                    {"schema_version": 1},
+                    "Developer resolution 1 failed validation: Developer "
+                    "resolution 1 is missing required field(s): "
+                    "additional_rounds_granted, applies_to_finding_ids, "
+                    "created_at, resolution_id, resolution_path, "
+                    "resolution_sha256, resolves_escalation_id, run_id",
+                ),
+            )
+            for case, path, invalid_value, message in cases:
+                with self.subTest(case=case):
+                    _write_json_fixture(
+                        previous_review_path,
+                        previous_review,
+                    )
+                    _write_json_fixture(resolution_path, resolution)
+                    _write_json_fixture(path, invalid_value)
+
+                    submitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(submitted.returncode, 1)
+                    self.assertEqual(
+                        submitted.stderr,
+                        f"agent-squad: error: {message}\n",
+                    )
+                    self.assertFalse(
+                        (prepared.bundle / "local-state.json").exists()
+                    )
+                    self.assertEqual(_result_prompt_events(prepared), [])
+
     def test_previous_round_result_id_is_rejected_before_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             prepared, _ = _prepare_multi_input_round(
@@ -733,12 +827,21 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 "review result contains invalid JSON",
             ),
             (
+                "non-UTF-8 review JSON",
+                "review result must contain UTF-8 JSON",
+            ),
+            (
                 "non-UTF-8 human-readable review",
                 "human-readable review must contain UTF-8 Markdown",
             ),
             (
                 "null byte in human-readable review",
                 "human-readable review must not contain null bytes",
+            ),
+            (
+                "shape-invalid review request",
+                "review request failed validation: review request "
+                "is missing required field(s): head_oid",
             ),
         )
         for case, message in cases:
@@ -785,6 +888,17 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             "{not json",
                             encoding="utf-8",
                         )
+                    elif case == "non-UTF-8 review JSON":
+                        review_json = (
+                            prepared.bundle / "output/review.json"
+                        )
+                        review_json.write_bytes(
+                            review_json.read_bytes().replace(
+                                b'"summary": "',
+                                b'"summary": "\xff',
+                                1,
+                            )
+                        )
                     elif case == "non-UTF-8 human-readable review":
                         (prepared.bundle / "output/review.md").write_bytes(
                             b"# Review\n\xff\xfe not utf-8\n"
@@ -794,6 +908,10 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                             "# Review\n\x00 embedded\n",
                             encoding="utf-8",
                         )
+                    elif case == "shape-invalid review request":
+                        request = copy.deepcopy(prepared.request)
+                        del request["head_oid"]
+                        _write_request(prepared, request)
 
                     try:
                         submitted = run_cli(
