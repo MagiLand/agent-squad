@@ -732,6 +732,14 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 "malformed review JSON",
                 "review result contains invalid JSON",
             ),
+            (
+                "non-UTF-8 human-readable review",
+                "human-readable review must contain UTF-8 Markdown",
+            ),
+            (
+                "null byte in human-readable review",
+                "human-readable review must not contain null bytes",
+            ),
         )
         for case, message in cases:
             with self.subTest(case=case):
@@ -775,6 +783,15 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     elif case == "malformed review JSON":
                         (prepared.bundle / "output/review.json").write_text(
                             "{not json",
+                            encoding="utf-8",
+                        )
+                    elif case == "non-UTF-8 human-readable review":
+                        (prepared.bundle / "output/review.md").write_bytes(
+                            b"# Review\n\xff\xfe not utf-8\n"
+                        )
+                    elif case == "null byte in human-readable review":
+                        (prepared.bundle / "output/review.md").write_text(
+                            "# Review\n\x00 embedded\n",
                             encoding="utf-8",
                         )
 
@@ -862,6 +879,14 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             (
                 "assume-unchanged tracked executable mode",
                 "tracked review file mode differs from HEAD: feature.txt",
+            ),
+            (
+                "assume-unchanged tracked file removed",
+                "tracked review file is missing: feature.txt",
+            ),
+            (
+                "assume-unchanged tracked file changed type",
+                "tracked review file changed type: feature.txt",
             ),
             (
                 "skip-worktree tracked parent changed type",
@@ -1062,6 +1087,24 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                         (prepared.review_worktree / "feature.txt").chmod(
                             0o755
                         )
+                    elif case == "assume-unchanged tracked file removed":
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature.txt",
+                        )
+                        (prepared.review_worktree / "feature.txt").unlink()
+                    elif case == (
+                        "assume-unchanged tracked file changed type"
+                    ):
+                        _hide_tracked_path(
+                            prepared.review_worktree,
+                            "feature.txt",
+                        )
+                        tracked_file = (
+                            prepared.review_worktree / "feature.txt"
+                        )
+                        tracked_file.unlink()
+                        tracked_file.symlink_to("README.md")
                     elif case == "skip-worktree tracked parent changed type":
                         _hide_tracked_path(
                             prepared.review_worktree,
