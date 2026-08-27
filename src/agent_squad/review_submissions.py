@@ -445,7 +445,7 @@ def _tracked_path(repository_root: Path, path_text: str) -> Path:
             "Git returned an unsafe tracked-file path"
         )
     current = repository_root
-    for part in relative.parts[:-1]:
+    for index, part in enumerate(relative.parts[:-1], start=1):
         current /= part
         try:
             status = current.lstat()
@@ -454,8 +454,10 @@ def _tracked_path(repository_root: Path, path_text: str) -> Path:
                 f"cannot inspect tracked review directory {current}: {error}"
             ) from error
         if not stat.S_ISDIR(status.st_mode):
+            relative_directory = PurePosixPath(*relative.parts[:index])
             raise ReviewSubmissionError(
-                f"tracked review directory changed type: {current}"
+                "tracked review directory changed type: "
+                f"{relative_directory}"
             )
     return repository_root.joinpath(*relative.parts)
 

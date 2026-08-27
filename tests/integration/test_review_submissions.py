@@ -70,10 +70,7 @@ def _prepare_round(
         configuration["allowed_generated_paths"] = list(
             allowed_generated_paths
         )
-        configuration_path.write_text(
-            f"{json.dumps(configuration, indent=2)}\n",
-            encoding="utf-8",
-        )
+        _write_json_fixture(configuration_path, configuration)
     task = root / "task.md"
     task.write_text(
         "# Task\n\nReview the exact candidate.\n",
@@ -203,10 +200,7 @@ def _write_review(
 ) -> dict[str, object]:
     review = _review_result(prepared.request, verdict)
     output = prepared.bundle / "output"
-    (output / "review.json").write_text(
-        f"{json.dumps(review, indent=2)}\n",
-        encoding="utf-8",
-    )
+    _write_json_fixture(output / "review.json", review)
     (output / "review.md").write_text(
         f"# Review\n\n{review['summary']}\n",
         encoding="utf-8",
@@ -220,10 +214,7 @@ def _write_request(
 ) -> _PreparedRound:
     request_path = prepared.bundle / "input/request.json"
     request_path.chmod(0o600)
-    request_path.write_text(
-        f"{json.dumps(request, indent=2)}\n",
-        encoding="utf-8",
-    )
+    _write_json_fixture(request_path, request)
     request_path.chmod(0o400)
     return _PreparedRound(
         repository=prepared.repository,
@@ -282,13 +273,13 @@ def _prepare_multi_input_round(
     previous_review["result_id"] = (
         "44444444-4444-4444-8444-444444444444"
     )
-    (input_root / "previous-review.json").write_text(
-        f"{json.dumps(previous_review, indent=2)}\n",
-        encoding="utf-8",
+    _write_json_fixture(
+        input_root / "previous-review.json",
+        previous_review,
     )
-    (input_root / "previous-response.json").write_text(
-        f"{json.dumps({'schema_version': 1}, indent=2)}\n",
-        encoding="utf-8",
+    _write_json_fixture(
+        input_root / "previous-response.json",
+        {"schema_version": 1},
     )
     resolution_root = input_root / "resolutions"
     resolution_root.mkdir()
@@ -315,10 +306,7 @@ def _prepare_multi_input_round(
             "resolution_sha256": hashlib.sha256(companion).hexdigest(),
             "additional_rounds_granted": 0,
         }
-        (resolution_root / resolution_name).write_text(
-            f"{json.dumps(resolution, indent=2)}\n",
-            encoding="utf-8",
-        )
+        _write_json_fixture(resolution_root / resolution_name, resolution)
         resolutions.append(resolution)
         resolution_paths.append(f"input/resolutions/{resolution_name}")
 
@@ -517,10 +505,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             review["verdict"] = "changes_requested"
             review["findings"] = []
             review_path = prepared.bundle / "output/review.json"
-            review_path.write_text(
-                f"{json.dumps(review, indent=2)}\n",
-                encoding="utf-8",
-            )
+            _write_json_fixture(review_path, review)
 
             rejected = run_cli(
                 prepared.review_worktree,
@@ -577,10 +562,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     resolution_json = (
                         resolution_root / f"{index:03d}-resolution.json"
                     )
-                    resolution_json.write_text(
-                        f"{json.dumps(resolution, indent=2)}\n",
-                        encoding="utf-8",
-                    )
+                    _write_json_fixture(resolution_json, resolution)
                     resolution_markdown = (
                         resolution_root / f"{index:03d}-resolution.md"
                     )
@@ -855,7 +837,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             ),
             (
                 "skip-worktree tracked parent changed type",
-                "tracked review directory changed type:",
+                "tracked review directory changed type: nested",
             ),
             ("changed head", "review worktree HEAD is"),
             (
@@ -922,9 +904,9 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                         review["request_id"] = (
                             "99999999-9999-4999-8999-999999999999"
                         )
-                        (prepared.bundle / "output/review.json").write_text(
-                            f"{json.dumps(review, indent=2)}\n",
-                            encoding="utf-8",
+                        _write_json_fixture(
+                            prepared.bundle / "output/review.json",
+                            review,
                         )
                     elif case == "task digest":
                         task_path = prepared.bundle / "input/task.md"
@@ -1082,9 +1064,9 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             marker_bytes = marker_path.read_bytes()
 
             review["summary"] = "A different marker-confirmed review."
-            (prepared.bundle / "output/review.json").write_text(
-                f"{json.dumps(review, indent=2)}\n",
-                encoding="utf-8",
+            _write_json_fixture(
+                prepared.bundle / "output/review.json",
+                review,
             )
             rejected = run_cli(
                 prepared.review_worktree,
