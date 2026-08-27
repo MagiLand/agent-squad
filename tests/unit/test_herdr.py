@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from tests._support import add_src_to_path
 
@@ -38,6 +39,56 @@ class HerdrHelperTests(unittest.TestCase):
                         expected_kind=AgentKind.CODEX,
                         role=role,
                     )
+
+    def test_prompt_agent_requires_an_agent_object(self) -> None:
+        client = HerdrClient(Path.cwd())
+        process = mock.Mock(
+            stdout=(
+                '{"id":"fake:response","result":'
+                '{"type":"agent_prompted"}}'
+            )
+        )
+        with mock.patch.object(
+            client,
+            "_run",
+            return_value=process,
+        ) as run_command:
+            with self.assertRaisesRegex(
+                HerdrError,
+                "Herdr prompt response has no agent object",
+            ):
+                client._prompt_agent("codex-main", "result ready")
+
+        run_command.assert_called_once_with(
+            ("agent", "prompt", "codex-main", "result ready")
+        )
+
+    def test_agent_lookup_failure_identifies_the_role(self) -> None:
+        client = HerdrClient(Path.cwd())
+        process = mock.Mock(
+            returncode=2,
+            stdout="",
+            stderr="injected lookup failure",
+        )
+        with mock.patch.object(
+            client,
+            "_run",
+            return_value=process,
+        ) as run_command:
+            with self.assertRaisesRegex(
+                HerdrError,
+                "could not inspect Implementer session: "
+                "injected lookup failure",
+            ):
+                client._get_agent(
+                    "codex-main",
+                    role="Implementer",
+                )
+
+        run_command.assert_called_once_with(
+            ("agent", "get", "codex-main"),
+            allow_failure=True,
+        )
 
 
 if __name__ == "__main__":

@@ -457,48 +457,92 @@ class ReviewSubmitCommandTests(unittest.TestCase):
     def test_lost_notification_preserves_marker_and_retry_reuses_result(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            prepared = _prepare_round(Path(temporary_directory))
-            review = _write_review(prepared)
-            failing_environment = dict(prepared.environment)
-            failing_environment["FAKE_HERDR_FAIL_PROMPT"] = "1"
+        cases = (
+            (
+                "prompt failure",
+                "FAKE_HERDR_FAIL_PROMPT",
+                "1",
+                "injected prompt failure",
+                2,
+            ),
+            (
+                "Implementer unavailable",
+                "FAKE_HERDR_IMPLEMENTER_NAME",
+                "codex-other",
+                "Implementer 'codex-main' is not available",
+                1,
+            ),
+            (
+                "Implementer kind mismatch",
+                "FAKE_HERDR_IMPLEMENTER_KIND",
+                "claude",
+                "Implementer 'codex-main' uses agent kind 'claude', "
+                "expected 'codex'",
+                1,
+            ),
+        )
+        for case, variable, value, message, expected_prompt_count in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    review = _write_review(prepared)
+                    failing_environment = dict(prepared.environment)
+                    failing_environment[variable] = value
 
-            first = run_cli(
-                prepared.review_worktree,
-                "review-submit",
-                data_home=prepared.data_home,
-                env_overrides=failing_environment,
-            )
+                    first = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=failing_environment,
+                    )
 
-            self.assertEqual(first.returncode, 1)
-            self.assertIn(
-                "marker-confirmed result remains valid",
-                first.stderr,
-            )
-            marker_path = prepared.bundle / "local-state.json"
-            marker_bytes = marker_path.read_bytes()
-            marker = json.loads(marker_bytes)
-            self.assertEqual(marker["result_id"], review["result_id"])
+                    self.assertEqual(first.returncode, 1)
+                    self.assertIn(
+                        "Reviewer-local marker created:",
+                        first.stdout,
+                    )
+                    self.assertIn(
+                        "Result notification: failed",
+                        first.stdout,
+                    )
+                    self.assertIn(
+                        "marker-confirmed result remains valid",
+                        first.stderr,
+                    )
+                    self.assertIn(message, first.stderr)
+                    marker_path = prepared.bundle / "local-state.json"
+                    marker_bytes = marker_path.read_bytes()
+                    marker = json.loads(marker_bytes)
+                    self.assertEqual(
+                        marker["result_id"],
+                        review["result_id"],
+                    )
 
-            retried = run_cli(
-                prepared.review_worktree,
-                "review-submit",
-                data_home=prepared.data_home,
-                env_overrides=prepared.environment,
-            )
+                    retried = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
 
-            self.assertEqual(retried.returncode, 0, retried.stderr)
-            self.assertIn("Reviewer-local marker reused", retried.stdout)
-            self.assertEqual(marker_path.read_bytes(), marker_bytes)
-            prompts = _result_prompt_events(prepared)
-            self.assertEqual(len(prompts), 2)
-            self.assertTrue(
-                all(
-                    event["review_marker_at_prompt"]["result_id"]
-                    == review["result_id"]
-                    for event in prompts
-                )
-            )
+                    self.assertEqual(retried.returncode, 0, retried.stderr)
+                    self.assertIn(
+                        "Reviewer-local marker reused",
+                        retried.stdout,
+                    )
+                    self.assertEqual(marker_path.read_bytes(), marker_bytes)
+                    prompts = _result_prompt_events(prepared)
+                    self.assertEqual(
+                        len(prompts),
+                        expected_prompt_count,
+                    )
+                    self.assertTrue(
+                        all(
+                            event["review_marker_at_prompt"]["result_id"]
+                            == review["result_id"]
+                            for event in prompts
+                        )
+                    )
 
     def test_invalid_existing_marker_is_preserved_without_notification(
         self,

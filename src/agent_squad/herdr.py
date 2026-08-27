@@ -372,13 +372,7 @@ class HerdrClient:
             )
             adopted = False
 
-        prompted = self._response_result(
-            self._run(("agent", "prompt", reviewer_name, prompt)),
-            expected_type="agent_prompted",
-        )
-        prompted_agent = prompted.get("agent")
-        if not isinstance(prompted_agent, dict):
-            raise HerdrError("Herdr prompt response has no agent object")
+        prompted_agent = self._prompt_agent(reviewer_name, prompt)
         self._validate_agent(
             prompted_agent,
             reviewer_name=reviewer_name,
@@ -414,19 +408,27 @@ class HerdrClient:
             expected_kind=implementer_kind,
             role="Implementer",
         )
-        prompted = self._response_result(
-            self._run(("agent", "prompt", implementer_name, prompt)),
-            expected_type="agent_prompted",
-        )
-        prompted_agent = prompted.get("agent")
-        if not isinstance(prompted_agent, dict):
-            raise HerdrError("Herdr prompt response has no agent object")
+        prompted_agent = self._prompt_agent(implementer_name, prompt)
         self._validate_agent_identity(
             prompted_agent,
             expected_name=implementer_name,
             expected_kind=implementer_kind,
             role="Implementer",
         )
+
+    def _prompt_agent(
+        self,
+        agent_name: str,
+        prompt: str,
+    ) -> dict[str, object]:
+        prompted = self._response_result(
+            self._run(("agent", "prompt", agent_name, prompt)),
+            expected_type="agent_prompted",
+        )
+        prompted_agent = prompted.get("agent")
+        if not isinstance(prompted_agent, dict):
+            raise HerdrError("Herdr prompt response has no agent object")
+        return prompted_agent
 
     def _resolve_executable(self) -> Path:
         if self._executable is not None:
