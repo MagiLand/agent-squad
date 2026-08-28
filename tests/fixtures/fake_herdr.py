@@ -49,6 +49,12 @@ def main() -> int:
             event["request_id_at_prompt"] = (
                 state.get("active_round") or {}
             ).get("request_id")
+        marker_path = (
+            Path.cwd() / ".agent-squad-review/local-state.json"
+        )
+        if marker_path.is_file():
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            event["review_marker_at_prompt"] = marker
     _append_event(state_root / "invocations.jsonl", event)
 
     if arguments == ["--version"]:
@@ -117,8 +123,10 @@ def main() -> int:
         )
         return 0
     if arguments == ["integration", "status"]:
-        print("claude: current (test)")
-        print("codex: current (test)")
+        stale_kind = os.environ.get("FAKE_HERDR_STALE_KIND")
+        for kind in ("claude", "codex"):
+            status = "stale (test)" if kind == stale_kind else "current (test)"
+            print(f"{kind}: {status}")
         return 0
     if arguments == ["agent", "--help"]:
         print("Commands: list get start prompt")
@@ -144,7 +152,10 @@ def main() -> int:
     if arguments[:2] == ["agent", "get"]:
         if not agent_path.is_file():
             return _error("agent_not_found", "fake Reviewer not found")
-        agent = json.loads(agent_path.read_text(encoding="utf-8"))
+        reviewer = json.loads(agent_path.read_text(encoding="utf-8"))
+        agent = _agent_for_target(arguments[2], reviewer, state_root)
+        if agent is None:
+            return _error("agent_not_found", "fake agent not found")
         _success("agent_info", agent=agent)
         return 0
     if arguments[:2] == ["worktree", "open"]:
@@ -181,7 +192,10 @@ def main() -> int:
     if arguments[:2] == ["agent", "prompt"]:
         if os.environ.get("FAKE_HERDR_FAIL_PROMPT") == "1":
             return _error("agent_blocked", "injected prompt failure")
-        agent = json.loads(agent_path.read_text(encoding="utf-8"))
+        reviewer = json.loads(agent_path.read_text(encoding="utf-8"))
+        agent = _agent_for_target(arguments[2], reviewer, state_root)
+        if agent is None:
+            return _error("agent_not_found", "fake agent not found")
         _success("agent_prompted", agent=agent)
         return 0
     return _error(
@@ -196,6 +210,31 @@ def _option(arguments: list[str], name: str) -> str:
         return arguments[arguments.index(name) + 1]
     except (ValueError, IndexError):
         raise SystemExit(f"missing fake option {name}") from None
+
+
+def _agent_for_target(
+    target: str,
+    reviewer: dict[str, object],
+    state_root: Path,
+) -> dict[str, object] | None:
+    if reviewer.get("name") == target:
+        return reviewer
+    implementer_name = os.environ.get(
+        "FAKE_HERDR_IMPLEMENTER_NAME",
+        "codex-main",
+    )
+    if target != implementer_name:
+        return None
+    return {
+        "name": implementer_name,
+        "agent": os.environ.get("FAKE_HERDR_IMPLEMENTER_KIND", "codex"),
+        "cwd": os.environ.get(
+            "FAKE_HERDR_IMPLEMENTER_CWD",
+            str(state_root),
+        ),
+        "workspace_id": "w-implementer",
+        "pane_id": "w-implementer:p1",
+    }
 
 
 def _success(result_type: str, **values: object) -> None:

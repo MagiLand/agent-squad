@@ -27,6 +27,7 @@ class InvocationDirectoryTests(unittest.TestCase):
                 "--mode",
                 "new_revision",
             ),
+            ("review-submit",),
         )
         for arguments in cases:
             with self.subTest(command=arguments[0]):
@@ -73,6 +74,7 @@ class LocalStateErrorTests(unittest.TestCase):
                 ),
                 "submit_candidate",
             ),
+            (("review-submit",), "submit_review_result"),
         )
         for arguments, operation in cases:
             with self.subTest(command=arguments[0]):

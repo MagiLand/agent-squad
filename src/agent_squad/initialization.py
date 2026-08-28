@@ -184,11 +184,10 @@ class Configuration:
                 "positive integer"
             )
 
-        generated_paths = _require_string_list(
+        generated_paths = _VALIDATOR.require_narrow_relative_paths(
             data.get("allowed_generated_paths", []),
             "configuration.allowed_generated_paths",
         )
-        _validate_generated_paths(generated_paths)
 
         return cls(
             schema_version=schema_version,
@@ -277,6 +276,23 @@ def default_review_worktree_root() -> Path:
             "the default review worktree root cannot be resolved; check "
             f"XDG_DATA_HOME and HOME: {error}"
         ) from error
+
+
+def matches_allowed_generated_path(
+    candidate: str,
+    configured_paths: tuple[str, ...],
+) -> bool:
+    """Return whether a repository-relative path is explicitly allowed."""
+
+    path = PurePosixPath(candidate)
+    for configured in configured_paths:
+        allowed = PurePosixPath(configured)
+        if (
+            path == allowed
+            or path.parts[: len(allowed.parts)] == allowed.parts
+        ):
+            return True
+    return False
 
 
 def default_configuration(review_worktree_root: Path) -> Configuration:
@@ -483,28 +499,6 @@ def _require_string_list(
             )
         strings.append(item)
     return tuple(strings)
-
-
-def _validate_generated_paths(paths: tuple[str, ...]) -> None:
-    seen: set[PurePosixPath] = set()
-    for index, value in enumerate(paths):
-        parsed = PurePosixPath(value)
-        unsafe = (
-            parsed == PurePosixPath(".")
-            or parsed.is_absolute()
-            or ".." in parsed.parts
-        )
-        if unsafe:
-            raise ConfigurationError(
-                f"configuration.allowed_generated_paths[{index}] must be a "
-                "narrow repository-relative path without '..'"
-            )
-        if parsed in seen:
-            raise ConfigurationError(
-                "configuration.allowed_generated_paths contains duplicate "
-                f"path: {value}"
-            )
-        seen.add(parsed)
 
 
 def _validate_review_worktree_root(

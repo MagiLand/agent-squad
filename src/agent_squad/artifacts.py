@@ -29,6 +29,9 @@ _require_timestamp = _VALIDATOR.require_timestamp
 _require_optional_string = _VALIDATOR.require_optional_string
 _require_absolute_path = _VALIDATOR.require_absolute_path
 _require_object_format = _VALIDATOR.require_object_format
+_require_narrow_relative_paths = (
+    _VALIDATOR.require_narrow_relative_paths
+)
 
 
 class SubmissionMode(StrEnum):
@@ -55,6 +58,14 @@ class HandoffStatus(StrEnum):
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"
+
+
+class ReviewVerdict(StrEnum):
+    """Supported outcomes recorded by an independent Reviewer."""
+
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    NEEDS_HUMAN = "needs_human"
 
 
 @dataclass(frozen=True)
@@ -274,6 +285,492 @@ class BundleArtifact:
 
 
 @dataclass(frozen=True)
+class DeveloperResolution:
+    """One authoritative Developer decision and its companion artifact."""
+
+    created_at: str
+    resolution_id: str
+    run_id: str
+    resolves_escalation_id: str
+    applies_to_finding_ids: tuple[str, ...]
+    resolution_path: str
+    resolution_sha256: str
+    additional_rounds_granted: int
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "DeveloperResolution":
+        """Validate and construct one Developer resolution artifact."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "resolution_id",
+                "run_id",
+                "resolves_escalation_id",
+                "applies_to_finding_ids",
+                "resolution_path",
+                "resolution_sha256",
+                "additional_rounds_granted",
+            },
+            path=label,
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        finding_ids = _require_string_list(
+            data["applies_to_finding_ids"],
+            f"{label}.applies_to_finding_ids",
+        )
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ArtifactValidationError(
+                f"{label}.applies_to_finding_ids contains duplicates"
+            )
+        resolution_path = _require_string(
+            data["resolution_path"],
+            f"{label}.resolution_path",
+        )
+        parsed_path = PurePosixPath(resolution_path)
+        if (
+            parsed_path.is_absolute()
+            or ".." in parsed_path.parts
+            or len(parsed_path.parts) != 1
+            or str(parsed_path) != resolution_path
+        ):
+            raise ArtifactValidationError(
+                f"{label}.resolution_path must name a companion file in "
+                "the same bundle directory"
+            )
+        additional_rounds = _require_int(
+            data["additional_rounds_granted"],
+            f"{label}.additional_rounds_granted",
+        )
+        if additional_rounds < 0:
+            raise ArtifactValidationError(
+                f"{label}.additional_rounds_granted must not be negative"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            resolution_id=_require_uuid(
+                data["resolution_id"],
+                f"{label}.resolution_id",
+            ),
+            run_id=_require_uuid(data["run_id"], f"{label}.run_id"),
+            resolves_escalation_id=_require_uuid(
+                data["resolves_escalation_id"],
+                f"{label}.resolves_escalation_id",
+            ),
+            applies_to_finding_ids=finding_ids,
+            resolution_path=resolution_path,
+            resolution_sha256=_require_digest(
+                data["resolution_sha256"],
+                f"{label}.resolution_sha256",
+            ),
+            additional_rounds_granted=additional_rounds,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable resolution representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "resolution_id": self.resolution_id,
+            "run_id": self.run_id,
+            "resolves_escalation_id": self.resolves_escalation_id,
+            "applies_to_finding_ids": list(self.applies_to_finding_ids),
+            "resolution_path": self.resolution_path,
+            "resolution_sha256": self.resolution_sha256,
+            "additional_rounds_granted": self.additional_rounds_granted,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewFinding:
+    """One structured finding in a Reviewer result."""
+
+    finding_id: str
+    severity: str
+    blocking: bool
+    category: str
+    file: str
+    line_start: int
+    line_end: int
+    problem: str
+    evidence: str
+    impact: str
+    required_change: str
+    verification: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "ReviewFinding":
+        """Validate and construct one structured review finding."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "id",
+                "severity",
+                "blocking",
+                "category",
+                "file",
+                "line_start",
+                "line_end",
+                "problem",
+                "evidence",
+                "impact",
+                "required_change",
+                "verification",
+            },
+            path=label,
+        )
+        line_start = _require_positive_int(
+            data["line_start"],
+            f"{label}.line_start",
+        )
+        line_end = _require_positive_int(
+            data["line_end"],
+            f"{label}.line_end",
+        )
+        if line_end < line_start:
+            raise ArtifactValidationError(
+                f"{label}.line_end must be at least line_start"
+            )
+        return cls(
+            finding_id=_require_meaningful_string(
+                data["id"],
+                f"{label}.id",
+            ),
+            severity=_require_meaningful_string(
+                data["severity"],
+                f"{label}.severity",
+            ),
+            blocking=_require_bool(
+                data["blocking"],
+                f"{label}.blocking",
+            ),
+            category=_require_meaningful_string(
+                data["category"],
+                f"{label}.category",
+            ),
+            file=_require_bundle_path(
+                data["file"],
+                f"{label}.file",
+                kind="repository",
+            ),
+            line_start=line_start,
+            line_end=line_end,
+            problem=_require_meaningful_string(
+                data["problem"],
+                f"{label}.problem",
+            ),
+            evidence=_require_meaningful_string(
+                data["evidence"],
+                f"{label}.evidence",
+            ),
+            impact=_require_meaningful_string(
+                data["impact"],
+                f"{label}.impact",
+            ),
+            required_change=_require_meaningful_string(
+                data["required_change"],
+                f"{label}.required_change",
+            ),
+            verification=_require_meaningful_string(
+                data["verification"],
+                f"{label}.verification",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable finding representation."""
+
+        return {
+            "id": self.finding_id,
+            "severity": self.severity,
+            "blocking": self.blocking,
+            "category": self.category,
+            "file": self.file,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "problem": self.problem,
+            "evidence": self.evidence,
+            "impact": self.impact,
+            "required_change": self.required_change,
+            "verification": self.verification,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    """A structurally and semantically validated Reviewer result."""
+
+    created_at: str
+    result_id: str
+    request_id: str
+    run_id: str
+    round_number: int
+    base_oid: str
+    head_oid: str
+    verdict: ReviewVerdict
+    summary: str
+    findings: tuple[ReviewFinding, ...]
+    non_blocking_observations: tuple[str, ...]
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        object_format: str,
+    ) -> "ReviewResult":
+        """Validate and construct one complete Reviewer result."""
+
+        data = _require_object(value, "review result")
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "result_id",
+                "request_id",
+                "run_id",
+                "round",
+                "base_oid",
+                "head_oid",
+                "verdict",
+                "summary",
+                "findings",
+                "non_blocking_observations",
+            },
+            path="review result",
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            "review result.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"review result.schema_version must be {SCHEMA_VERSION}"
+            )
+        _require_object_format(
+            object_format,
+            "review result Git object format",
+        )
+        findings_value = data["findings"]
+        if not isinstance(findings_value, list):
+            raise ArtifactValidationError(
+                "review result.findings must be a JSON array"
+            )
+        findings = tuple(
+            ReviewFinding.from_dict(
+                item,
+                label=f"review result.findings[{index}]",
+            )
+            for index, item in enumerate(findings_value)
+        )
+        finding_ids = [finding.finding_id for finding in findings]
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ArtifactValidationError(
+                "review result.findings contains duplicate finding IDs"
+            )
+        observations = _require_meaningful_string_list(
+            data["non_blocking_observations"],
+            "review result.non_blocking_observations",
+        )
+        verdict = _VALIDATOR.require_enum(
+            data["verdict"],
+            "review result.verdict",
+            ReviewVerdict,
+        )
+        blocking_count = sum(finding.blocking for finding in findings)
+        if verdict is ReviewVerdict.APPROVED and blocking_count:
+            raise ArtifactValidationError(
+                "an approved review result cannot contain blocking findings"
+            )
+        if (
+            verdict is ReviewVerdict.CHANGES_REQUESTED
+            and blocking_count == 0
+        ):
+            raise ArtifactValidationError(
+                "a changes_requested review result must contain at least "
+                "one blocking finding"
+            )
+
+        result_id = _require_uuid(
+            data["result_id"],
+            "review result.result_id",
+        )
+        request_id = _require_uuid(
+            data["request_id"],
+            "review result.request_id",
+        )
+        run_id = _require_uuid(
+            data["run_id"],
+            "review result.run_id",
+        )
+        if result_id in {request_id, run_id}:
+            raise ArtifactValidationError(
+                "review result.result_id must be distinct from request and "
+                "run IDs"
+            )
+
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                "review result.created_at",
+            ),
+            result_id=result_id,
+            request_id=request_id,
+            run_id=run_id,
+            round_number=_require_positive_int(
+                data["round"],
+                "review result.round",
+            ),
+            base_oid=_require_oid(
+                data["base_oid"],
+                object_format,
+                "review result.base_oid",
+            ),
+            head_oid=_require_oid(
+                data["head_oid"],
+                object_format,
+                "review result.head_oid",
+            ),
+            verdict=verdict,
+            summary=_require_meaningful_string(
+                data["summary"],
+                "review result.summary",
+            ),
+            findings=findings,
+            non_blocking_observations=observations,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable result representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "result_id": self.result_id,
+            "request_id": self.request_id,
+            "run_id": self.run_id,
+            "round": self.round_number,
+            "base_oid": self.base_oid,
+            "head_oid": self.head_oid,
+            "verdict": self.verdict.value,
+            "summary": self.summary,
+            "findings": [finding.to_dict() for finding in self.findings],
+            "non_blocking_observations": list(
+                self.non_blocking_observations
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class ReviewerLocalMarker:
+    """Reviewer-side proof that one result passed local validation."""
+
+    submitted_at: str
+    request_id: str
+    result_id: str
+    review_json_path: str
+    review_sha256: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ReviewerLocalMarker":
+        """Validate and construct the Reviewer-local result marker."""
+
+        data = _require_object(value, "review marker")
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "submitted_at",
+                "request_id",
+                "result_id",
+                "status",
+                "review_json_path",
+                "review_sha256",
+            },
+            path="review marker",
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            "review marker.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"review marker.schema_version must be {SCHEMA_VERSION}"
+            )
+        if data["status"] != "result_submitted":
+            raise ArtifactValidationError(
+                "review marker.status must be result_submitted"
+            )
+        review_json_path = _require_bundle_path(
+            data["review_json_path"],
+            "review marker.review_json_path",
+        )
+        if review_json_path != "output/review.json":
+            raise ArtifactValidationError(
+                "review marker.review_json_path must be output/review.json"
+            )
+        return cls(
+            submitted_at=_require_timestamp(
+                data["submitted_at"],
+                "review marker.submitted_at",
+            ),
+            request_id=_require_uuid(
+                data["request_id"],
+                "review marker.request_id",
+            ),
+            result_id=_require_uuid(
+                data["result_id"],
+                "review marker.result_id",
+            ),
+            review_json_path=review_json_path,
+            review_sha256=_require_digest(
+                data["review_sha256"],
+                "review marker.review_sha256",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable marker representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "submitted_at": self.submitted_at,
+            "request_id": self.request_id,
+            "result_id": self.result_id,
+            "status": "result_submitted",
+            "review_json_path": self.review_json_path,
+            "review_sha256": self.review_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class ReviewRequest:
     """The complete immutable request given to one round-scoped Reviewer."""
 
@@ -297,6 +794,7 @@ class ReviewRequest:
     implementer_kind: AgentKind
     reviewer_kind: AgentKind
     reviewer_name: str
+    allowed_generated_paths: tuple[str, ...]
 
     @classmethod
     def from_dict(cls, value: object) -> "ReviewRequest":
@@ -327,6 +825,7 @@ class ReviewRequest:
                 "implementer_kind",
                 "reviewer_kind",
                 "reviewer_name",
+                "allowed_generated_paths",
             },
             path="review request",
         )
@@ -511,6 +1010,10 @@ class ReviewRequest:
                 AgentKind,
             ),
             reviewer_name=reviewer_name,
+            allowed_generated_paths=_require_narrow_relative_paths(
+                data["allowed_generated_paths"],
+                "review request.allowed_generated_paths",
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -540,6 +1043,7 @@ class ReviewRequest:
             "implementer_kind": self.implementer_kind.value,
             "reviewer_kind": self.reviewer_kind.value,
             "reviewer_name": self.reviewer_name,
+            "allowed_generated_paths": list(self.allowed_generated_paths),
         }
 
 
@@ -796,7 +1300,12 @@ class ReviewRoundRecord:
         }
 
 
-def _require_bundle_path(value: object, label: str) -> str:
+def _require_bundle_path(
+    value: object,
+    label: str,
+    *,
+    kind: str = "bundle",
+) -> str:
     text = _require_string(value, label)
     path = PurePosixPath(text)
     if (
@@ -806,7 +1315,7 @@ def _require_bundle_path(value: object, label: str) -> str:
         or str(path) != text
     ):
         raise ArtifactValidationError(
-            f"{label} must be a normalized bundle-relative path"
+            f"{label} must be a normalized {kind}-relative path"
         )
     return text
 
@@ -831,6 +1340,33 @@ def _require_positive_int(value: object, label: str) -> int:
     if result < 1:
         raise ArtifactValidationError(f"{label} must be positive")
     return result
+
+
+def _require_bool(value: object, label: str) -> bool:
+    if type(value) is not bool:
+        raise ArtifactValidationError(f"{label} must be a boolean")
+    return value
+
+
+def _require_meaningful_string(value: object, label: str) -> str:
+    result = _require_string(value, label)
+    if not result.strip():
+        raise ArtifactValidationError(
+            f"{label} must contain non-whitespace text"
+        )
+    return result
+
+
+def _require_meaningful_string_list(
+    value: object,
+    label: str,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ArtifactValidationError(f"{label} must be a JSON array")
+    return tuple(
+        _require_meaningful_string(item, f"{label}[{index}]")
+        for index, item in enumerate(value)
+    )
 
 
 def _require_reviewer_name(value: object, label: str) -> str:

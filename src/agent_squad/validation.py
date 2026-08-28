@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import TypeVar
 import uuid
@@ -94,6 +94,42 @@ class JsonValidator:
         if not result.is_absolute():
             raise self._error_type(f"{path} must be an absolute path")
         return result
+
+    def require_narrow_relative_paths(
+        self,
+        value: object,
+        path: str,
+    ) -> tuple[str, ...]:
+        """Require distinct, narrow, repository-relative POSIX paths."""
+
+        if not isinstance(value, list):
+            raise self._error_type(f"{path} must be a JSON array")
+        paths: list[str] = []
+        seen: set[PurePosixPath] = set()
+        for index, item in enumerate(value):
+            item_path = f"{path}[{index}]"
+            text = self.require_string(item, item_path)
+            if "\x00" in text:
+                raise self._error_type(
+                    f"{item_path} must not contain null bytes"
+                )
+            parsed = PurePosixPath(text)
+            if (
+                parsed == PurePosixPath(".")
+                or parsed.is_absolute()
+                or ".." in parsed.parts
+            ):
+                raise self._error_type(
+                    f"{item_path} must be a narrow repository-relative "
+                    "path without '..'"
+                )
+            if parsed in seen:
+                raise self._error_type(
+                    f"{path} contains duplicate path: {text}"
+                )
+            seen.add(parsed)
+            paths.append(text)
+        return tuple(paths)
 
     def require_object_format(self, value: object, path: str) -> str:
         """Require a supported Git object format."""

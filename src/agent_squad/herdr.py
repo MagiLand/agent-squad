@@ -16,6 +16,12 @@ class HerdrError(AgentSquadError):
     """Raised when installed Herdr capabilities or delivery are unusable."""
 
 
+def format_herdr_error(value: str) -> str:
+    """Flatten a Herdr failure for stable one-line status output."""
+
+    return " ".join(value.splitlines()).strip() or "unknown Herdr error"
+
+
 @dataclass(frozen=True)
 class HerdrInstallation:
     """Validated facts discovered from the installed Herdr command."""
@@ -80,8 +86,13 @@ class HerdrClient:
         self._timeout_seconds = timeout_seconds
         self._executable: Path | None = None
 
-    def discover(self, reviewer_kind: AgentKind) -> HerdrInstallation:
-        """Validate schema, live protocol, commands, and role integration."""
+    def discover(
+        self,
+        agent_kind: AgentKind,
+        *,
+        role: str,
+    ) -> HerdrInstallation:
+        """Validate schema, live protocol, commands, and agent integration."""
 
         executable = self._resolve_executable()
         version_result = self._run(("--version",))
@@ -139,7 +150,7 @@ class HerdrClient:
             (
                 line
                 for line in integration.splitlines()
-                if line.startswith(f"{reviewer_kind.value}:")
+                if line.startswith(f"{agent_kind.value}:")
             ),
             None,
         )
@@ -150,8 +161,8 @@ class HerdrClient:
         )
         if role_status is None or not role_status.startswith("current"):
             raise HerdrError(
-                f"Herdr integration for Reviewer kind "
-                f"{reviewer_kind.value!r} is not current"
+                f"Herdr integration for {role} kind "
+                f"{agent_kind.value!r} is not current"
             )
 
         return HerdrInstallation(
@@ -361,13 +372,7 @@ class HerdrClient:
             )
             adopted = False
 
-        prompted = self._response_result(
-            self._run(("agent", "prompt", reviewer_name, prompt)),
-            expected_type="agent_prompted",
-        )
-        prompted_agent = prompted.get("agent")
-        if not isinstance(prompted_agent, dict):
-            raise HerdrError("Herdr prompt response has no agent object")
+        prompted_agent = self._prompt_agent(reviewer_name, prompt)
         self._validate_agent(
             prompted_agent,
             reviewer_name=reviewer_name,
@@ -379,6 +384,51 @@ class HerdrClient:
             pane_id=pane_id,
             adopted=adopted,
         )
+
+    def dispatch_review_result(
+        self,
+        *,
+        implementer_name: str,
+        implementer_kind: AgentKind,
+        prompt: str,
+    ) -> None:
+        """Send one marker-confirmed result prompt to the Implementer."""
+
+        implementer = self._get_agent(
+            implementer_name,
+            role="Implementer",
+        )
+        if implementer is None:
+            raise HerdrError(
+                f"Implementer {implementer_name!r} is not available"
+            )
+        self._validate_agent_identity(
+            implementer,
+            expected_name=implementer_name,
+            expected_kind=implementer_kind,
+            role="Implementer",
+        )
+        prompted_agent = self._prompt_agent(implementer_name, prompt)
+        self._validate_agent_identity(
+            prompted_agent,
+            expected_name=implementer_name,
+            expected_kind=implementer_kind,
+            role="Implementer",
+        )
+
+    def _prompt_agent(
+        self,
+        agent_name: str,
+        prompt: str,
+    ) -> dict[str, object]:
+        prompted = self._response_result(
+            self._run(("agent", "prompt", agent_name, prompt)),
+            expected_type="agent_prompted",
+        )
+        prompted_agent = prompted.get("agent")
+        if not isinstance(prompted_agent, dict):
+            raise HerdrError("Herdr prompt response has no agent object")
+        return prompted_agent
 
     def _resolve_executable(self) -> Path:
         if self._executable is not None:
@@ -406,9 +456,14 @@ class HerdrClient:
         self._executable = resolved
         return resolved
 
-    def _get_agent(self, reviewer_name: str) -> dict[str, object] | None:
+    def _get_agent(
+        self,
+        agent_name: str,
+        *,
+        role: str = "Reviewer",
+    ) -> dict[str, object] | None:
         result = self._run(
-            ("agent", "get", reviewer_name),
+            ("agent", "get", agent_name),
             allow_failure=True,
         )
         if result.returncode != 0:
@@ -416,7 +471,7 @@ class HerdrClient:
             if error is not None and error[0] == "agent_not_found":
                 return None
             detail = error[1] if error is not None else _process_detail(result)
-            raise HerdrError(f"could not inspect Reviewer session: {detail}")
+            raise HerdrError(f"could not inspect {role} session: {detail}")
         response = self._response_result(
             result,
             expected_type="agent_info",
@@ -426,6 +481,27 @@ class HerdrClient:
             raise HerdrError("Herdr agent-get response has no agent object")
         return agent
 
+    def _validate_agent_identity(
+        self,
+        value: dict[str, object],
+        *,
+        expected_name: str,
+        expected_kind: AgentKind,
+        role: str,
+    ) -> None:
+        name = value.get("name")
+        if name != expected_name:
+            raise HerdrError(
+                f"Herdr returned {role} name {name!r}, expected "
+                f"{expected_name!r}"
+            )
+        kind = value.get("agent")
+        if kind != expected_kind.value:
+            raise HerdrError(
+                f"{role} {expected_name!r} uses agent kind {kind!r}, "
+                f"expected {expected_kind.value!r}"
+            )
+
     def _validate_agent(
         self,
         value: dict[str, object],
@@ -434,18 +510,12 @@ class HerdrClient:
         reviewer_kind: AgentKind,
         review_worktree: Path,
     ) -> None:
-        name = value.get("name")
-        if name is not None and name != reviewer_name:
-            raise HerdrError(
-                f"Herdr returned Reviewer name {name!r}, expected "
-                f"{reviewer_name!r}"
-            )
-        kind = value.get("agent")
-        if kind != reviewer_kind.value:
-            raise HerdrError(
-                f"Reviewer {reviewer_name!r} uses agent kind {kind!r}, "
-                f"expected {reviewer_kind.value!r}"
-            )
+        self._validate_agent_identity(
+            value,
+            expected_name=reviewer_name,
+            expected_kind=reviewer_kind,
+            role="Reviewer",
+        )
         cwd = _required_path(value.get("cwd"), "Reviewer cwd")
         if cwd != review_worktree.resolve(strict=True):
             raise HerdrError(

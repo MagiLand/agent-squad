@@ -62,6 +62,31 @@ class JsonValidatorTests(unittest.TestCase):
             "kept\x00value",
         )
 
+    def test_narrow_relative_paths_share_one_policy(self) -> None:
+        self.assertEqual(
+            self.validator.require_narrow_relative_paths(
+                ["build/", "coverage/report/"],
+                "paths",
+            ),
+            ("build/", "coverage/report/"),
+        )
+
+        permissive = JsonValidator(
+            DomainError,
+            reject_null_strings=False,
+        )
+        cases = (
+            ("not-an-array", "must be a JSON array"),
+            ([1], r"paths\[0\] must be a non-empty string"),
+            (["bad\x00path"], r"paths\[0\] must not contain null bytes"),
+            (["../outside"], "narrow repository-relative path"),
+            (["build", "build/"], "contains duplicate path"),
+        )
+        for value, message in cases:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(DomainError, message):
+                    permissive.require_narrow_relative_paths(value, "paths")
+
     def test_protocol_scalars_share_one_contract(self) -> None:
         run_id = "12345678-1234-5678-9234-567812345678"
         timestamp = "2026-08-26T01:02:03Z"

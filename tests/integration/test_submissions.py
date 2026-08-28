@@ -29,6 +29,7 @@ from agent_squad.artifacts import (  # noqa: E402
     HandoffRecord,
 )
 from agent_squad.herdr import HerdrInstallation  # noqa: E402
+from agent_squad.initialization import AgentKind  # noqa: E402
 
 
 def _artifacts(repository: Path) -> tuple[dict[str, object], Path]:
@@ -835,6 +836,10 @@ class SubmitCommandTests(unittest.TestCase):
                             herdr_client=client,
                         )
 
+                    client.discover.assert_called_once_with(
+                        AgentKind.CLAUDE,
+                        role="Reviewer",
+                    )
                     self.assertEqual(state_path.read_bytes(), changed_state[0])
                     state = json.loads(
                         state_path.read_text(encoding="utf-8")
@@ -1013,6 +1018,13 @@ class SubmitCommandTests(unittest.TestCase):
             review_worktree = Path(
                 state["active_round"]["review_worktree"]
             )
+            request = json.loads(
+                (
+                    review_worktree
+                    / ".agent-squad-review/input/request.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(request["allowed_generated_paths"], ["build/"])
             self.assertFalse(
                 (review_worktree / "implementation-report.md").exists()
             )
