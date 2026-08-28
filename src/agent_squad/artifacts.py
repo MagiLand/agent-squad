@@ -34,6 +34,23 @@ _require_narrow_relative_paths = (
 )
 
 
+def deterministic_reviewer_name(run_id: str, round_number: int) -> str:
+    """Return the stable Herdr-safe Reviewer name for one logical round."""
+
+    canonical_run_id = _require_uuid(run_id, "run ID")
+    if type(round_number) is not int or round_number < 1:
+        raise ArtifactValidationError("review round must be positive")
+    name = (
+        f"asq-{canonical_run_id.replace('-', '')[:12]}-"
+        f"r{round_number:03d}-reviewer"
+    )
+    if REVIEWER_NAME_PATTERN.fullmatch(name) is None:
+        raise ArtifactValidationError(
+            "deterministic Reviewer name must be a valid Herdr agent name"
+        )
+    return name
+
+
 class SubmissionMode(StrEnum):
     """Supported relationships between a candidate and an earlier review."""
 

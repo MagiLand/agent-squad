@@ -13,6 +13,7 @@ add_src_to_path()
 
 from agent_squad import submissions  # noqa: E402
 from agent_squad.initialization import (  # noqa: E402
+    is_agent_squad_runtime_path,
     matches_allowed_generated_path,
 )
 
@@ -53,12 +54,12 @@ class SubmissionHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            submissions._is_agent_squad_runtime_path(
+            is_agent_squad_runtime_path(
                 ".agent-squad/runs/run-id/run.json"
             )
         )
         self.assertFalse(
-            submissions._is_agent_squad_runtime_path(
+            is_agent_squad_runtime_path(
                 "nested/.agent-squad/data.json"
             )
         )

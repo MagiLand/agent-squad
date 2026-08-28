@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
@@ -16,8 +19,10 @@ add_src_to_path()
 from agent_squad import runs  # noqa: E402
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
+    BundleArtifact,
     HandoffRecord,
     HandoffStatus,
+    ReviewVerdict,
     RoundStatus,
     SubmissionMode,
 )
@@ -724,6 +729,101 @@ class RunArtifactValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._validate_active_state_shape(**arguments)
+
+
+class ApprovalArtifactGuardTests(unittest.TestCase):
+    def test_approval_validator_rejects_invalid_round_authority(self) -> None:
+        base = SimpleNamespace(
+            status=RoundStatus.APPLIED,
+            verdict=ReviewVerdict.APPROVED,
+            result_id="87654321-4321-6789-a234-678912345678",
+            head_oid="a" * 40,
+            round_number=1,
+            review_result=object(),
+            review_markdown=object(),
+            review_marker=object(),
+            approval=object(),
+            bundle_archive=(),
+        )
+        cases = (
+            (
+                "status",
+                RoundStatus.REVIEWING,
+                "must reference an applied round",
+            ),
+            (
+                "verdict",
+                ReviewVerdict.CHANGES_REQUESTED,
+                "must reference an approved review verdict",
+            ),
+            ("result_id", None, "must record its result ID"),
+            ("head_oid", "b" * 40, "approved head does not match"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                record = copy.copy(base)
+                setattr(record, field, value)
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_approval_artifacts(
+                        run_directory=Path("/run"),
+                        round_record=record,
+                        run_id="87654321-4321-6789-a234-678912345678",
+                        record=SimpleNamespace(),
+                        approved_head_oid="a" * 40,
+                    )
+
+    def test_approval_validator_requires_each_convenience_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory).resolve()
+            round_directory = run_directory / "rounds/001"
+            round_directory.mkdir(parents=True)
+            artifacts = {}
+            for field, path in (
+                ("review_result", "review.json"),
+                ("review_markdown", "review.md"),
+                ("review_marker", "review-marker.json"),
+                ("approval", "approval.json"),
+            ):
+                content = f"{field}\n".encode("utf-8")
+                (round_directory / path).write_bytes(content)
+                artifacts[field] = BundleArtifact(
+                    path=path,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                )
+            base = SimpleNamespace(
+                status=RoundStatus.APPLIED,
+                verdict=ReviewVerdict.APPROVED,
+                result_id="87654321-4321-6789-a234-678912345678",
+                head_oid="a" * 40,
+                round_number=1,
+                bundle_archive=(),
+                **artifacts,
+            )
+            cases = (
+                ("review_result", "review result"),
+                ("review_markdown", "review Markdown"),
+                ("review_marker", "review marker"),
+                ("approval", "approval"),
+            )
+            for field, label in cases:
+                with self.subTest(field=field):
+                    record = copy.copy(base)
+                    setattr(record, field, None)
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        f"missing its {label}",
+                    ):
+                        runs._validate_approval_artifacts(
+                            run_directory=run_directory,
+                            round_record=record,
+                            run_id=(
+                                "87654321-4321-6789-a234-678912345678"
+                            ),
+                            record=SimpleNamespace(),
+                            approved_head_oid="a" * 40,
+                        )
 
 
 if __name__ == "__main__":

@@ -741,7 +741,7 @@ class SubmitCommandTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     submissions,
-                    "_append_event",
+                    "append_event",
                     side_effect=OSError("disk full"),
                 ),
                 self.assertRaisesRegex(
@@ -857,7 +857,7 @@ class SubmitCommandTests(unittest.TestCase):
                 version="herdr test",
                 protocol=20,
             )
-            append_event = submissions._append_event
+            append_event = submissions.append_event
 
             def fail_sent_event(
                 path: Path,
@@ -870,7 +870,7 @@ class SubmitCommandTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     submissions,
-                    "_append_event",
+                    "append_event",
                     side_effect=fail_sent_event,
                 ),
                 self.assertRaisesRegex(

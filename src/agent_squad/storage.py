@@ -4,17 +4,26 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import stat
 import tempfile
 
 
 class InvalidJsonError(ValueError):
     """Raised when JSON text is malformed or repeats an object key."""
+
+
+@dataclass(frozen=True)
+class RegularTree:
+    """Regular files and directories captured from one validated tree."""
+
+    files: dict[PurePosixPath, bytes]
+    directories: frozenset[PurePosixPath]
 
 
 def decode_json(content: str) -> object:
@@ -97,6 +106,95 @@ def append_event(path: Path, event: dict[str, object]) -> None:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def read_regular_tree(
+    root: Path,
+    *,
+    label: str,
+    error_type: type[Exception],
+) -> RegularTree:
+    """Read a normal tree while rejecting links and case collisions."""
+
+    try:
+        root_status = root.lstat()
+    except OSError as error:
+        raise error_type(f"cannot inspect {label} {root}: {error}") from error
+    if not stat.S_ISDIR(root_status.st_mode):
+        raise error_type(f"{label} must be a normal directory: {root}")
+
+    files: dict[PurePosixPath, bytes] = {}
+    directories: set[PurePosixPath] = set()
+    folded: dict[str, PurePosixPath] = {}
+    for directory, names, filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        for name in names:
+            path = current / name
+            try:
+                status = path.lstat()
+            except OSError as error:
+                raise error_type(
+                    f"cannot inspect {label} directory {path}: {error}"
+                ) from error
+            if not stat.S_ISDIR(status.st_mode):
+                raise error_type(
+                    f"{label} directory must not be a symlink: {path}"
+                )
+            directories.add(
+                _record_tree_path(
+                    path,
+                    root=root,
+                    label=label,
+                    folded=folded,
+                    error_type=error_type,
+                )
+            )
+        for name in filenames:
+            path = current / name
+            try:
+                status = path.lstat()
+            except OSError as error:
+                raise error_type(
+                    f"cannot inspect {label} file {path}: {error}"
+                ) from error
+            if not stat.S_ISREG(status.st_mode):
+                raise error_type(
+                    f"{label} file must be a regular non-symlink file: "
+                    f"{path}"
+                )
+            relative = _record_tree_path(
+                path,
+                root=root,
+                label=label,
+                folded=folded,
+                error_type=error_type,
+            )
+            try:
+                files[relative] = path.read_bytes()
+            except OSError as error:
+                raise error_type(
+                    f"cannot read {label} file {path}: {error}"
+                ) from error
+    return RegularTree(files=files, directories=frozenset(directories))
+
+
+def _record_tree_path(
+    path: Path,
+    *,
+    root: Path,
+    label: str,
+    folded: dict[str, PurePosixPath],
+    error_type: type[Exception],
+) -> PurePosixPath:
+    relative = PurePosixPath(path.relative_to(root).as_posix())
+    key = str(relative).casefold()
+    previous = folded.get(key)
+    if previous is not None and previous != relative:
+        raise error_type(
+            f"{label} contains case-colliding paths: {previous}, {relative}"
+        )
+    folded[key] = relative
+    return relative
 
 
 @contextmanager

@@ -25,6 +25,7 @@ from .initialization import (
     AgentSquadError,
     InitializedRepository,
     REVIEW_DIRECTORY_NAME,
+    is_agent_squad_runtime_path,
     load_initialized_repository,
     matches_allowed_generated_path,
     run_git,
@@ -42,6 +43,7 @@ from .storage import (
     decode_json,
     encode_json,
     exclusive_file_lock,
+    read_regular_tree,
     utc_timestamp,
 )
 
@@ -154,7 +156,9 @@ def _apply_review_locked(
     ready = active.unapplied_result
     if ready is None:
         raise ReviewApplicationError(
-            "the active round has no valid marker-confirmed result to apply"
+            active.unapplied_result_error
+            or "the active round has no valid marker-confirmed result to "
+            "apply"
         )
     selected_result_id = presented_result_id or ready.result_id
     if selected_result_id != ready.result_id:
@@ -212,6 +216,7 @@ def _apply_review_locked(
     state = runs.load_json_object(state_path, "authoritative state")
     run_record = runs.load_json_object(run_path, "active run record")
     round_data = runs.load_json_object(round_path, "active round record")
+    original_state = state_path.read_bytes()
     try:
         round_record = ReviewRoundRecord.from_dict(
             round_data,
@@ -238,8 +243,23 @@ def _apply_review_locked(
         evidence.marker_bytes,
         path=REVIEW_MARKER_FILE_NAME,
     )
+    approval_path = round_directory / APPROVAL_FILE_NAME
+    approval_created_at = timestamp
+    if os.path.lexists(approval_path):
+        try:
+            approval_created_at = ApprovalRecord.from_dict(
+                runs.load_json_object(
+                    approval_path,
+                    "existing approval artifact",
+                )
+            ).created_at
+        except (ArtifactValidationError, runs.RunStateError) as error:
+            raise ReviewApplicationError(
+                f"existing approval artifact is invalid: {approval_path}: "
+                f"{error}"
+            ) from error
     approval = ApprovalRecord(
-        created_at=timestamp,
+        created_at=approval_created_at,
         run_id=active.run_id,
         round_number=active.current_round,
         request_id=evidence.request.request_id,
@@ -254,7 +274,7 @@ def _apply_review_locked(
     )
     approval_bytes = encode_json(approval.to_dict())
     approval_artifact = _write_immutable_artifact(
-        round_directory / APPROVAL_FILE_NAME,
+        approval_path,
         approval_bytes,
         path=APPROVAL_FILE_NAME,
     )
@@ -295,15 +315,19 @@ def _apply_review_locked(
             "implementation HEAD changed while approval artifacts were being "
             "prepared; no approval was applied"
         )
-    _persist_application_transition(
-        round_path=round_path,
-        run_path=run_path,
+    _persist_authoritative_transition(
+        records=(
+            (
+                round_path,
+                round_path.read_bytes(),
+                encode_json(next_round.to_dict()),
+            ),
+            (run_path, run_path.read_bytes(), encode_json(next_run)),
+        ),
         state_path=state_path,
-        original_round=round_path.read_bytes(),
-        original_run=run_path.read_bytes(),
-        next_round=encode_json(next_round.to_dict()),
-        next_run=encode_json(next_run),
+        original_state=original_state,
         next_state=encode_json(next_state),
+        failure_message="could not persist approved review state",
     )
     try:
         _ensure_event(
@@ -426,6 +450,7 @@ def _complete_run_locked(
     run_record = runs.load_json_object(run_path, "active run record")
     state = runs.load_json_object(state_path, "authoritative state")
     original_run = run_path.read_bytes()
+    original_state = state_path.read_bytes()
     timestamp = utc_timestamp()
     next_run = copy.deepcopy(run_record)
     next_run.update(
@@ -439,23 +464,13 @@ def _complete_run_locked(
         phase=runs.RunPhase.COMPLETED.value,
         terminal_run_id=active.run_id,
     )
-    atomic_write(run_path, encode_json(next_run), mode=0o600)
-    try:
-        atomic_write(state_path, encode_json(next_state), mode=0o600)
-    except OSError as error:
-        rollback_error: OSError | None = None
-        try:
-            atomic_write(run_path, original_run, mode=0o600)
-        except OSError as restore_error:
-            rollback_error = restore_error
-        detail = (
-            f"; run-record rollback also failed: {rollback_error}"
-            if rollback_error is not None
-            else ""
-        )
-        raise ReviewApplicationError(
-            f"could not release the active-run slot: {error}{detail}"
-        ) from error
+    _persist_authoritative_transition(
+        records=((run_path, original_run, encode_json(next_run)),),
+        state_path=state_path,
+        original_state=original_state,
+        next_state=encode_json(next_state),
+        failure_message="could not release the active-run slot",
+    )
     warnings: list[str] = []
     try:
         _ensure_event(
@@ -488,111 +503,23 @@ def _complete_run_locked(
 def _completed_replay(
     repository: InitializedRepository,
 ) -> CompleteRunResult | None:
-    state_path = repository.control_root / runs.STATE_FILE_NAME
-    if not os.path.lexists(state_path):
-        return None
-    state = runs.load_json_object(state_path, "authoritative state")
-    if state.get("active_run_id") is not None:
-        return None
-    if state.get("phase") != runs.RunPhase.COMPLETED.value:
-        return None
-    terminal_run_id = state.get("terminal_run_id")
     try:
-        canonical_run_id = str(uuid.UUID(str(terminal_run_id)))
-    except ValueError:
-        raise ReviewApplicationError(
-            "completed state has no valid terminal run identity"
-        ) from None
-    if canonical_run_id != terminal_run_id:
-        raise ReviewApplicationError(
-            "completed state has no canonical terminal run identity"
-        )
-    run_directory = runs.safe_run_directory(
-        repository.control_root,
-        canonical_run_id,
-    )
-    run_record_data = runs.load_json_object(
-        run_directory / runs.RUN_RECORD_FILE_NAME,
-        "completed run record",
-    )
-    try:
-        run_record = runs._validate_run_record(
-            run_record_data,
-            run_directory,
-            canonical_run_id,
-        )
+        completed = runs.load_completed_run(repository)
     except runs.RunStateError as error:
         raise ReviewApplicationError(str(error)) from error
-    if run_record.phase is not runs.RunPhase.COMPLETED:
-        raise ReviewApplicationError(
-            "completed state does not match its terminal run record"
-        )
-    current_identity = runs.repository_identity(repository.worktree)
-    identity_comparisons = (
-        (
-            state.get("implementation_root"),
-            str(current_identity.implementation_root),
-            "implementation root",
-        ),
-        (
-            state.get("git_common_dir"),
-            str(current_identity.git_common_dir),
-            "Git common directory",
-        ),
-        (
-            state.get("worktree_git_dir"),
-            str(current_identity.worktree_git_dir),
-            "worktree Git directory",
-        ),
-        (
-            state.get("repository_id"),
-            current_identity.repository_id,
-            "repository ID",
-        ),
-    )
-    for actual, expected, label in identity_comparisons:
-        if actual != expected:
-            raise ReviewApplicationError(
-                f"completed state {label} does not match this worktree"
-            )
-    current_round = state.get("current_round")
-    if type(current_round) is not int or current_round < 1:
-        raise ReviewApplicationError(
-            "completed state has no valid approved round"
-        )
-    round_directory = run_directory / "rounds" / f"{current_round:03d}"
-    try:
-        round_record = ReviewRoundRecord.from_dict(
-            runs.load_json_object(
-                round_directory / "round.json",
-                "completed approval round",
-            ),
-            label="completed approval round",
-        )
-        approval = runs._validate_approval_artifacts(
-            run_directory=run_directory,
-            round_record=round_record,
-            run_id=canonical_run_id,
-            record=run_record,
-            approved_head_oid=(
-                state.get("approved_head_oid")
-                if isinstance(state.get("approved_head_oid"), str)
-                else None
-            ),
-        )
-    except (ArtifactValidationError, runs.RunStateError) as error:
-        raise ReviewApplicationError(str(error)) from error
+    if completed is None:
+        return None
     replay_warnings: list[str] = []
     try:
         _ensure_event(
-            run_directory / runs.EVENT_LOG_FILE_NAME,
+            completed.run_directory / runs.EVENT_LOG_FILE_NAME,
             {
-                "timestamp": run_record_data["finished_at"],
+                "timestamp": completed.finished_at,
                 "event": "run_completed",
-                "run_id": canonical_run_id,
-                "round": round_record.round_number,
-                "result_id": approval.result_id,
-                "approved_head_oid": approval.head_oid,
+                "run_id": completed.run_id,
+                "round": completed.round_number,
+                "result_id": completed.result_id,
+                "approved_head_oid": completed.approved_head_oid,
             },
             identity_fields=("event", "run_id"),
         )
@@ -602,8 +529,8 @@ def _completed_replay(
             f"not be recovered: {error}"
         )
     return CompleteRunResult(
-        run_id=canonical_run_id,
-        head_oid=approval.head_oid,
+        run_id=completed.run_id,
+        head_oid=completed.approved_head_oid,
         already_completed=True,
         cleanup_warnings=tuple(replay_warnings),
     )
@@ -756,7 +683,7 @@ def _archive_bundle(
         for item in evidence.bundle_files
     )
     if os.path.lexists(archive_root):
-        _verify_archive(round_directory, manifest)
+        _verify_bundle_tree(archive_root, manifest, label="existing")
         return manifest
 
     staging = Path(
@@ -768,94 +695,41 @@ def _archive_bundle(
             destination = staging.joinpath(*item.path.parts)
             destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             atomic_write(destination, item.content, mode=0o400)
-        _verify_staged_archive(staging, manifest)
+        _verify_bundle_tree(staging, manifest, label="staged")
         staging.replace(archive_root)
         _make_archive_read_only(archive_root)
     except Exception:
         if os.path.lexists(staging):
             shutil.rmtree(staging, ignore_errors=True)
         raise
-    _verify_archive(round_directory, manifest)
+    _verify_bundle_tree(archive_root, manifest, label="existing")
     return manifest
 
 
-def _verify_staged_archive(
-    staging: Path,
+def _verify_bundle_tree(
+    root: Path,
     manifest: tuple[BundleArtifact, ...],
+    *,
+    label: str,
 ) -> None:
     expected = {
         PurePosixPath(*PurePosixPath(item.path).parts[1:]): item.sha256
         for item in manifest
     }
-    actual = _regular_tree_files(staging)
+    actual = read_regular_tree(
+        root,
+        label=f"{label} review bundle archive",
+        error_type=ReviewApplicationError,
+    ).files
     if set(actual) != set(expected):
         raise ReviewApplicationError(
-            "staged review bundle archive is incomplete"
+            f"{label} review bundle archive does not match validated evidence"
         )
     for path, content in actual.items():
         if hashlib.sha256(content).hexdigest() != expected[path]:
             raise ReviewApplicationError(
-                f"staged review bundle digest mismatch for {path}"
+                f"{label} review bundle digest mismatch for {path}"
             )
-
-
-def _verify_archive(
-    round_directory: Path,
-    manifest: tuple[BundleArtifact, ...],
-) -> None:
-    archive_root = round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
-    actual = _regular_tree_files(archive_root)
-    expected = {
-        PurePosixPath(*PurePosixPath(item.path).parts[1:]): item.sha256
-        for item in manifest
-    }
-    if set(actual) != set(expected):
-        raise ReviewApplicationError(
-            "existing review bundle archive differs from validated evidence"
-        )
-    for path, content in actual.items():
-        if hashlib.sha256(content).hexdigest() != expected[path]:
-            raise ReviewApplicationError(
-                f"existing review bundle digest mismatch for {path}"
-            )
-
-
-def _regular_tree_files(root: Path) -> dict[PurePosixPath, bytes]:
-    try:
-        root_status = root.lstat()
-    except OSError as error:
-        raise ReviewApplicationError(
-            f"cannot inspect review archive {root}: {error}"
-        ) from error
-    if not stat.S_ISDIR(root_status.st_mode):
-        raise ReviewApplicationError(
-            f"review archive must be a normal directory: {root}"
-        )
-    files: dict[PurePosixPath, bytes] = {}
-    folded: dict[str, PurePosixPath] = {}
-    for directory, names, filenames in os.walk(root, followlinks=False):
-        current = Path(directory)
-        for name in names:
-            path = current / name
-            if not stat.S_ISDIR(path.lstat().st_mode):
-                raise ReviewApplicationError(
-                    f"review archive directory must not be a symlink: {path}"
-                )
-        for name in filenames:
-            path = current / name
-            if not stat.S_ISREG(path.lstat().st_mode):
-                raise ReviewApplicationError(
-                    f"review archive file must not be a symlink: {path}"
-                )
-            relative = PurePosixPath(path.relative_to(root).as_posix())
-            key = str(relative).casefold()
-            if key in folded and folded[key] != relative:
-                raise ReviewApplicationError(
-                    "review archive contains case-colliding paths"
-                )
-            folded[key] = relative
-            files[relative] = path.read_bytes()
-    return files
 
 
 def _make_archive_read_only(root: Path) -> None:
@@ -891,44 +765,76 @@ def _write_immutable_artifact(
     return BundleArtifact(path=path, sha256=digest)
 
 
-def _persist_application_transition(
+def _persist_authoritative_transition(
     *,
-    round_path: Path,
-    run_path: Path,
+    records: tuple[tuple[Path, bytes, bytes], ...],
     state_path: Path,
-    original_round: bytes,
-    original_run: bytes,
-    next_round: bytes,
-    next_run: bytes,
+    original_state: bytes,
     next_state: bytes,
+    failure_message: str,
 ) -> None:
-    round_written = False
-    run_written = False
+    """Commit metadata before state and safely roll back interruptions."""
+
     try:
-        atomic_write(round_path, next_round, mode=0o600)
-        round_written = True
-        atomic_write(run_path, next_run, mode=0o600)
-        run_written = True
+        for path, _, staged in records:
+            atomic_write(path, staged, mode=0o600)
         atomic_write(state_path, next_state, mode=0o600)
-    except OSError as error:
+    except BaseException as error:
+        try:
+            current_state = state_path.read_bytes()
+        except OSError as inspection_error:
+            message = (
+                f"{failure_message}: {error}; could not determine whether "
+                f"authoritative state committed: {inspection_error}"
+            )
+            if isinstance(error, OSError):
+                raise ReviewApplicationError(message) from error
+            error.add_note(message)
+            raise
+        if current_state == next_state:
+            if isinstance(error, OSError):
+                raise ReviewApplicationError(
+                    f"{failure_message}: {error}; authoritative state was "
+                    "already committed, so retry the command"
+                ) from error
+            raise
+        if current_state != original_state:
+            message = (
+                f"{failure_message}: {error}; authoritative state changed "
+                "unexpectedly, so staged metadata was left in place"
+            )
+            if isinstance(error, OSError):
+                raise ReviewApplicationError(message) from error
+            error.add_note(message)
+            raise
+
         rollback_errors: list[str] = []
-        if run_written:
+        for path, original, staged in reversed(records):
             try:
-                atomic_write(run_path, original_run, mode=0o600)
-            except OSError as restore_error:
-                rollback_errors.append(f"run record: {restore_error}")
-        if round_written:
+                current = path.read_bytes()
+            except OSError as inspection_error:
+                rollback_errors.append(f"{path}: {inspection_error}")
+                continue
+            if current == original:
+                continue
+            if current != staged:
+                rollback_errors.append(f"{path}: content changed")
+                continue
             try:
-                atomic_write(round_path, original_round, mode=0o600)
+                atomic_write(path, original, mode=0o600)
             except OSError as restore_error:
-                rollback_errors.append(f"round record: {restore_error}")
+                rollback_errors.append(f"{path}: {restore_error}")
         detail = (
             "; rollback also failed for " + ", ".join(rollback_errors)
             if rollback_errors
             else ""
         )
+        if not isinstance(error, OSError):
+            if detail:
+                error.add_note(detail.removeprefix("; "))
+            raise
         raise ReviewApplicationError(
-            f"could not persist approved review state: {error}{detail}"
+            f"{failure_message}: {error}{detail}"
         ) from error
 
 
@@ -988,7 +894,7 @@ def _validate_completion_cleanliness(
         entry
         for entry in untracked.stdout.split("\0")
         if entry
-        and not _is_agent_squad_runtime_path(entry)
+        and not is_agent_squad_runtime_path(entry)
         and not matches_allowed_generated_path(
             entry,
             repository.configuration.allowed_generated_paths,
@@ -1019,8 +925,8 @@ def _cleanup_review_resources(
         _validate_evidence(repository, active, evidence)
     except AgentSquadError as error:
         return (
-            "retained review worktree because its applied evidence could not "
-            f"be revalidated: {error}",
+            f"retained review worktree {review_worktree} because its applied "
+            f"evidence could not be revalidated: {error}",
         )
 
     warnings: list[str] = []
@@ -1049,12 +955,13 @@ def _cleanup_review_resources(
     if cleanliness.returncode != 0:
         detail = cleanliness.stderr.strip() or "unknown Git error"
         return (
-            f"could not verify review worktree cleanup: {detail}",
+            f"could not verify review worktree cleanup for "
+            f"{review_worktree}: {detail}",
         )
     if cleanliness.stdout:
         return (
-            "retained review worktree because files remain after scoped "
-            "cleanup",
+            f"retained review worktree {review_worktree} because files "
+            "remain after scoped cleanup",
         )
     removed = run_git(
         repository.worktree.root,
@@ -1240,11 +1147,3 @@ def _optional_result_id(value: str | None) -> str | None:
             "--result-id must be a canonical UUID"
         )
     return canonical
-
-
-def _is_agent_squad_runtime_path(candidate: str) -> bool:
-    path = PurePosixPath(candidate)
-    return bool(path.parts) and path.parts[0] in {
-        ".agent-squad",
-        ".agent-squad-review",
-    }

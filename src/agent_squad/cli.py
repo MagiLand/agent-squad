@@ -12,7 +12,7 @@ from .artifacts import HandoffStatus, SubmissionMode
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
-from .runs import inspect_status, start_run
+from .runs import RunPhase, inspect_status, start_run
 from .submissions import submit_candidate
 
 
@@ -263,8 +263,13 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         availability = "yes" if run.review_worktree_available else "no"
         print(f"Review worktree available: {availability}")
     ready = run.unapplied_result
-    if run.phase.value == "reviewing":
-        if ready is None:
+    if run.phase is RunPhase.REVIEWING:
+        if run.unapplied_result_error is not None:
+            print(
+                "Marker-confirmed unapplied result: present but invalid: "
+                f"{run.unapplied_result_error}"
+            )
+        elif ready is None:
             print("Marker-confirmed unapplied result: none")
         else:
             print("Marker-confirmed unapplied result: ready")
@@ -272,10 +277,7 @@ def _run_status(_arguments: argparse.Namespace) -> int:
             print(f"Result verdict: {ready.verdict.value}")
             print(f"Result path: {ready.result_path}")
             print("Result authoritative: no")
-            print(
-                "Apply command: agent-squad apply-review --result-id "
-                f"{ready.result_id}"
-            )
+            print(f"Apply command: {status.next_action}")
     budget = run.review_budget
     print(
         "Review budget: "
