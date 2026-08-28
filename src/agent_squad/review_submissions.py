@@ -69,6 +69,33 @@ class ReviewSubmitResult:
     notification_error: str | None
 
 
+@dataclass(frozen=True)
+class MarkerConfirmedReview:
+    """Fully revalidated evidence for one marker-confirmed result."""
+
+    worktree: GitWorktree
+    bundle_root: Path
+    request: ReviewRequest
+    request_bytes: bytes
+    review: ReviewResult
+    review_bytes: bytes
+    review_path: Path
+    review_markdown_bytes: bytes
+    review_markdown_path: Path
+    marker: ReviewerLocalMarker
+    marker_bytes: bytes
+    marker_path: Path
+    bundle_files: tuple[ReviewBundleFile, ...]
+
+
+@dataclass(frozen=True)
+class ReviewBundleFile:
+    """One regular file captured from a validated review bundle."""
+
+    path: PurePosixPath
+    content: bytes
+
+
 def submit_review_result(
     start: Path,
     *,
@@ -153,11 +180,122 @@ def submit_review_result(
         ) from error
 
 
-def _load_review_request(bundle_root: Path) -> ReviewRequest:
-    request_path = bundle_root.joinpath(*REQUEST_PATH.parts)
-    value, _ = _load_json_file(request_path, "review request")
+def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
+    """Independently validate one submitted result without notifying anyone."""
+
+    worktree = discover_git_worktree(start)
+    bundle_root = worktree.root / REVIEW_DIRECTORY_NAME
+    _require_normal_directory(bundle_root, "review bundle")
+    input_root = bundle_root / "input"
+    output_root = bundle_root / "output"
+    _require_normal_directory(input_root, "review bundle input")
+    _require_normal_directory(output_root, "review bundle output")
+    lock_path = bundle_root.joinpath(*SUBMISSION_LOCK_PATH.parts)
+    _read_regular_file(lock_path, "review submission lock")
+
     try:
-        return ReviewRequest.from_dict(value)
+        with exclusive_file_lock(lock_path):
+            _require_normal_directory(bundle_root, "review bundle")
+            _require_normal_directory(input_root, "review bundle input")
+            _require_normal_directory(output_root, "review bundle output")
+            request, request_bytes = _load_review_request_with_bytes(
+                bundle_root
+            )
+            _validate_request_identity(worktree, request)
+            _validate_worktree_integrity(worktree, request)
+            previous_review = _validate_bundle_inputs(bundle_root, request)
+            _validate_bundle_root_entries(bundle_root)
+            _validate_output_tree(output_root)
+            review, review_bytes, review_path = _load_review_result(
+                bundle_root,
+                request,
+            )
+            markdown_bytes, markdown_path = _validate_review_markdown(
+                bundle_root,
+                request,
+            )
+            _assert_result_identity(request, review)
+            _assert_fresh_result_id(previous_review, review)
+
+            marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
+            marker_value, marker_bytes = _load_json_file(
+                marker_path,
+                "review marker",
+            )
+            try:
+                marker = ReviewerLocalMarker.from_dict(marker_value)
+            except ArtifactValidationError as error:
+                raise ReviewSubmissionError(
+                    f"review marker failed validation: {error}"
+                ) from error
+            comparisons = (
+                (marker.request_id, request.request_id, "request ID"),
+                (marker.result_id, review.result_id, "result ID"),
+                (
+                    marker.review_json_path,
+                    request.review_output_path,
+                    "review path",
+                ),
+                (
+                    marker.review_sha256,
+                    hashlib.sha256(review_bytes).hexdigest(),
+                    "review digest",
+                ),
+            )
+            for actual, expected, label in comparisons:
+                if actual != expected:
+                    raise ReviewSubmissionError(
+                        f"review marker {label} does not match the validated "
+                        "result"
+                    )
+            bundle_paths, _ = _walk_tree(bundle_root)
+            bundle_files = tuple(
+                ReviewBundleFile(
+                    path=path,
+                    content=_read_regular_file(
+                        bundle_root.joinpath(*path.parts),
+                        f"review bundle file {path}",
+                    ),
+                )
+                for path in sorted(bundle_paths, key=str)
+            )
+            return MarkerConfirmedReview(
+                worktree=worktree,
+                bundle_root=bundle_root,
+                request=request,
+                request_bytes=request_bytes,
+                review=review,
+                review_bytes=review_bytes,
+                review_path=review_path,
+                review_markdown_bytes=markdown_bytes,
+                review_markdown_path=markdown_path,
+                marker=marker,
+                marker_bytes=marker_bytes,
+                marker_path=marker_path,
+                bundle_files=bundle_files,
+            )
+    except AgentSquadError:
+        raise
+    except ArtifactValidationError as error:
+        raise ReviewSubmissionError(str(error)) from error
+    except OSError as error:
+        raise ReviewSubmissionError(
+            f"cannot validate the marker-confirmed review result: {error}"
+        ) from error
+
+
+def _load_review_request(bundle_root: Path) -> ReviewRequest:
+    request, _ = _load_review_request_with_bytes(bundle_root)
+    return request
+
+
+def _load_review_request_with_bytes(
+    bundle_root: Path,
+) -> tuple[ReviewRequest, bytes]:
+    request_path = bundle_root.joinpath(*REQUEST_PATH.parts)
+    value, content = _load_json_file(request_path, "review request")
+    try:
+        return ReviewRequest.from_dict(value), content
     except ArtifactValidationError as error:
         raise ReviewSubmissionError(
             f"review request failed validation: {error}"
@@ -288,7 +426,7 @@ def _validate_worktree_integrity(
         raise ReviewSubmissionError(
             f"could not verify tracked review content: {detail}"
         )
-    _verify_flagged_tracked_files(worktree.root, request.object_format)
+    verify_flagged_tracked_files(worktree.root, request.object_format)
 
     visible = run_git(
         worktree.root,
@@ -345,7 +483,7 @@ def _unexpected_worktree_entries(
     return tuple(unexpected)
 
 
-def _verify_flagged_tracked_files(
+def verify_flagged_tracked_files(
     repository_root: Path,
     object_format: str,
 ) -> None:
@@ -641,7 +779,7 @@ def _load_review_result(
 def _validate_review_markdown(
     bundle_root: Path,
     request: ReviewRequest,
-) -> None:
+) -> tuple[bytes, Path]:
     relative = PurePosixPath(request.review_markdown_path)
     path = bundle_root.joinpath(*relative.parts)
     content = _read_regular_file(path, "human-readable review")
@@ -659,6 +797,7 @@ def _validate_review_markdown(
         raise ReviewSubmissionError(
             "human-readable review must not contain null bytes"
         )
+    return content, path
 
 
 def _assert_result_identity(

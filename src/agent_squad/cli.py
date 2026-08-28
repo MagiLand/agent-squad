@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .artifacts import HandoffStatus, SubmissionMode
 from .initialization import AgentKind, AgentSquadError, initialize_repository
+from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
 from .runs import inspect_status, start_run
 from .submissions import submit_candidate
@@ -133,6 +134,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     review_submit_parser.set_defaults(handler=_run_review_submit)
+
+    apply_review_parser = commands.add_parser(
+        "apply-review",
+        help="validate and apply the active Reviewer result",
+        description=(
+            "Independently revalidate the active marker-confirmed result, "
+            "archive its complete evidence, and apply an exact-revision "
+            "approval idempotently."
+        ),
+    )
+    apply_review_parser.add_argument(
+        "--result-id",
+        metavar="UUID",
+        help=(
+            "expected Reviewer result ID; defaults to the active "
+            "Reviewer-local marker"
+        ),
+    )
+    apply_review_parser.set_defaults(handler=_run_apply_review)
+
+    complete_parser = commands.add_parser(
+        "complete",
+        help="complete the exact approved revision",
+        description=(
+            "Verify exact approved-head equality and worktree cleanliness, "
+            "then complete the run, release its active slot, and clean only "
+            "owned review resources."
+        ),
+    )
+    complete_parser.set_defaults(handler=_run_complete)
     return parser
 
 
@@ -231,6 +262,20 @@ def _run_status(_arguments: argparse.Namespace) -> int:
     if run.review_worktree_available is not None:
         availability = "yes" if run.review_worktree_available else "no"
         print(f"Review worktree available: {availability}")
+    ready = run.unapplied_result
+    if run.phase.value == "reviewing":
+        if ready is None:
+            print("Marker-confirmed unapplied result: none")
+        else:
+            print("Marker-confirmed unapplied result: ready")
+            print(f"Result ID: {ready.result_id}")
+            print(f"Result verdict: {ready.verdict.value}")
+            print(f"Result path: {ready.result_path}")
+            print("Result authoritative: no")
+            print(
+                "Apply command: agent-squad apply-review --result-id "
+                f"{ready.result_id}"
+            )
     budget = run.review_budget
     print(
         "Review budget: "
@@ -301,6 +346,38 @@ def _run_review_submit(_arguments: argparse.Namespace) -> int:
         return 1
     print("Result notification: sent")
     print("Next action: wait for the Implementer to apply the result")
+    return 0
+
+
+def _run_apply_review(arguments: argparse.Namespace) -> int:
+    result = apply_review(
+        _invocation_directory(),
+        result_id=arguments.result_id,
+    )
+    action = "already applied" if result.replayed else "applied"
+    print(
+        f"Review result {result.result_id} {action} for run "
+        f"{result.run_id}"
+    )
+    print(f"Round: {result.round_number}")
+    print(f"Verdict: {result.verdict.value}")
+    print(f"Approved head: {result.head_oid}")
+    print(f"Approval authority: {result.approval_path}")
+    print(f"Archived review bundle: {result.bundle_archive}")
+    print(f"Next action: {result.next_action}")
+    return 0
+
+
+def _run_complete(_arguments: argparse.Namespace) -> int:
+    result = complete_run(_invocation_directory())
+    if result.already_completed:
+        print(f"Agent Squad run {result.run_id} is already completed")
+    else:
+        print(f"Completed Agent Squad run {result.run_id}")
+    print(f"Approved revision: {result.head_oid}")
+    print("Active run slot: released")
+    for warning in result.cleanup_warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
     return 0
 
 

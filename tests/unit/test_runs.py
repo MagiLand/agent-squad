@@ -212,6 +212,14 @@ class ProtocolValueValidationTests(unittest.TestCase):
             runs._next_action(runs.RunPhase.REVIEWING),
             "wait for the Reviewer result",
         )
+        result_id = "87654321-4321-6789-a234-678912345678"
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                result_id=result_id,
+            ),
+            f"agent-squad apply-review --result-id {result_id}",
+        )
         self.assertEqual(
             runs._next_action(
                 runs.RunPhase.REVIEWING,
@@ -219,11 +227,10 @@ class ProtocolValueValidationTests(unittest.TestCase):
             ),
             "recover the preserved review-request handoff",
         )
-        with self.assertRaisesRegex(
-            runs.RunStateError,
-            "approved is not supported",
-        ):
-            runs._next_action(runs.RunPhase.APPROVED)
+        self.assertEqual(
+            runs._next_action(runs.RunPhase.APPROVED),
+            "agent-squad complete",
+        )
 
 
 class RunArtifactValidationTests(unittest.TestCase):
@@ -672,6 +679,51 @@ class RunArtifactValidationTests(unittest.TestCase):
             )
         )
         self.assertIsNone(result)
+
+    def test_approved_state_binds_one_applied_result_and_exact_head(
+        self,
+    ) -> None:
+        approved_round = _active_round(RoundStatus.APPLIED)
+        valid = _active_state_arguments(
+            phase=runs.RunPhase.APPROVED,
+            approved_head_oid="a" * 40,
+            active_round=approved_round,
+        )
+
+        result = runs._validate_active_state_shape(**valid)
+
+        self.assertIs(result, approved_round)
+        cases = (
+            (
+                {**valid, "approved_head_oid": "b" * 40},
+                "bind its current and approved heads",
+            ),
+            (
+                {
+                    **valid,
+                    "active_round": replace(
+                        approved_round,
+                        status=RoundStatus.REVIEWING,
+                        result_id=None,
+                    ),
+                },
+                "must reference an applied round",
+            ),
+            (
+                {
+                    **valid,
+                    "active_round": replace(
+                        approved_round,
+                        result_id=None,
+                    ),
+                },
+                "must record the applied result ID",
+            ),
+        )
+        for arguments, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_active_state_shape(**arguments)
 
 
 if __name__ == "__main__":

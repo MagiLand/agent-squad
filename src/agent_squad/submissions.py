@@ -41,8 +41,8 @@ from .initialization import (
     run_git,
 )
 from .storage import (
+    append_event,
     atomic_write,
-    encode_event,
     encode_json,
     exclusive_file_lock,
     utc_timestamp,
@@ -1189,25 +1189,9 @@ def _review_request_prompt(prepared: _PreparedSubmission) -> str:
 
 
 def _append_event(path: Path, event: dict[str, object]) -> None:
-    content = encode_event(event)
-    flags = os.O_WRONLY | os.O_APPEND
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, flags)
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError(f"event log is not a regular file: {path}")
-        remaining = memoryview(content)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written == 0:
-                raise OSError(f"short write to event log: {path}")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+    """Compatibility seam for submission event persistence tests."""
+
+    append_event(path, event)
 
 
 def _remove_review_worktree(

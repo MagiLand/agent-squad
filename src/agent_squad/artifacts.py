@@ -771,6 +771,142 @@ class ReviewerLocalMarker:
 
 
 @dataclass(frozen=True)
+class ApprovalRecord:
+    """Immutable authority for one exact approved review result."""
+
+    created_at: str
+    run_id: str
+    round_number: int
+    request_id: str
+    result_id: str
+    task_sha256: str
+    object_format: str
+    base_oid: str
+    head_oid: str
+    reviewer_name: str
+    reviewer_kind: AgentKind
+    review_sha256: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> "ApprovalRecord":
+        """Validate and construct one exact-revision approval record."""
+
+        label = "approval record"
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "run_id",
+                "round",
+                "request_id",
+                "result_id",
+                "task_sha256",
+                "git_object_format",
+                "base_oid",
+                "head_oid",
+                "reviewer",
+                "review_sha256",
+            },
+            path=label,
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        object_format = _require_object_format(
+            data["git_object_format"],
+            f"{label}.git_object_format",
+        )
+        reviewer = _require_object(data["reviewer"], f"{label}.reviewer")
+        _VALIDATOR.check_fields(
+            reviewer,
+            required={"name", "kind"},
+            path=f"{label}.reviewer",
+        )
+        run_id = _require_uuid(data["run_id"], f"{label}.run_id")
+        request_id = _require_uuid(
+            data["request_id"],
+            f"{label}.request_id",
+        )
+        result_id = _require_uuid(
+            data["result_id"],
+            f"{label}.result_id",
+        )
+        if len({run_id, request_id, result_id}) != 3:
+            raise ArtifactValidationError(
+                f"{label} run, request, and result IDs must be distinct"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            run_id=run_id,
+            round_number=_require_positive_int(
+                data["round"],
+                f"{label}.round",
+            ),
+            request_id=request_id,
+            result_id=result_id,
+            task_sha256=_require_digest(
+                data["task_sha256"],
+                f"{label}.task_sha256",
+            ),
+            object_format=object_format,
+            base_oid=_require_oid(
+                data["base_oid"],
+                object_format,
+                f"{label}.base_oid",
+            ),
+            head_oid=_require_oid(
+                data["head_oid"],
+                object_format,
+                f"{label}.head_oid",
+            ),
+            reviewer_name=_require_reviewer_name(
+                reviewer["name"],
+                f"{label}.reviewer.name",
+            ),
+            reviewer_kind=_VALIDATOR.require_enum(
+                reviewer["kind"],
+                f"{label}.reviewer.kind",
+                AgentKind,
+            ),
+            review_sha256=_require_digest(
+                data["review_sha256"],
+                f"{label}.review_sha256",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable approval authority."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "run_id": self.run_id,
+            "round": self.round_number,
+            "request_id": self.request_id,
+            "result_id": self.result_id,
+            "task_sha256": self.task_sha256,
+            "git_object_format": self.object_format,
+            "base_oid": self.base_oid,
+            "head_oid": self.head_oid,
+            "reviewer": {
+                "name": self.reviewer_name,
+                "kind": self.reviewer_kind.value,
+            },
+            "review_sha256": self.review_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class ReviewRequest:
     """The complete immutable request given to one round-scoped Reviewer."""
 
@@ -1058,6 +1194,7 @@ class ReviewRoundRecord:
     mode: SubmissionMode
     request_id: str
     result_id: str | None
+    verdict: ReviewVerdict | None
     base_oid: str
     head_oid: str
     object_format: str
@@ -1069,6 +1206,11 @@ class ReviewRoundRecord:
     request_artifact: BundleArtifact
     implementation_report: BundleArtifact
     bundle_inputs: tuple[BundleArtifact, ...]
+    review_result: BundleArtifact | None
+    review_markdown: BundleArtifact | None
+    review_marker: BundleArtifact | None
+    approval: BundleArtifact | None
+    bundle_archive: tuple[BundleArtifact, ...]
     warnings: tuple[str, ...]
 
     @classmethod
@@ -1095,6 +1237,7 @@ class ReviewRoundRecord:
             mode=request.mode,
             request_id=request.request_id,
             result_id=None,
+            verdict=None,
             base_oid=request.base_oid,
             head_oid=request.head_oid,
             object_format=request.object_format,
@@ -1117,6 +1260,11 @@ class ReviewRoundRecord:
                 request.implementation_report,
                 *request.context_files,
             ),
+            review_result=None,
+            review_markdown=None,
+            review_marker=None,
+            approval=None,
+            bundle_archive=(),
             warnings=warnings,
         )
 
@@ -1141,6 +1289,7 @@ class ReviewRoundRecord:
                 "mode",
                 "request_id",
                 "result_id",
+                "verdict",
                 "base_oid",
                 "head_oid",
                 "git_object_format",
@@ -1176,7 +1325,16 @@ class ReviewRoundRecord:
         )
         _VALIDATOR.check_fields(
             artifacts,
-            required={"request", "implementation_report", "bundle_inputs"},
+            required={
+                "request",
+                "implementation_report",
+                "bundle_inputs",
+                "review_result",
+                "review_markdown",
+                "review_marker",
+                "approval",
+                "bundle_archive",
+            },
             path=f"{label}.artifacts",
         )
         request_artifact = BundleArtifact.from_dict(
@@ -1195,6 +1353,81 @@ class ReviewRoundRecord:
             raise ArtifactValidationError(
                 f"{label} report path must be implementation-report.md"
             )
+        result_id = _require_optional_uuid(
+            data["result_id"],
+            f"{label}.result_id",
+        )
+        verdict_value = data["verdict"]
+        verdict = (
+            None
+            if verdict_value is None
+            else _VALIDATOR.require_enum(
+                verdict_value,
+                f"{label}.verdict",
+                ReviewVerdict,
+            )
+        )
+        status = _VALIDATOR.require_enum(
+            data["status"],
+            f"{label}.status",
+            RoundStatus,
+        )
+        review_result = _require_optional_artifact(
+            artifacts["review_result"],
+            f"{label}.artifacts.review_result",
+        )
+        review_markdown = _require_optional_artifact(
+            artifacts["review_markdown"],
+            f"{label}.artifacts.review_markdown",
+        )
+        review_marker = _require_optional_artifact(
+            artifacts["review_marker"],
+            f"{label}.artifacts.review_marker",
+        )
+        approval = _require_optional_artifact(
+            artifacts["approval"],
+            f"{label}.artifacts.approval",
+        )
+        bundle_archive = _require_artifact_list(
+            artifacts["bundle_archive"],
+            f"{label}.artifacts.bundle_archive",
+        )
+        result_artifacts = (
+            review_result,
+            review_markdown,
+            review_marker,
+        )
+        if status in {RoundStatus.PREPARED, RoundStatus.REVIEWING}:
+            if result_id is not None or verdict is not None:
+                raise ArtifactValidationError(
+                    f"{label} cannot record a result before classification"
+                )
+            if any(item is not None for item in result_artifacts) or (
+                approval is not None or bundle_archive
+            ):
+                raise ArtifactValidationError(
+                    f"{label} cannot record result artifacts before "
+                    "classification"
+                )
+        if status is RoundStatus.APPLIED:
+            if result_id is None or verdict is None:
+                raise ArtifactValidationError(
+                    f"{label} must record its applied result and verdict"
+                )
+            if any(item is None for item in result_artifacts):
+                raise ArtifactValidationError(
+                    f"{label} must record every applied result artifact"
+                )
+            if not bundle_archive:
+                raise ArtifactValidationError(
+                    f"{label} must record the complete applied bundle archive"
+                )
+            if (verdict is ReviewVerdict.APPROVED) != (approval is not None):
+                raise ArtifactValidationError(
+                    f"{label} approval artifact must exist exactly for an "
+                    "approved result"
+                )
+
         return cls(
             created_at=_require_timestamp(
                 data["created_at"],
@@ -1218,10 +1451,8 @@ class ReviewRoundRecord:
                 data["request_id"],
                 f"{label}.request_id",
             ),
-            result_id=_require_optional_uuid(
-                data["result_id"],
-                f"{label}.result_id",
-            ),
+            result_id=result_id,
+            verdict=verdict,
             base_oid=_require_oid(
                 data["base_oid"],
                 object_format,
@@ -1233,11 +1464,7 @@ class ReviewRoundRecord:
                 f"{label}.head_oid",
             ),
             object_format=object_format,
-            status=_VALIDATOR.require_enum(
-                data["status"],
-                f"{label}.status",
-                RoundStatus,
-            ),
+            status=status,
             review_worktree=_require_absolute_path(
                 data["review_worktree"],
                 f"{label}.review_worktree",
@@ -1261,6 +1488,11 @@ class ReviewRoundRecord:
                 artifacts["bundle_inputs"],
                 f"{label}.artifacts.bundle_inputs",
             ),
+            review_result=review_result,
+            review_markdown=review_markdown,
+            review_marker=review_marker,
+            approval=approval,
+            bundle_archive=bundle_archive,
             warnings=_require_string_list(
                 data["warnings"],
                 f"{label}.warnings",
@@ -1279,6 +1511,9 @@ class ReviewRoundRecord:
             "mode": self.mode.value,
             "request_id": self.request_id,
             "result_id": self.result_id,
+            "verdict": (
+                self.verdict.value if self.verdict is not None else None
+            ),
             "base_oid": self.base_oid,
             "head_oid": self.head_oid,
             "git_object_format": self.object_format,
@@ -1294,6 +1529,29 @@ class ReviewRoundRecord:
                 "implementation_report": self.implementation_report.to_dict(),
                 "bundle_inputs": [
                     artifact.to_dict() for artifact in self.bundle_inputs
+                ],
+                "review_result": (
+                    self.review_result.to_dict()
+                    if self.review_result is not None
+                    else None
+                ),
+                "review_markdown": (
+                    self.review_markdown.to_dict()
+                    if self.review_markdown is not None
+                    else None
+                ),
+                "review_marker": (
+                    self.review_marker.to_dict()
+                    if self.review_marker is not None
+                    else None
+                ),
+                "approval": (
+                    self.approval.to_dict()
+                    if self.approval is not None
+                    else None
+                ),
+                "bundle_archive": [
+                    artifact.to_dict() for artifact in self.bundle_archive
                 ],
             },
             "warnings": list(self.warnings),
@@ -1327,6 +1585,15 @@ def _require_optional_bundle_path(
     if value is None:
         return None
     return _require_bundle_path(value, label)
+
+
+def _require_optional_artifact(
+    value: object,
+    label: str,
+) -> BundleArtifact | None:
+    if value is None:
+        return None
+    return BundleArtifact.from_dict(value, label=label)
 
 
 def _require_optional_uuid(value: object, label: str) -> str | None:

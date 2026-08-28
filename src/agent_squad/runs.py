@@ -15,12 +15,16 @@ import uuid
 
 from .artifacts import (
     ActiveRoundRecord,
+    ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
     HandoffRecord,
     HandoffStatus,
     ReviewRequest,
+    ReviewResult,
     ReviewRoundRecord,
+    ReviewVerdict,
+    ReviewerLocalMarker,
     RoundStatus,
 )
 from .initialization import (
@@ -306,6 +310,8 @@ class ActiveRunStatus:
     active_round: ActiveRoundRecord | None
     handoff: HandoffRecord | None
     review_worktree_available: bool | None
+    unapplied_result: UnappliedReviewResult | None
+    approval: ApprovalRecord | None
     review_budget: ReviewBudget
 
 
@@ -319,6 +325,15 @@ class RepositoryStatus:
     worktree_git_dir: Path
     active_run: ActiveRunStatus | None
     next_action: str
+
+
+@dataclass(frozen=True)
+class UnappliedReviewResult:
+    """One validated marker-confirmed result awaiting application."""
+
+    result_id: str
+    verdict: ReviewVerdict
+    result_path: Path
 
 
 def start_run(
@@ -529,7 +544,7 @@ def _inspect_status(
         raise RunStateError(
             "state review-budget original limit does not match run metadata"
         )
-    reviewing_round = _validate_active_state_shape(
+    validated_round = _validate_active_state_shape(
         phase=phase,
         current_round=current_round,
         current_head_oid=current_head_oid,
@@ -546,18 +561,47 @@ def _inspect_status(
         record.base_oid,
     )
     review_worktree_available: bool | None = None
-    if reviewing_round is not None:
-        review_worktree_available = _validate_active_review_artifacts(
-            run_directory=run_directory,
-            record=record,
-            run_id=active_run_id,
-            current_round=current_round,
-            current_head_oid=current_head_oid,
-            active_round=reviewing_round,
+    round_record: ReviewRoundRecord | None = None
+    if validated_round is not None:
+        review_worktree_available, round_record = (
+            _validate_active_review_artifacts(
+                run_directory=run_directory,
+                record=record,
+                run_id=active_run_id,
+                current_round=current_round,
+                current_head_oid=current_head_oid,
+                active_round=validated_round,
+            )
         )
+    approval: ApprovalRecord | None = None
+    if phase is RunPhase.APPROVED:
+        if round_record is None:
+            raise RunStateError(
+                "an approved run must have a validated applied round"
+            )
+        approval = _validate_approval_artifacts(
+            run_directory=run_directory,
+            round_record=round_record,
+            run_id=active_run_id,
+            record=record,
+            approved_head_oid=approved_head_oid,
+        )
+    unapplied_result = _discover_unapplied_result(
+        phase=phase,
+        active_round=active_round,
+        active_run_id=active_run_id,
+        current_head_oid=current_head_oid,
+        object_format=record.object_format,
+        review_worktree_available=review_worktree_available,
+    )
     next_action = _next_action(
         phase,
         handoff_status=handoff.status if handoff is not None else None,
+        result_id=(
+            unapplied_result.result_id
+            if unapplied_result is not None
+            else None
+        ),
     )
     return RepositoryStatus(
         repository_root=current_identity.implementation_root,
@@ -585,6 +629,8 @@ def _inspect_status(
             active_round=active_round,
             handoff=handoff,
             review_worktree_available=review_worktree_available,
+            unapplied_result=unapplied_result,
+            approval=approval,
             review_budget=budget,
         ),
         next_action=next_action,
@@ -1191,7 +1237,7 @@ def _validate_active_review_artifacts(
     current_round: int,
     current_head_oid: str | None,
     active_round: ActiveRoundRecord,
-) -> bool:
+) -> tuple[bool, ReviewRoundRecord]:
     """Validate round artifacts and report review-worktree availability."""
 
     round_directory = (
@@ -1217,6 +1263,7 @@ def _validate_active_review_artifacts(
         (round_record.round_number, current_round, "round number"),
         (round_record.mode, active_round.mode, "submission mode"),
         (round_record.request_id, active_round.request_id, "request ID"),
+        (round_record.result_id, active_round.result_id, "result ID"),
         (round_record.status, active_round.status, "round status"),
         (
             round_record.object_format,
@@ -1237,7 +1284,10 @@ def _validate_active_review_artifacts(
                 f"active round record {label} does not match state or run "
                 "metadata"
             )
-    if round_record.result_id is not None:
+    if (
+        active_round.status is RoundStatus.REVIEWING
+        and round_record.result_id is not None
+    ):
         raise RunStateError(
             "a reviewing active round record must have no result ID"
         )
@@ -1311,7 +1361,7 @@ def _validate_active_review_artifacts(
 
     review_worktree = active_round.review_worktree
     if not os.path.lexists(review_worktree):
-        return False
+        return False, round_record
     if review_worktree.is_symlink() or not review_worktree.is_dir():
         raise RunStateError(
             "active review worktree is not a normal directory: "
@@ -1330,7 +1380,346 @@ def _validate_active_review_artifacts(
             artifact.sha256,
             f"active review bundle input {artifact.path}",
         )
-    return True
+    return True, round_record
+
+
+def _validate_approval_artifacts(
+    *,
+    run_directory: Path,
+    round_record: ReviewRoundRecord,
+    run_id: str,
+    record: _ValidatedRunRecord,
+    approved_head_oid: str | None,
+) -> ApprovalRecord:
+    """Validate archived evidence and exact authority for an approved run."""
+
+    if round_record.status is not RoundStatus.APPLIED:
+        raise RunStateError("an approved run must reference an applied round")
+    if round_record.verdict is not ReviewVerdict.APPROVED:
+        raise RunStateError(
+            "an approved run must reference an approved review verdict"
+        )
+    if round_record.result_id is None:
+        raise RunStateError("an approved round must record its result ID")
+    if approved_head_oid != round_record.head_oid:
+        raise RunStateError(
+            "approved head does not match the applied review round"
+        )
+    required_artifacts = {
+        "review result": (round_record.review_result, "review.json"),
+        "review Markdown": (round_record.review_markdown, "review.md"),
+        "review marker": (round_record.review_marker, "review-marker.json"),
+        "approval": (round_record.approval, "approval.json"),
+    }
+    resolved: dict[str, tuple[BundleArtifact, Path]] = {}
+    round_directory = (
+        run_directory / "rounds" / f"{round_record.round_number:03d}"
+    )
+    for label, (artifact, expected_path) in required_artifacts.items():
+        if artifact is None:
+            raise RunStateError(f"approved round is missing its {label}")
+        if artifact.path != expected_path:
+            raise RunStateError(
+                f"approved round {label} path must be {expected_path}"
+            )
+        path = _captured_path(
+            round_directory,
+            artifact.path,
+            f"approved round {label}",
+        )
+        _verify_captured_digest(
+            path,
+            artifact.sha256,
+            f"approved round {label}",
+        )
+        resolved[label] = artifact, path
+
+    archived: dict[str, BundleArtifact] = {}
+    for artifact in round_record.bundle_archive:
+        if not artifact.path.startswith("bundle/"):
+            raise RunStateError(
+                "approved bundle manifest paths must start with bundle/"
+            )
+        path = _captured_path(
+            round_directory,
+            artifact.path,
+            "approved bundle artifact",
+        )
+        _verify_captured_digest(
+            path,
+            artifact.sha256,
+            f"approved bundle artifact {artifact.path}",
+        )
+        archived[artifact.path] = artifact
+    _validate_archive_tree(
+        round_directory / "bundle",
+        expected_paths=set(archived),
+    )
+
+    core_archive = {
+        "bundle/input/request.json": round_record.request_artifact.sha256,
+        "bundle/output/review.json": resolved["review result"][0].sha256,
+        "bundle/output/review.md": resolved["review Markdown"][0].sha256,
+        "bundle/local-state.json": resolved["review marker"][0].sha256,
+    }
+    for path_text, digest in core_archive.items():
+        artifact = archived.get(path_text)
+        if artifact is None or artifact.sha256 != digest:
+            raise RunStateError(
+                f"approved bundle archive does not preserve {path_text}"
+            )
+
+    approval_path = resolved["approval"][1]
+    try:
+        approval = ApprovalRecord.from_dict(
+            load_json_object(approval_path, "approval record")
+        )
+    except ArtifactValidationError as error:
+        raise RunStateError(str(error)) from error
+    review_artifact = resolved["review result"][0]
+    comparisons = (
+        (approval.run_id, run_id, "run ID"),
+        (
+            approval.round_number,
+            round_record.round_number,
+            "round number",
+        ),
+        (approval.request_id, round_record.request_id, "request ID"),
+        (approval.result_id, round_record.result_id, "result ID"),
+        (approval.task_sha256, record.task_sha256, "task digest"),
+        (
+            approval.object_format,
+            round_record.object_format,
+            "Git object format",
+        ),
+        (approval.base_oid, record.base_oid, "base OID"),
+        (approval.head_oid, round_record.head_oid, "head OID"),
+        (
+            approval.reviewer_name,
+            round_record.reviewer_name,
+            "Reviewer name",
+        ),
+        (
+            approval.reviewer_kind,
+            round_record.reviewer_kind,
+            "Reviewer kind",
+        ),
+        (approval.review_sha256, review_artifact.sha256, "review digest"),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise RunStateError(
+                f"approval record {label} does not match authoritative "
+                "round data"
+            )
+
+    archived_request = load_json_object(
+        _captured_path(
+            round_directory,
+            "bundle/input/request.json",
+            "archived review request",
+        ),
+        "archived review request",
+    )
+    archived_review = load_json_object(
+        _captured_path(
+            round_directory,
+            "bundle/output/review.json",
+            "archived review result",
+        ),
+        "archived review result",
+    )
+    archived_marker = load_json_object(
+        _captured_path(
+            round_directory,
+            "bundle/local-state.json",
+            "archived review marker",
+        ),
+        "archived review marker",
+    )
+    try:
+        request = ReviewRequest.from_dict(archived_request)
+        review = ReviewResult.from_dict(
+            archived_review,
+            object_format=record.object_format,
+        )
+        marker = ReviewerLocalMarker.from_dict(archived_marker)
+    except ArtifactValidationError as error:
+        raise RunStateError(
+            f"approved bundle contains invalid protocol evidence: {error}"
+        ) from error
+    evidence_comparisons = (
+        (request.request_id, approval.request_id, "request ID"),
+        (request.run_id, approval.run_id, "run ID"),
+        (request.round_number, approval.round_number, "round number"),
+        (request.base_oid, approval.base_oid, "base OID"),
+        (request.head_oid, approval.head_oid, "head OID"),
+        (request.task.sha256, approval.task_sha256, "task digest"),
+        (
+            request.reviewer_name,
+            approval.reviewer_name,
+            "Reviewer name",
+        ),
+        (
+            request.reviewer_kind,
+            approval.reviewer_kind,
+            "Reviewer kind",
+        ),
+        (review.result_id, approval.result_id, "result ID"),
+        (review.request_id, approval.request_id, "result request ID"),
+        (review.run_id, approval.run_id, "result run ID"),
+        (review.round_number, approval.round_number, "result round"),
+        (review.base_oid, approval.base_oid, "result base OID"),
+        (review.head_oid, approval.head_oid, "result head OID"),
+        (review.verdict, ReviewVerdict.APPROVED, "verdict"),
+        (marker.request_id, approval.request_id, "marker request ID"),
+        (marker.result_id, approval.result_id, "marker result ID"),
+        (
+            marker.review_sha256,
+            approval.review_sha256,
+            "marker review digest",
+        ),
+    )
+    for actual, expected, label in evidence_comparisons:
+        if actual != expected:
+            raise RunStateError(
+                f"approved bundle {label} does not match approval authority"
+            )
+    return approval
+
+
+def _validate_archive_tree(
+    root: Path,
+    *,
+    expected_paths: set[str],
+) -> None:
+    """Reject missing, extra, unusual, or case-colliding archive entries."""
+
+    try:
+        root_status = root.lstat()
+    except OSError as error:
+        raise RunStateError(
+            f"cannot inspect approved bundle archive {root}: {error}"
+        ) from error
+    if not stat.S_ISDIR(root_status.st_mode):
+        raise RunStateError(
+            f"approved bundle archive must be a normal directory: {root}"
+        )
+    actual_paths: set[str] = set()
+    folded: dict[str, str] = {}
+    for directory, names, filenames in os.walk(root, followlinks=False):
+        current = Path(directory)
+        for name in names:
+            path = current / name
+            try:
+                entry_status = path.lstat()
+            except OSError as error:
+                raise RunStateError(
+                    f"cannot inspect approved archive directory {path}: "
+                    f"{error}"
+                ) from error
+            if not stat.S_ISDIR(entry_status.st_mode):
+                raise RunStateError(
+                    f"approved archive directory must not be a symlink: {path}"
+                )
+        for name in filenames:
+            path = current / name
+            try:
+                entry_status = path.lstat()
+            except OSError as error:
+                raise RunStateError(
+                    f"cannot inspect approved archive file {path}: {error}"
+                ) from error
+            if not stat.S_ISREG(entry_status.st_mode):
+                raise RunStateError(
+                    f"approved archive file must not be a symlink: {path}"
+                )
+            relative = (
+                PurePosixPath("bundle")
+                / PurePosixPath(path.relative_to(root).as_posix())
+            ).as_posix()
+            folded_path = relative.casefold()
+            previous = folded.get(folded_path)
+            if previous is not None and previous != relative:
+                raise RunStateError(
+                    "approved archive contains case-colliding paths: "
+                    f"{previous}, {relative}"
+                )
+            folded[folded_path] = relative
+            actual_paths.add(relative)
+    if actual_paths != expected_paths:
+        raise RunStateError(
+            "approved bundle archive does not match its authoritative manifest"
+        )
+
+
+def _discover_unapplied_result(
+    *,
+    phase: RunPhase,
+    active_round: ActiveRoundRecord | None,
+    active_run_id: str,
+    current_head_oid: str | None,
+    object_format: str,
+    review_worktree_available: bool | None,
+) -> UnappliedReviewResult | None:
+    """Probe the expected active bundle for a valid local result marker."""
+
+    if (
+        phase is not RunPhase.REVIEWING
+        or active_round is None
+        or not review_worktree_available
+    ):
+        return None
+    marker_path = active_round.review_worktree / (
+        ".agent-squad-review/local-state.json"
+    )
+    if not os.path.lexists(marker_path):
+        return None
+    try:
+        from .review_submissions import load_marker_confirmed_review
+
+        evidence = load_marker_confirmed_review(
+            active_round.review_worktree
+        )
+    except AgentSquadError as error:
+        raise RunStateError(
+            f"marker-confirmed review result is invalid: {error}"
+        ) from error
+    comparisons = (
+        (evidence.request.run_id, active_run_id, "run ID"),
+        (
+            evidence.request.round_number,
+            active_round.round_number,
+            "round number",
+        ),
+        (
+            evidence.request.request_id,
+            active_round.request_id,
+            "request ID",
+        ),
+        (evidence.request.head_oid, current_head_oid, "head OID"),
+        (
+            evidence.request.object_format,
+            object_format,
+            "Git object format",
+        ),
+        (
+            evidence.request.reviewer_name,
+            active_round.reviewer_name,
+            "Reviewer name",
+        ),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise RunStateError(
+                f"marker-confirmed review {label} does not match the active "
+                "round"
+            )
+    return UnappliedReviewResult(
+        result_id=evidence.review.result_id,
+        verdict=evidence.review.verdict,
+        result_path=evidence.review_path,
+    )
 
 
 def _assert_request_matches_active_round(
@@ -1462,6 +1851,34 @@ def _validate_active_state_shape(
                 "an implementing run must record a closed active round"
             )
         return None
+    if phase is RunPhase.APPROVED:
+        if current_round < 1 or current_head_oid is None:
+            raise RunStateError(
+                "an approved run must identify its current round and head"
+            )
+        if approved_head_oid != current_head_oid:
+            raise RunStateError(
+                "an approved run must bind its current and approved heads"
+            )
+        if active_escalation_id is not None:
+            raise RunStateError(
+                "an approved run cannot retain an active escalation"
+            )
+        approved_round = _require_linked_active_round(
+            current_round=current_round,
+            active_round=active_round,
+            handoff=handoff,
+            run_description="an approved run",
+        )
+        if approved_round.status is not RoundStatus.APPLIED:
+            raise RunStateError(
+                "an approved run must reference an applied round"
+            )
+        if approved_round.result_id is None:
+            raise RunStateError(
+                "an approved run must record the applied result ID"
+            )
+        return approved_round
     if phase is not RunPhase.REVIEWING:
         return None
     if current_round < 1 or current_head_oid is None:
@@ -1749,15 +2166,20 @@ def _next_action(
     phase: RunPhase,
     *,
     handoff_status: HandoffStatus | None = None,
+    result_id: str | None = None,
 ) -> str:
     if phase is RunPhase.IMPLEMENTING:
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:
+        if result_id is not None:
+            return f"agent-squad apply-review --result-id {result_id}"
         if handoff_status is HandoffStatus.FAILED:
             return "recover the preserved review-request handoff"
         if handoff_status is HandoffStatus.PENDING:
             return "finish or recover the pending review-request handoff"
         return "wait for the Reviewer result"
+    if phase is RunPhase.APPROVED:
+        return "agent-squad complete"
     raise RunStateError(
         f"phase {phase.value} is not supported by this implementation "
         "increment"

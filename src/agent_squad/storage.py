@@ -75,6 +75,30 @@ def atomic_write(path: Path, content: bytes, *, mode: int) -> None:
                 pass
 
 
+def append_event(path: Path, event: dict[str, object]) -> None:
+    """Flush one encoded event onto a regular non-symlink JSONL file."""
+
+    content = encode_event(event)
+    flags = os.O_WRONLY | os.O_APPEND
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"event log is not a regular file: {path}")
+        remaining = memoryview(content)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written == 0:
+                raise OSError(f"short write to event log: {path}")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 @contextmanager
 def exclusive_file_lock(path: Path) -> Iterator[None]:
     """Hold an exclusive process lock on a non-symlink regular file."""
