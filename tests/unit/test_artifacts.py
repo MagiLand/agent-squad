@@ -17,13 +17,16 @@ from agent_squad.artifacts import (  # noqa: E402
     HandoffRecord,
     HandoffStatus,
     ReviewRequest,
+    ReviewResponse,
     ReviewerLocalMarker,
     ReviewResult,
     ReviewRoundRecord,
     ReviewVerdict,
+    ResponseDisposition,
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    validate_review_response,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
 
@@ -220,6 +223,34 @@ def _review_marker() -> dict[str, object]:
         "status": "result_submitted",
         "review_json_path": "output/review.json",
         "review_sha256": "f" * 64,
+    }
+
+
+def _review_response() -> dict[str, object]:
+    review = _review_result()
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T12:40:00Z",
+        "response_id": "fedcbafe-1234-5678-9234-567812345678",
+        "supersedes_response_id": None,
+        "resolution_ids": [],
+        "run_id": review["run_id"],
+        "review_round": review["round"],
+        "review_result_id": review["result_id"],
+        "reviewed_head_oid": review["head_oid"],
+        "responses": [
+            {
+                "finding_id": "REV-001",
+                "disposition": "fixed",
+                "rationale": "The empty-input branch now uses the fallback.",
+                "changed_files": [
+                    "src/example.py",
+                    "tests/test_example.py",
+                ],
+                "evidence": [],
+                "verification": "python -m unittest tests.test_example",
+            }
+        ],
     }
 
 
@@ -806,6 +837,122 @@ class ReviewResultTests(unittest.TestCase):
                     message,
                 ):
                     ReviewResult.from_dict(data, object_format="sha1")
+
+
+class ReviewResponseTests(unittest.TestCase):
+    def test_fixed_response_round_trips_and_covers_blocking_findings(
+        self,
+    ) -> None:
+        review = ReviewResult.from_dict(
+            _review_result(),
+            object_format="sha1",
+        )
+        response = ReviewResponse.from_dict(
+            _review_response(),
+            object_format="sha1",
+        )
+
+        validate_review_response(
+            response,
+            review,
+            SubmissionMode.NEW_REVISION,
+        )
+
+        self.assertEqual(response.to_dict(), _review_response())
+        self.assertIs(
+            response.responses[0].disposition,
+            ResponseDisposition.FIXED,
+        )
+
+    def test_response_rejects_incomplete_or_unsupported_dispositions(
+        self,
+    ) -> None:
+        structural_cases = (
+            (
+                "fixed without changed files",
+                lambda data: data["responses"][0].update(changed_files=[]),
+                "changed_files is required when fixed",
+            ),
+            (
+                "fixed without verification",
+                lambda data: data["responses"][0].update(verification=" "),
+                "verification is required when fixed",
+            ),
+            (
+                "rejected without evidence",
+                lambda data: data["responses"][0].update(
+                    disposition="rejected",
+                    evidence=[],
+                ),
+                "evidence is required when rejected",
+            ),
+            (
+                "duplicate finding response",
+                lambda data: data["responses"].append(
+                    copy.deepcopy(data["responses"][0])
+                ),
+                "duplicate finding IDs",
+            ),
+        )
+        for case, mutate, message in structural_cases:
+            with self.subTest(case=case):
+                data = _review_response()
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewResponse.from_dict(data, object_format="sha1")
+
+        review = ReviewResult.from_dict(
+            _review_result(),
+            object_format="sha1",
+        )
+        semantic_cases = (
+            (
+                "missing blocking finding",
+                lambda data: data.update(responses=[]),
+                "missing blocking finding IDs: REV-001",
+                SubmissionMode.NEW_REVISION,
+            ),
+            (
+                "unknown finding",
+                lambda data: data["responses"][0].update(
+                    finding_id="REV-999"
+                ),
+                "unknown finding IDs: REV-999",
+                SubmissionMode.NEW_REVISION,
+            ),
+            (
+                "wrong result identity",
+                lambda data: data.update(
+                    review_result_id=(
+                        "11111111-1111-4111-8111-111111111111"
+                    )
+                ),
+                "review result ID does not match",
+                SubmissionMode.NEW_REVISION,
+            ),
+            (
+                "fixed reconsideration",
+                lambda data: None,
+                "reconsideration requires rejected dispositions",
+                SubmissionMode.RECONSIDERATION,
+            ),
+        )
+        for case, mutate, message, mode in semantic_cases:
+            with self.subTest(case=case):
+                data = _review_response()
+                mutate(data)
+                response = ReviewResponse.from_dict(
+                    data,
+                    object_format="sha1",
+                )
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    validate_review_response(response, review, mode)
 
 
 class ReviewerLocalMarkerTests(unittest.TestCase):

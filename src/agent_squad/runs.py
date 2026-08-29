@@ -1523,17 +1523,87 @@ def _validate_active_review_artifacts(
         path="input/request.json",
         sha256=request_artifact.sha256,
     )
-    expected_bundle_inputs = (
+    base_bundle_inputs = (
         request_bundle_artifact,
         request.task,
         request.implementation_report,
         *request.context_files,
     )
     bundle_inputs = round_record.bundle_inputs
-    if bundle_inputs != expected_bundle_inputs:
+    if bundle_inputs[:len(base_bundle_inputs)] != base_bundle_inputs:
         raise RunStateError(
             "active round bundle-input manifest does not match the request"
         )
+    expected_additional_paths = tuple(
+        path
+        for path in (
+            request.previous_review_path,
+            request.previous_response_path,
+        )
+        if path is not None
+    )
+    additional_inputs = bundle_inputs[len(base_bundle_inputs):]
+    if tuple(item.path for item in additional_inputs) != (
+        expected_additional_paths
+    ):
+        raise RunStateError(
+            "active round prior-artifact manifest does not match the request"
+    )
+    if current_round > 1:
+        previous_round_directory, previous_round_record = (
+            _latest_applied_round_before(
+                run_directory=run_directory,
+                run_id=run_id,
+                current_round=current_round,
+                base_oid=record.base_oid,
+                object_format=record.object_format,
+            )
+        )
+        if (
+            previous_round_record.verdict
+            is not ReviewVerdict.CHANGES_REQUESTED
+        ):
+            raise RunStateError(
+                "a correction-round request must follow the most recent "
+                "applied changes_requested result"
+            )
+        additional_by_path = {
+            artifact.path: artifact for artifact in additional_inputs
+        }
+        previous_review_artifact = previous_round_record.review_result
+        if previous_review_artifact is None or (
+            previous_review_artifact.sha256
+            != additional_by_path["input/previous-review.json"].sha256
+        ):
+            raise RunStateError(
+                "previous review bundle input does not match the most recent "
+                "applied round"
+            )
+        for label, bundle_path, canonical_name in (
+            (
+                "previous review",
+                "input/previous-review.json",
+                "review.json",
+            ),
+            (
+                "previous response",
+                "input/previous-response.json",
+                "response.json",
+            ),
+        ):
+            artifact = additional_by_path[bundle_path]
+            canonical_path = previous_round_directory / canonical_name
+            try:
+                _verify_captured_digest(
+                    canonical_path,
+                    artifact.sha256,
+                    label,
+                )
+            except RunStateError as error:
+                raise RunStateError(
+                    f"{label} does not match the active round "
+                    f"bundle-input digest: {error}"
+                ) from error
 
     review_worktree = active_round.review_worktree
     if not validate_live_worktree:
@@ -1559,6 +1629,54 @@ def _validate_active_review_artifacts(
             f"active review bundle input {artifact.path}",
         )
     return True, round_record
+
+
+def _latest_applied_round_before(
+    *,
+    run_directory: Path,
+    run_id: str,
+    current_round: int,
+    base_oid: str,
+    object_format: str,
+) -> tuple[Path, ReviewRoundRecord]:
+    """Return the most recent authoritative applied round in history."""
+
+    for round_number in range(current_round - 1, 0, -1):
+        round_directory = (
+            run_directory / "rounds" / f"{round_number:03d}"
+        )
+        if round_directory.is_symlink() or not round_directory.is_dir():
+            raise RunStateError(
+                "review-round history must contain normal directories in "
+                f"sequence: {round_directory}"
+            )
+        try:
+            round_record = ReviewRoundRecord.from_dict(
+                load_json_object(
+                    round_directory / "round.json",
+                    f"historical round {round_number} record",
+                ),
+                label=f"historical round {round_number} record",
+            )
+        except ArtifactValidationError as error:
+            raise RunStateError(str(error)) from error
+        comparisons = (
+            (round_record.run_id, run_id, "run ID"),
+            (round_record.round_number, round_number, "round number"),
+            (round_record.base_oid, base_oid, "base OID"),
+            (round_record.object_format, object_format, "object format"),
+        )
+        for actual, expected, label in comparisons:
+            if actual != expected:
+                raise RunStateError(
+                    f"historical round {round_number} {label} does not "
+                    "match the active run"
+                )
+        if round_record.status is RoundStatus.APPLIED:
+            return round_directory, round_record
+    raise RunStateError(
+        "a correction-round request has no previous applied review"
+    )
 
 
 def _validate_approval_artifacts(
@@ -1919,19 +2037,25 @@ def _assert_request_matches_active_round(
                 f"active review request {label} does not match state or run "
                 "metadata"
             )
-    if request.previous_review_path is not None:
+    if current_round == 1 and (
+        request.previous_review_path is not None
+        or request.previous_response_path is not None
+    ):
         raise RunStateError(
-            "the first active review request cannot reference a previous "
-            "review"
+            "the first active review request cannot reference previous "
+            "review artifacts"
         )
-    if request.previous_response_path is not None:
+    if current_round > 1 and (
+        request.previous_review_path != "input/previous-review.json"
+        or request.previous_response_path != "input/previous-response.json"
+    ):
         raise RunStateError(
-            "the first active review request cannot reference a previous "
-            "response"
+            "a correction-round request must reference the previous review "
+            "and response"
         )
     if request.resolution_paths:
         raise RunStateError(
-            "this first-round implementation does not support Developer "
+            "this implementation increment does not support Developer "
             "resolution inputs"
         )
 

@@ -269,7 +269,10 @@ def _prepare_multi_input_round(
         request=copy.deepcopy(first_round.request),
     )
     input_root = prepared.bundle / "input"
-    previous_review = _review_result(first_round.request, "approved")
+    previous_review = _review_result(
+        first_round.request,
+        "changes_requested",
+    )
     previous_review["result_id"] = (
         "44444444-4444-4444-8444-444444444444"
     )
@@ -279,7 +282,29 @@ def _prepare_multi_input_round(
     )
     _write_json_fixture(
         input_root / "previous-response.json",
-        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "created_at": "2026-08-26T12:00:30Z",
+            "response_id": (
+                "55555555-5555-4555-8555-555555555555"
+            ),
+            "supersedes_response_id": None,
+            "resolution_ids": [],
+            "run_id": previous_review["run_id"],
+            "review_round": previous_review["round"],
+            "review_result_id": previous_review["result_id"],
+            "reviewed_head_oid": previous_review["head_oid"],
+            "responses": [
+                {
+                    "finding_id": "REV-001",
+                    "disposition": "fixed",
+                    "rationale": "Completed the requested correction.",
+                    "changed_files": ["feature.txt"],
+                    "evidence": [],
+                    "verification": "python -m unittest discover -s tests",
+                }
+            ],
+        },
     )
     resolution_root = input_root / "resolutions"
     resolution_root.mkdir()
@@ -623,12 +648,15 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             previous_review = json.loads(
                 previous_review_path.read_text(encoding="utf-8")
             )
+            previous_response = json.loads(
+                previous_response_path.read_text(encoding="utf-8")
+            )
 
             def restore_inputs() -> None:
                 _write_json_fixture(previous_review_path, previous_review)
                 _write_json_fixture(
                     previous_response_path,
-                    {"schema_version": 1},
+                    previous_response,
                 )
                 for index, resolution in enumerate(resolutions, start=1):
                     resolution_json = (
@@ -671,9 +699,10 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     "invalid previous response",
                     lambda: _write_json_fixture(
                         previous_response_path,
-                        {"schema_version": 2},
+                        {**previous_response, "schema_version": 2},
                     ),
-                    "previous response.schema_version must be 1",
+                    "previous response failed validation: implementation "
+                    "response.schema_version must be 1",
                 ),
                 (
                     "tampered companion",

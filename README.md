@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit its first exact committed revision to a round-scoped Reviewer through Herdr, accept a marker-confirmed Reviewer result, apply an approved result, and complete the exact approved revision.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -74,7 +74,7 @@ The first submission requires a clean tracked worktree, no unexpected untracked 
 
 Before contacting Herdr, Agent Squad creates a durable round record, detached review worktree, self-contained `.agent-squad-review/` bundle, and pending handoff state. It discovers the installed Herdr schema and command capabilities, opens the exact worktree, and launches or adopts the deterministic Reviewer. If discovery, launch, or prompting fails, the same logical round and request remain recorded for recovery; another `submit` does not create a replacement round.
 
-## Apply and complete an approved review
+## Apply a review, correct findings, and complete
 
 From the detached review worktree, the Reviewer writes the structured result and Markdown companion, then submits them:
 
@@ -89,7 +89,22 @@ agent-squad status
 agent-squad apply-review --result-id <result-id>
 ```
 
-For an approved result, application independently repeats every identity, schema, hash, head, tracked-integrity, and Reviewer check. It archives the complete bundle and records immutable approval authority before changing the run to `approved`. Repeating the same application does not duplicate the approval or event.
+Application independently repeats every identity, schema, hash, head, tracked-integrity, and Reviewer check. It archives the complete bundle before changing authoritative state, and repeating the same application does not duplicate the outcome, budget effect, or event.
+
+For `changes_requested`, application increments the consumed review budget once, returns the run to `implementing`, and safely removes the archived round's detached worktree. Address every blocking finding in a versioned `response.json`. A `fixed` disposition requires a new committed revision, rationale, changed-file list, and verification command. A `rejected` disposition requires concrete evidence.
+
+Submit the correction with both artifacts:
+
+```bash
+agent-squad submit \
+  --report path/to/corrected-implementation-report.md \
+  --response path/to/response.json \
+  --mode new_revision
+```
+
+Agent Squad validates the response against the prior round and result before the submit commit point. A failed validation creates no new round and leaves the response correctable. A successful submission archives the response under the prior round and gives a fresh Reviewer a self-contained bundle containing the prior review and response. Use `--mode reconsideration` only at the unchanged reviewed head and only when every disposition is an evidence-backed `rejected` response.
+
+For an approved result, application records immutable approval authority and changes the run to `approved`.
 
 Complete only while the implementation worktree is still at the exact approved head and satisfies the configured tracked and untracked cleanliness policy:
 

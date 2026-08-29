@@ -85,6 +85,14 @@ class ReviewVerdict(StrEnum):
     NEEDS_HUMAN = "needs_human"
 
 
+class ResponseDisposition(StrEnum):
+    """Supported Implementer dispositions for one review finding."""
+
+    FIXED = "fixed"
+    REJECTED = "rejected"
+    NEEDS_HUMAN = "needs_human"
+
+
 @dataclass(frozen=True)
 class HandoffRecord:
     """Serializable review-request delivery state."""
@@ -706,6 +714,291 @@ class ReviewResult:
 
 
 @dataclass(frozen=True)
+class FindingResponse:
+    """One Implementer disposition for a Reviewer finding."""
+
+    finding_id: str
+    disposition: ResponseDisposition
+    rationale: str
+    changed_files: tuple[str, ...]
+    evidence: tuple[str, ...]
+    verification: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "FindingResponse":
+        """Validate one finding-complete Implementer response."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "finding_id",
+                "disposition",
+                "rationale",
+                "changed_files",
+                "evidence",
+                "verification",
+            },
+            path=label,
+        )
+        disposition = _VALIDATOR.require_enum(
+            data["disposition"],
+            f"{label}.disposition",
+            ResponseDisposition,
+        )
+        changed_files = _require_path_list(
+            data["changed_files"],
+            f"{label}.changed_files",
+        )
+        evidence = _require_meaningful_string_list(
+            data["evidence"],
+            f"{label}.evidence",
+        )
+        verification = _require_string(
+            data["verification"],
+            f"{label}.verification",
+        )
+        if disposition is ResponseDisposition.FIXED:
+            if not changed_files:
+                raise ArtifactValidationError(
+                    f"{label}.changed_files is required when fixed"
+                )
+            if not verification.strip():
+                raise ArtifactValidationError(
+                    f"{label}.verification is required when fixed"
+                )
+        if disposition is ResponseDisposition.REJECTED and not evidence:
+            raise ArtifactValidationError(
+                f"{label}.evidence is required when rejected"
+            )
+        return cls(
+            finding_id=_require_meaningful_string(
+                data["finding_id"],
+                f"{label}.finding_id",
+            ),
+            disposition=disposition,
+            rationale=_require_meaningful_string(
+                data["rationale"],
+                f"{label}.rationale",
+            ),
+            changed_files=changed_files,
+            evidence=evidence,
+            verification=verification,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable response representation."""
+
+        return {
+            "finding_id": self.finding_id,
+            "disposition": self.disposition.value,
+            "rationale": self.rationale,
+            "changed_files": list(self.changed_files),
+            "evidence": list(self.evidence),
+            "verification": self.verification,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewResponse:
+    """A structurally validated Implementer response to one review."""
+
+    created_at: str
+    response_id: str
+    supersedes_response_id: str | None
+    resolution_ids: tuple[str, ...]
+    run_id: str
+    review_round: int
+    review_result_id: str
+    reviewed_head_oid: str
+    responses: tuple[FindingResponse, ...]
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        object_format: str,
+    ) -> "ReviewResponse":
+        """Validate one complete versioned implementation response."""
+
+        label = "implementation response"
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "response_id",
+                "supersedes_response_id",
+                "resolution_ids",
+                "run_id",
+                "review_round",
+                "review_result_id",
+                "reviewed_head_oid",
+                "responses",
+            },
+            path=label,
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        _require_object_format(object_format, f"{label} Git object format")
+        resolution_value = data["resolution_ids"]
+        if not isinstance(resolution_value, list):
+            raise ArtifactValidationError(
+                f"{label}.resolution_ids must be a JSON array"
+            )
+        resolution_ids = tuple(
+            _require_uuid(item, f"{label}.resolution_ids[{index}]")
+            for index, item in enumerate(resolution_value)
+        )
+        if len(resolution_ids) != len(set(resolution_ids)):
+            raise ArtifactValidationError(
+                f"{label}.resolution_ids contains duplicate IDs"
+            )
+        responses_value = data["responses"]
+        if not isinstance(responses_value, list):
+            raise ArtifactValidationError(
+                f"{label}.responses must be a JSON array"
+            )
+        responses = tuple(
+            FindingResponse.from_dict(
+                item,
+                label=f"{label}.responses[{index}]",
+            )
+            for index, item in enumerate(responses_value)
+        )
+        finding_ids = [item.finding_id for item in responses]
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ArtifactValidationError(
+                f"{label}.responses contains duplicate finding IDs"
+            )
+        response_id = _require_uuid(
+            data["response_id"],
+            f"{label}.response_id",
+        )
+        supersedes_response_id = _require_optional_uuid(
+            data["supersedes_response_id"],
+            f"{label}.supersedes_response_id",
+        )
+        run_id = _require_uuid(data["run_id"], f"{label}.run_id")
+        review_result_id = _require_uuid(
+            data["review_result_id"],
+            f"{label}.review_result_id",
+        )
+        if response_id in {run_id, review_result_id}:
+            raise ArtifactValidationError(
+                f"{label}.response_id must be distinct from run and result "
+                "IDs"
+            )
+        if supersedes_response_id == response_id:
+            raise ArtifactValidationError(
+                f"{label}.supersedes_response_id cannot equal response_id"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            response_id=response_id,
+            supersedes_response_id=supersedes_response_id,
+            resolution_ids=resolution_ids,
+            run_id=run_id,
+            review_round=_require_positive_int(
+                data["review_round"],
+                f"{label}.review_round",
+            ),
+            review_result_id=review_result_id,
+            reviewed_head_oid=_require_oid(
+                data["reviewed_head_oid"],
+                object_format,
+                f"{label}.reviewed_head_oid",
+            ),
+            responses=responses,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable response representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "response_id": self.response_id,
+            "supersedes_response_id": self.supersedes_response_id,
+            "resolution_ids": list(self.resolution_ids),
+            "run_id": self.run_id,
+            "review_round": self.review_round,
+            "review_result_id": self.review_result_id,
+            "reviewed_head_oid": self.reviewed_head_oid,
+            "responses": [item.to_dict() for item in self.responses],
+        }
+
+
+def validate_review_response(
+    response: ReviewResponse,
+    review: ReviewResult,
+    mode: SubmissionMode,
+) -> None:
+    """Validate response identity, completeness, and submission semantics."""
+
+    if review.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+        raise ArtifactValidationError(
+            "an implementation response requires a changes_requested review"
+        )
+    comparisons = (
+        (response.run_id, review.run_id, "run ID"),
+        (response.review_round, review.round_number, "review round"),
+        (response.review_result_id, review.result_id, "review result ID"),
+        (response.reviewed_head_oid, review.head_oid, "reviewed head OID"),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise ArtifactValidationError(
+                f"implementation response {label} does not match the "
+                "previous review"
+            )
+    known_ids = {finding.finding_id for finding in review.findings}
+    blocking_ids = {
+        finding.finding_id for finding in review.findings if finding.blocking
+    }
+    response_ids = {item.finding_id for item in response.responses}
+    unknown_ids = sorted(response_ids - known_ids)
+    if unknown_ids:
+        raise ArtifactValidationError(
+            "implementation response references unknown finding IDs: "
+            + ", ".join(unknown_ids)
+        )
+    missing_ids = sorted(blocking_ids - response_ids)
+    if missing_ids:
+        raise ArtifactValidationError(
+            "implementation response is missing blocking finding IDs: "
+            + ", ".join(missing_ids)
+        )
+    if mode is SubmissionMode.RECONSIDERATION:
+        invalid = [
+            item.finding_id
+            for item in response.responses
+            if item.disposition is not ResponseDisposition.REJECTED
+        ]
+        if invalid:
+            raise ArtifactValidationError(
+                "reconsideration requires rejected dispositions with "
+                "evidence for every response"
+            )
+
+
+@dataclass(frozen=True)
 class ReviewerLocalMarker:
     """Reviewer-side proof that one result passed local validation."""
 
@@ -1239,6 +1532,7 @@ class ReviewRoundRecord:
         reviewer_start_args: tuple[str, ...],
         request_digest: str,
         warnings: tuple[str, ...],
+        additional_bundle_inputs: tuple[BundleArtifact, ...] = (),
     ) -> "ReviewRoundRecord":
         """Build the initial authoritative record for a review request."""
 
@@ -1276,6 +1570,7 @@ class ReviewRoundRecord:
                 request.task,
                 request.implementation_report,
                 *request.context_files,
+                *additional_bundle_inputs,
             ),
             review_result=None,
             review_markdown=None,

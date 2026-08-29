@@ -127,6 +127,15 @@ def build_parser() -> argparse.ArgumentParser:
             "first round requires new_revision"
         ),
     )
+    submit_parser.add_argument(
+        "--response",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "versioned JSON response to the prior applied "
+            "changes-requested review"
+        ),
+    )
     submit_parser.set_defaults(handler=_run_submit)
 
     review_submit_parser = commands.add_parser(
@@ -145,8 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate and apply the active Reviewer result",
         description=(
             "Independently revalidate the active marker-confirmed result, "
-            "archive its complete evidence, and apply an exact-revision "
-            "approval idempotently."
+            "archive its complete evidence, and apply its exact-revision "
+            "outcome idempotently."
         ),
     )
     apply_review_parser.add_argument(
@@ -300,6 +309,7 @@ def _run_submit(arguments: argparse.Namespace) -> int:
         _invocation_directory(),
         report_path=arguments.report,
         mode=SubmissionMode(arguments.mode),
+        response_path=arguments.response,
     )
     for warning in result.warnings:
         print(f"agent-squad: warning: {warning}", file=sys.stderr)
@@ -368,10 +378,15 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
     )
     print(f"Round: {result.round_number}")
     print(f"Verdict: {result.verdict.value}")
-    print(f"Approved head: {result.head_oid}")
-    print(f"Approval authority: {result.approval_path}")
+    if result.approval_path is None:
+        print(f"Reviewed head: {result.head_oid}")
+    else:
+        print(f"Approved head: {result.head_oid}")
+        print(f"Approval authority: {result.approval_path}")
     print(f"Archived review bundle: {result.bundle_archive}")
     print(f"Next action: {result.next_action}")
+    for warning in result.cleanup_warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
     return 0
 
 
