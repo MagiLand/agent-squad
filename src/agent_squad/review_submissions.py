@@ -17,6 +17,7 @@ from .artifacts import (
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
+    deterministic_reviewer_name,
 )
 from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
@@ -34,9 +35,10 @@ from .storage import (
     decode_json,
     encode_json,
     exclusive_file_lock,
+    inspect_regular_tree,
+    read_regular_tree,
     utc_timestamp,
 )
-from .submissions import deterministic_reviewer_name
 from .validation import JsonValidator
 
 
@@ -67,6 +69,29 @@ class ReviewSubmitResult:
     marker_created: bool
     notification_sent: bool
     notification_error: str | None
+
+
+@dataclass(frozen=True)
+class MarkerConfirmedReview:
+    """Fully revalidated evidence for one marker-confirmed result."""
+
+    worktree: GitWorktree
+    request: ReviewRequest
+    review: ReviewResult
+    review_bytes: bytes
+    review_path: Path
+    review_markdown_bytes: bytes
+    marker: ReviewerLocalMarker
+    marker_bytes: bytes
+    bundle_files: tuple[ReviewBundleFile, ...]
+
+
+@dataclass(frozen=True)
+class ReviewBundleFile:
+    """One regular file captured from a validated review bundle."""
+
+    path: PurePosixPath
+    content: bytes
 
 
 def submit_review_result(
@@ -150,6 +175,108 @@ def submit_review_result(
     except OSError as error:
         raise ReviewSubmissionError(
             f"cannot validate or mark the local review result: {error}"
+        ) from error
+
+
+def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
+    """Independently validate one submitted result without notifying anyone."""
+
+    worktree = discover_git_worktree(start)
+    bundle_root = worktree.root / REVIEW_DIRECTORY_NAME
+    _require_normal_directory(bundle_root, "review bundle")
+    input_root = bundle_root / "input"
+    output_root = bundle_root / "output"
+    _require_normal_directory(input_root, "review bundle input")
+    _require_normal_directory(output_root, "review bundle output")
+    lock_path = bundle_root.joinpath(*SUBMISSION_LOCK_PATH.parts)
+    _read_regular_file(lock_path, "review submission lock")
+
+    try:
+        with exclusive_file_lock(lock_path):
+            _require_normal_directory(bundle_root, "review bundle")
+            _require_normal_directory(input_root, "review bundle input")
+            _require_normal_directory(output_root, "review bundle output")
+            request = _load_review_request(bundle_root)
+            _validate_request_identity(worktree, request)
+            _validate_worktree_integrity(worktree, request)
+            previous_review = _validate_bundle_inputs(bundle_root, request)
+            _validate_bundle_root_entries(bundle_root)
+            _validate_output_tree(output_root)
+            review, review_bytes, review_path = _load_review_result(
+                bundle_root,
+                request,
+            )
+            markdown_bytes = _validate_review_markdown(
+                bundle_root,
+                request,
+            )
+            _assert_result_identity(request, review)
+            _assert_fresh_result_id(previous_review, review)
+
+            marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
+            marker_value, marker_bytes = _load_json_file(
+                marker_path,
+                "review marker",
+            )
+            try:
+                marker = ReviewerLocalMarker.from_dict(marker_value)
+            except ArtifactValidationError as error:
+                raise ReviewSubmissionError(
+                    f"review marker failed validation: {error}"
+                ) from error
+            comparisons = (
+                (marker.request_id, request.request_id, "request ID"),
+                (marker.result_id, review.result_id, "result ID"),
+                (
+                    marker.review_json_path,
+                    request.review_output_path,
+                    "review path",
+                ),
+                (
+                    marker.review_sha256,
+                    hashlib.sha256(review_bytes).hexdigest(),
+                    "review digest",
+                ),
+            )
+            for actual, expected, label in comparisons:
+                if actual != expected:
+                    raise ReviewSubmissionError(
+                        f"review marker {label} does not match the validated "
+                        "result"
+                    )
+            captured_files = read_regular_tree(
+                bundle_root,
+                label="review bundle",
+                error_type=ReviewSubmissionError,
+            )
+            bundle_files = tuple(
+                ReviewBundleFile(
+                    path=path,
+                    content=content,
+                )
+                for path, content in sorted(
+                    captured_files.items(),
+                    key=lambda item: str(item[0]),
+                )
+            )
+            return MarkerConfirmedReview(
+                worktree=worktree,
+                request=request,
+                review=review,
+                review_bytes=review_bytes,
+                review_path=review_path,
+                review_markdown_bytes=markdown_bytes,
+                marker=marker,
+                marker_bytes=marker_bytes,
+                bundle_files=bundle_files,
+            )
+    except AgentSquadError:
+        raise
+    except ArtifactValidationError as error:
+        raise ReviewSubmissionError(str(error)) from error
+    except OSError as error:
+        raise ReviewSubmissionError(
+            f"cannot validate the marker-confirmed review result: {error}"
         ) from error
 
 
@@ -288,7 +415,7 @@ def _validate_worktree_integrity(
         raise ReviewSubmissionError(
             f"could not verify tracked review content: {detail}"
         )
-    _verify_flagged_tracked_files(worktree.root, request.object_format)
+    verify_flagged_tracked_files(worktree.root, request.object_format)
 
     visible = run_git(
         worktree.root,
@@ -345,7 +472,7 @@ def _unexpected_worktree_entries(
     return tuple(unexpected)
 
 
-def _verify_flagged_tracked_files(
+def verify_flagged_tracked_files(
     repository_root: Path,
     object_format: str,
 ) -> None:
@@ -480,7 +607,13 @@ def _validate_bundle_inputs(
     request: ReviewRequest,
 ) -> ReviewResult | None:
     input_root = bundle_root / "input"
-    actual_paths, actual_directories = _walk_tree(input_root)
+    input_tree = inspect_regular_tree(
+        input_root,
+        label="review bundle",
+        error_type=ReviewSubmissionError,
+    )
+    actual_paths = set(input_tree.files)
+    actual_directories = set(input_tree.directories)
     actual_paths = {
         PurePosixPath("input") / path for path in actual_paths
     }
@@ -641,7 +774,7 @@ def _load_review_result(
 def _validate_review_markdown(
     bundle_root: Path,
     request: ReviewRequest,
-) -> None:
+) -> bytes:
     relative = PurePosixPath(request.review_markdown_path)
     path = bundle_root.joinpath(*relative.parts)
     content = _read_regular_file(path, "human-readable review")
@@ -659,6 +792,7 @@ def _validate_review_markdown(
         raise ReviewSubmissionError(
             "human-readable review must not contain null bytes"
         )
+    return content
 
 
 def _assert_result_identity(
@@ -790,7 +924,26 @@ def _validate_bundle_root_entries(bundle_root: Path) -> None:
 
 
 def _validate_output_tree(output_root: Path) -> None:
-    _walk_tree(output_root)
+    inspect_regular_tree(
+        output_root,
+        label="review bundle output",
+        error_type=ReviewSubmissionError,
+    )
+
+
+def _reject_case_collisions(
+    paths: set[PurePosixPath],
+    label: str,
+) -> None:
+    folded: dict[str, PurePosixPath] = {}
+    for path in paths:
+        key = str(path).casefold()
+        existing = folded.get(key)
+        if existing is not None and existing != path:
+            raise ReviewSubmissionError(
+                f"{label} contains case-colliding paths: {existing}, {path}"
+            )
+        folded[key] = path
 
 
 def _verify_artifact(bundle_root: Path, artifact: BundleArtifact) -> None:
@@ -853,49 +1006,6 @@ def _require_normal_directory(path: Path, label: str) -> None:
         raise ReviewSubmissionError(
             f"{label} must be a normal directory: {path}"
         )
-
-
-def _walk_tree(
-    root: Path,
-) -> tuple[set[PurePosixPath], set[PurePosixPath]]:
-    files: set[PurePosixPath] = set()
-    directories: set[PurePosixPath] = set()
-    for directory, names, filenames in os.walk(root, followlinks=False):
-        current = Path(directory)
-        for name in names:
-            path = current / name
-            try:
-                status = path.lstat()
-            except OSError as error:
-                raise ReviewSubmissionError(
-                    f"cannot inspect review bundle directory {path}: {error}"
-                ) from error
-            if not stat.S_ISDIR(status.st_mode):
-                raise ReviewSubmissionError(
-                    f"review bundle directory must not be a symlink: {path}"
-                )
-            directories.add(PurePosixPath(path.relative_to(root).as_posix()))
-        for name in filenames:
-            path = current / name
-            _read_regular_file(path, "review bundle file")
-            files.add(PurePosixPath(path.relative_to(root).as_posix()))
-    _reject_case_collisions(files | directories, "review bundle entries")
-    return files, directories
-
-
-def _reject_case_collisions(
-    paths: set[PurePosixPath],
-    label: str,
-) -> None:
-    folded: dict[str, PurePosixPath] = {}
-    for path in paths:
-        key = str(path).casefold()
-        existing = folded.get(key)
-        if existing is not None and existing != path:
-            raise ReviewSubmissionError(
-                f"{label} contains case-colliding paths: {existing}, {path}"
-            )
-        folded[key] = path
 
 
 def _git_output(

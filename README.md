@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit its first exact committed revision to a round-scoped Reviewer through Herdr, and inspect local status. Reviewer-result submission and application are planned in later increments.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit its first exact committed revision to a round-scoped Reviewer through Herdr, accept a marker-confirmed Reviewer result, apply an approved result, and complete the exact approved revision.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -73,6 +73,31 @@ agent-squad submit \
 The first submission requires a clean tracked worktree, no unexpected untracked files, a current branch or detached state matching the run, a head different from the fixed base, and the fixed base as an ancestor of that head. Known generated paths may be configured through `allowed_generated_paths`.
 
 Before contacting Herdr, Agent Squad creates a durable round record, detached review worktree, self-contained `.agent-squad-review/` bundle, and pending handoff state. It discovers the installed Herdr schema and command capabilities, opens the exact worktree, and launches or adopts the deterministic Reviewer. If discovery, launch, or prompting fails, the same logical round and request remain recorded for recovery; another `submit` does not create a replacement round.
+
+## Apply and complete an approved review
+
+From the detached review worktree, the Reviewer writes the structured result and Markdown companion, then submits them:
+
+```bash
+agent-squad review-submit
+```
+
+The command validates the exact request, revision, tracked content, result semantics, and bundle hashes before atomically writing the Reviewer-local marker. A failed result notification does not invalidate that marker. From the implementation worktree, `status` discovers the marker and prints the exact application command:
+
+```bash
+agent-squad status
+agent-squad apply-review --result-id <result-id>
+```
+
+For an approved result, application independently repeats every identity, schema, hash, head, tracked-integrity, and Reviewer check. It archives the complete bundle and records immutable approval authority before changing the run to `approved`. Repeating the same application does not duplicate the approval or event.
+
+Complete only while the implementation worktree is still at the exact approved head and satisfies the configured tracked and untracked cleanliness policy:
+
+```bash
+agent-squad complete
+```
+
+Completion preserves the run and round history, releases the active-run slot, and removes only validated disposable review resources. It never merges, pushes, deploys, or deletes a development branch.
 
 ## Development
 

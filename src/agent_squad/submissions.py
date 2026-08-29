@@ -24,6 +24,7 @@ from .artifacts import (
     ReviewRoundRecord,
     RoundStatus,
     SubmissionMode,
+    deterministic_reviewer_name,
 )
 from .herdr import (
     HerdrClient,
@@ -36,13 +37,14 @@ from .initialization import (
     GitWorktree,
     InitializedRepository,
     REVIEW_DIRECTORY_NAME,
+    is_agent_squad_runtime_path,
     load_initialized_repository,
     matches_allowed_generated_path,
     run_git,
 )
 from .storage import (
+    append_event,
     atomic_write,
-    encode_event,
     encode_json,
     exclusive_file_lock,
     utc_timestamp,
@@ -168,23 +170,6 @@ def submit_candidate(
         ) from error
 
 
-def deterministic_reviewer_name(run_id: str, round_number: int) -> str:
-    """Return a stable Herdr-safe Reviewer name for one logical round."""
-
-    try:
-        canonical_run_id = str(uuid.UUID(run_id))
-    except ValueError:
-        raise SubmissionError("run ID must be a canonical UUID") from None
-    if canonical_run_id != run_id:
-        raise SubmissionError("run ID must be a canonical UUID")
-    if round_number < 1:
-        raise SubmissionError("review round must be positive")
-    name = f"asq-{run_id.replace('-', '')[:12]}-r{round_number:03d}-reviewer"
-    if len(name) > 32:
-        raise SubmissionError("deterministic Reviewer name exceeds 32 bytes")
-    return name
-
-
 def _prepare_submission_locked(
     repository: InitializedRepository,
     *,
@@ -259,10 +244,15 @@ def _prepare_submission_locked(
     round_number = 1
     request_id = str(uuid.uuid4())
     timestamp = utc_timestamp()
-    reviewer_name = deterministic_reviewer_name(
-        active.run_id,
-        round_number,
-    )
+    try:
+        reviewer_name = deterministic_reviewer_name(
+            active.run_id,
+            round_number,
+        )
+    except ArtifactValidationError as error:
+        raise SubmissionError(
+            f"cannot derive deterministic Reviewer name: {error}"
+        ) from error
     review_worktree = _review_worktree_path(
         repository,
         repository_id=active.repository.repository_id,
@@ -440,7 +430,7 @@ def _prepare_submission_locked(
             mode=0o600,
         )
         commit_point_reached = True
-        _append_event(
+        append_event(
             run_directory / runs.EVENT_LOG_FILE_NAME,
             {
                 "timestamp": timestamp,
@@ -568,7 +558,7 @@ def _record_handoff(
         ) from write_error
 
     try:
-        _append_event(
+        append_event(
             prepared.round_directory.parent.parent / runs.EVENT_LOG_FILE_NAME,
             {
                 "timestamp": timestamp,
@@ -729,7 +719,7 @@ def _validate_implementation_cleanliness(
         for entry in untracked.stdout.split("\x00")
         if entry
         and entry != report_relative
-        and not _is_agent_squad_runtime_path(entry)
+        and not is_agent_squad_runtime_path(entry)
         and not matches_allowed_generated_path(
             entry,
             repository.configuration.allowed_generated_paths,
@@ -743,14 +733,6 @@ def _validate_implementation_cleanliness(
             f"{rendered}{suffix}; preserve them and configure only known "
             "generated paths when appropriate"
         )
-
-
-def _is_agent_squad_runtime_path(candidate: str) -> bool:
-    path = PurePosixPath(candidate)
-    return bool(path.parts) and path.parts[0] in {
-        ".agent-squad",
-        ".agent-squad-review",
-    }
 
 
 def _relative_to_repository(path: Path, root: Path) -> str | None:
@@ -1186,28 +1168,6 @@ def _review_request_prompt(prepared: _PreparedSubmission) -> str:
         "Write the required review artifacts and run agent-squad "
         "review-submit."
     )
-
-
-def _append_event(path: Path, event: dict[str, object]) -> None:
-    content = encode_event(event)
-    flags = os.O_WRONLY | os.O_APPEND
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, flags)
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError(f"event log is not a regular file: {path}")
-        remaining = memoryview(content)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written == 0:
-                raise OSError(f"short write to event log: {path}")
-            remaining = remaining[written:]
-        os.fsync(descriptor)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 def _remove_review_worktree(

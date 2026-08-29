@@ -26,6 +26,7 @@ add_src_to_path()
 from agent_squad import runs, submissions  # noqa: E402
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
+    ArtifactValidationError,
     HandoffRecord,
 )
 from agent_squad.herdr import HerdrInstallation  # noqa: E402
@@ -498,6 +499,35 @@ class SubmitCommandTests(unittest.TestCase):
             ).stdout
             self.assertEqual(worktrees.count("worktree "), 1)
 
+    def test_reviewer_name_failure_is_converted_defensively(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, _, report, _, _ = _start_run(root)
+            _commit_candidate(repository)
+
+            with (
+                mock.patch.object(
+                    submissions,
+                    "deterministic_reviewer_name",
+                    side_effect=ArtifactValidationError("invalid name"),
+                ),
+                self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "cannot derive deterministic Reviewer name: invalid name",
+                ),
+            ):
+                submissions.submit_candidate(
+                    repository,
+                    report_path=report,
+                    mode="new_revision",
+                )
+
+            state, run_directory = _artifacts(repository)
+            self.assertEqual(state["phase"], "implementing")
+            self.assertFalse((run_directory / "rounds").exists())
+
     def test_tracked_reserved_bundle_path_rolls_back_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -741,7 +771,7 @@ class SubmitCommandTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     submissions,
-                    "_append_event",
+                    "append_event",
                     side_effect=OSError("disk full"),
                 ),
                 self.assertRaisesRegex(
@@ -857,7 +887,7 @@ class SubmitCommandTests(unittest.TestCase):
                 version="herdr test",
                 protocol=20,
             )
-            append_event = submissions._append_event
+            append_event = submissions.append_event
 
             def fail_sent_event(
                 path: Path,
@@ -870,7 +900,7 @@ class SubmitCommandTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     submissions,
-                    "_append_event",
+                    "append_event",
                     side_effect=fail_sent_event,
                 ),
                 self.assertRaisesRegex(

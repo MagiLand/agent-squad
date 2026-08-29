@@ -13,23 +13,12 @@ add_src_to_path()
 
 from agent_squad import submissions  # noqa: E402
 from agent_squad.initialization import (  # noqa: E402
+    is_agent_squad_runtime_path,
     matches_allowed_generated_path,
 )
 
 
 class SubmissionHelperTests(unittest.TestCase):
-    def test_deterministic_reviewer_name_is_stable_and_safe(self) -> None:
-        run_id = "12345678-1234-5678-9234-567812345678"
-
-        name = submissions.deterministic_reviewer_name(run_id, 1)
-
-        self.assertEqual(name, "asq-123456781234-r001-reviewer")
-        self.assertLessEqual(len(name), 32)
-        self.assertEqual(
-            submissions.deterministic_reviewer_name(run_id, 1),
-            name,
-        )
-
     def test_generated_path_matching_uses_path_components(self) -> None:
         configured = ("build/", "coverage/report/")
 
@@ -53,12 +42,12 @@ class SubmissionHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            submissions._is_agent_squad_runtime_path(
+            is_agent_squad_runtime_path(
                 ".agent-squad/runs/run-id/run.json"
             )
         )
         self.assertFalse(
-            submissions._is_agent_squad_runtime_path(
+            is_agent_squad_runtime_path(
                 "nested/.agent-squad/data.json"
             )
         )

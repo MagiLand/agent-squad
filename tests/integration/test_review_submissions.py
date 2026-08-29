@@ -29,9 +29,7 @@ from agent_squad.review_submissions import (  # noqa: E402
     _validate_bundle_inputs,
     submit_review_result,
 )
-from agent_squad.submissions import (  # noqa: E402
-    deterministic_reviewer_name,
-)
+from agent_squad.artifacts import deterministic_reviewer_name  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -1085,7 +1083,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             ),
             (
                 "symlinked review",
-                "review bundle file must be a regular non-symlink file",
+                "review bundle output file must be a regular non-symlink file",
             ),
             ("missing Markdown", "human-readable review is missing"),
         )

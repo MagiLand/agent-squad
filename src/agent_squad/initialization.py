@@ -295,6 +295,16 @@ def matches_allowed_generated_path(
     return False
 
 
+def is_agent_squad_runtime_path(candidate: str) -> bool:
+    """Return whether a path belongs to Agent Squad local runtime state."""
+
+    path = PurePosixPath(candidate)
+    return bool(path.parts) and path.parts[0] in {
+        CONTROL_DIRECTORY_NAME,
+        REVIEW_DIRECTORY_NAME,
+    }
+
+
 def default_configuration(review_worktree_root: Path) -> Configuration:
     """Build the minimal default configuration defined by the specification."""
 

@@ -11,6 +11,7 @@ add_src_to_path()
 
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
+    ApprovalRecord,
     ArtifactValidationError,
     DeveloperResolution,
     HandoffRecord,
@@ -22,8 +23,35 @@ from agent_squad.artifacts import (  # noqa: E402
     ReviewVerdict,
     RoundStatus,
     SubmissionMode,
+    deterministic_reviewer_name,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
+
+
+class DeterministicReviewerNameTests(unittest.TestCase):
+    def test_name_is_stable_and_herdr_safe(self) -> None:
+        run_id = "12345678-1234-5678-9234-567812345678"
+
+        name = deterministic_reviewer_name(run_id, 1)
+
+        self.assertEqual(name, "asq-123456781234-r001-reviewer")
+        self.assertLessEqual(len(name), 32)
+        self.assertEqual(deterministic_reviewer_name(run_id, 1), name)
+
+    def test_name_rejects_invalid_rounds_and_oversized_result(self) -> None:
+        run_id = "12345678-1234-5678-9234-567812345678"
+        cases = (
+            (0, "review round must be positive"),
+            (True, "review round must be positive"),
+            (100000, "must be a valid Herdr agent name"),
+        )
+        for round_number, message in cases:
+            with self.subTest(round_number=round_number):
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    deterministic_reviewer_name(run_id, round_number)
 
 
 def _request() -> dict[str, object]:
@@ -112,6 +140,7 @@ def _round_record() -> dict[str, object]:
         "mode": "new_revision",
         "request_id": "12345678-1234-5678-9234-567812345678",
         "result_id": None,
+        "verdict": None,
         "base_oid": "a" * 40,
         "head_oid": "b" * 40,
         "git_object_format": "sha1",
@@ -140,6 +169,11 @@ def _round_record() -> dict[str, object]:
                     "sha256": "e" * 64,
                 },
             ],
+            "review_result": None,
+            "review_markdown": None,
+            "review_marker": None,
+            "approval": None,
+            "bundle_archive": [],
         },
         "warnings": ["captured instruction warning"],
     }
@@ -185,6 +219,26 @@ def _review_marker() -> dict[str, object]:
         "result_id": "abcdefab-1234-5678-9234-567812345678",
         "status": "result_submitted",
         "review_json_path": "output/review.json",
+        "review_sha256": "f" * 64,
+    }
+
+
+def _approval_record() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T12:32:00Z",
+        "run_id": "87654321-4321-6789-a234-678912345678",
+        "round": 1,
+        "request_id": "12345678-1234-5678-9234-567812345678",
+        "result_id": "abcdefab-1234-5678-9234-567812345678",
+        "task_sha256": "c" * 64,
+        "git_object_format": "sha1",
+        "base_oid": "a" * 40,
+        "head_oid": "b" * 40,
+        "reviewer": {
+            "name": "asq-87654321-r001-reviewer",
+            "kind": "claude",
+        },
         "review_sha256": "f" * 64,
     }
 
@@ -308,6 +362,15 @@ class ReviewRoundRecordTests(unittest.TestCase):
                 "request artifact path must be request.json",
             ),
             (
+                lambda data: data["artifacts"].update(
+                    review_result={
+                        "path": "review.json",
+                        "sha256": "1" * 64,
+                    }
+                ),
+                "cannot record result artifacts before classification",
+            ),
+            (
                 lambda data: data.update(warnings=[""]),
                 "must be a non-empty string",
             ),
@@ -322,6 +385,118 @@ class ReviewRoundRecordTests(unittest.TestCase):
                     message,
                 ):
                     ReviewRoundRecord.from_dict(data, label="round record")
+
+    def test_applied_round_requires_complete_approval_evidence(self) -> None:
+        data = _round_record()
+        data.update(
+            result_id="abcdefab-1234-5678-9234-567812345678",
+            verdict="approved",
+            status="applied",
+        )
+        artifacts = data["artifacts"]
+        assert isinstance(artifacts, dict)
+        artifacts.update(
+            review_result={"path": "review.json", "sha256": "1" * 64},
+            review_markdown={"path": "review.md", "sha256": "2" * 64},
+            review_marker={
+                "path": "review-marker.json",
+                "sha256": "3" * 64,
+            },
+            approval={"path": "approval.json", "sha256": "4" * 64},
+            bundle_archive=[
+                {
+                    "path": "bundle/output/review.json",
+                    "sha256": "1" * 64,
+                }
+            ],
+        )
+
+        record = ReviewRoundRecord.from_dict(data, label="round record")
+
+        self.assertIs(record.status, RoundStatus.APPLIED)
+        self.assertIs(record.verdict, ReviewVerdict.APPROVED)
+        self.assertIsNotNone(record.approval)
+
+        cases = (
+            (
+                "missing result",
+                lambda value: value.update(result_id=None),
+                "must record its applied result and verdict",
+            ),
+            (
+                "missing result artifact",
+                lambda value: value["artifacts"].update(
+                    review_result=None
+                ),
+                "must record every applied result artifact",
+            ),
+            (
+                "missing archive",
+                lambda value: value["artifacts"].update(bundle_archive=[]),
+                "must record the complete applied bundle archive",
+            ),
+            (
+                "missing approval",
+                lambda value: value["artifacts"].update(approval=None),
+                "approval artifact must exist exactly",
+            ),
+        )
+        for case, mutate, message in cases:
+            with self.subTest(case=case):
+                changed = copy.deepcopy(data)
+                mutate(changed)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(
+                        changed,
+                        label="round record",
+                    )
+
+
+class ApprovalRecordTests(unittest.TestCase):
+    def test_record_binds_all_approval_authority(self) -> None:
+        record = ApprovalRecord.from_dict(_approval_record())
+
+        self.assertEqual(record.to_dict(), _approval_record())
+        self.assertEqual(record.task_sha256, "c" * 64)
+        self.assertEqual(record.head_oid, "b" * 40)
+        self.assertEqual(record.reviewer_name, "asq-87654321-r001-reviewer")
+        self.assertIs(record.reviewer_kind, AgentKind.CLAUDE)
+
+    def test_record_rejects_invalid_or_ambiguous_authority(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                lambda data: data.update(task_sha256="A" * 64),
+                "lowercase SHA-256",
+            ),
+            (
+                lambda data: data.update(head_oid="b" * 39),
+                "full lowercase sha1 object ID",
+            ),
+            (
+                lambda data: data.update(result_id=data["request_id"]),
+                "must be distinct",
+            ),
+            (
+                lambda data: data["reviewer"].update(name="bad name"),
+                "valid Herdr agent name",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = _approval_record()
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ApprovalRecord.from_dict(data)
 
 
 class DeveloperResolutionTests(unittest.TestCase):
