@@ -1571,6 +1571,8 @@ def _validate_approval_artifacts(
 ) -> ApprovalRecord:
     """Validate archived evidence and exact authority for an approved run."""
 
+    if round_record.status is not RoundStatus.APPLIED:
+        raise RunStateError("an approved run must reference an applied round")
     if round_record.verdict is not ReviewVerdict.APPROVED:
         raise RunStateError(
             "an approved run must reference an approved review verdict"

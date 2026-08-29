@@ -499,7 +499,7 @@ class SubmitCommandTests(unittest.TestCase):
             ).stdout
             self.assertEqual(worktrees.count("worktree "), 1)
 
-    def test_reviewer_name_failure_is_reported_as_submission_error(
+    def test_reviewer_name_failure_is_converted_defensively(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

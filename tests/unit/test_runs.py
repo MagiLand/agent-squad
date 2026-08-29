@@ -744,56 +744,110 @@ class RunArtifactValidationTests(unittest.TestCase):
 
 
 class ApprovalArtifactGuardTests(unittest.TestCase):
-    def _applied_round(self, verdict: str) -> ReviewRoundRecord:
+    def _round_dict(self, verdict: str) -> dict[str, object]:
         digest = "d" * 64
         result_id = "87654321-4321-6789-a234-678912345678"
 
         def artifact(path: str) -> dict[str, str]:
             return {"path": path, "sha256": digest}
 
-        return ReviewRoundRecord.from_dict(
-            {
-                "schema_version": 1,
-                "created_at": "2026-08-29T00:00:00Z",
-                "updated_at": "2026-08-29T00:00:00Z",
-                "run_id": "12345678-1234-5678-9234-567812345678",
-                "round": 1,
-                "mode": "new_revision",
-                "request_id": "abcdefab-1234-5678-9234-567812345678",
-                "result_id": result_id,
-                "verdict": verdict,
-                "base_oid": "b" * 40,
-                "head_oid": "a" * 40,
-                "git_object_format": "sha1",
-                "status": "applied",
-                "review_worktree": "/review",
-                "reviewer": {
-                    "name": "asq-123456781234-r001-reviewer",
-                    "kind": "claude",
-                    "start_args": [],
-                },
-                "artifacts": {
-                    "request": artifact("request.json"),
-                    "implementation_report": artifact(
-                        "implementation-report.md"
-                    ),
-                    "bundle_inputs": [artifact("input/request.json")],
-                    "review_result": artifact("review.json"),
-                    "review_markdown": artifact("review.md"),
-                    "review_marker": artifact("review-marker.json"),
-                    "approval": (
-                        artifact("approval.json")
-                        if verdict == "approved"
-                        else None
-                    ),
-                    "bundle_archive": [
-                        artifact("bundle/input/request.json")
-                    ],
-                },
-                "warnings": [],
+        return {
+            "schema_version": 1,
+            "created_at": "2026-08-29T00:00:00Z",
+            "updated_at": "2026-08-29T00:00:00Z",
+            "run_id": "12345678-1234-5678-9234-567812345678",
+            "round": 1,
+            "mode": "new_revision",
+            "request_id": "abcdefab-1234-5678-9234-567812345678",
+            "result_id": result_id,
+            "verdict": verdict,
+            "base_oid": "b" * 40,
+            "head_oid": "a" * 40,
+            "git_object_format": "sha1",
+            "status": "applied",
+            "review_worktree": "/review",
+            "reviewer": {
+                "name": "asq-123456781234-r001-reviewer",
+                "kind": "claude",
+                "start_args": [],
             },
+            "artifacts": {
+                "request": artifact("request.json"),
+                "implementation_report": artifact(
+                    "implementation-report.md"
+                ),
+                "bundle_inputs": [artifact("input/request.json")],
+                "review_result": artifact("review.json"),
+                "review_markdown": artifact("review.md"),
+                "review_marker": artifact("review-marker.json"),
+                "approval": (
+                    artifact("approval.json")
+                    if verdict == "approved"
+                    else None
+                ),
+                "bundle_archive": [
+                    artifact("bundle/input/request.json")
+                ],
+            },
+            "warnings": [],
+        }
+
+    def _applied_round(self, verdict: str) -> ReviewRoundRecord:
+        return ReviewRoundRecord.from_dict(
+            self._round_dict(verdict),
             label="fixture round",
         )
+
+    def _non_applied_round(
+        self,
+        status: RoundStatus,
+        *,
+        retain_artifacts: bool,
+    ) -> ReviewRoundRecord:
+        value = self._round_dict("approved")
+        value["status"] = status.value
+        if not retain_artifacts:
+            artifacts = value["artifacts"]
+            assert isinstance(artifacts, dict)
+            for key in (
+                "review_result",
+                "review_markdown",
+                "review_marker",
+                "approval",
+            ):
+                artifacts[key] = None
+            artifacts["bundle_archive"] = []
+        return ReviewRoundRecord.from_dict(
+            value,
+            label="fixture round",
+        )
+
+    def test_approval_validator_rejects_non_applied_rounds(self) -> None:
+        for status in (
+            RoundStatus.STALE,
+            RoundStatus.SUPERSEDED,
+            RoundStatus.INVALID,
+        ):
+            for retain_artifacts in (False, True):
+                with self.subTest(
+                    status=status,
+                    retain_artifacts=retain_artifacts,
+                ):
+                    round_record = self._non_applied_round(
+                        status,
+                        retain_artifacts=retain_artifacts,
+                    )
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        "must reference an applied round",
+                    ):
+                        runs._validate_approval_artifacts(
+                            run_directory=Path("/run"),
+                            round_record=round_record,
+                            run_id=round_record.run_id,
+                            record=SimpleNamespace(),
+                            approved_head_oid="a" * 40,
+                        )
 
     def test_approval_validator_keeps_reachable_authority_guards(
         self,

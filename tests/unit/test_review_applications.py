@@ -569,7 +569,7 @@ class AuthoritativeTransitionTests(unittest.TestCase):
 
 
 class CompletionPreconditionTests(unittest.TestCase):
-    def test_complete_rejects_approved_status_without_authority(self) -> None:
+    def test_missing_approval_authority_is_refused_defensively(self) -> None:
         repository = SimpleNamespace(
             worktree=SimpleNamespace(invocation_directory=Path("/repo"))
         )

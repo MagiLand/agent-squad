@@ -362,6 +362,15 @@ class ReviewRoundRecordTests(unittest.TestCase):
                 "request artifact path must be request.json",
             ),
             (
+                lambda data: data["artifacts"].update(
+                    review_result={
+                        "path": "review.json",
+                        "sha256": "1" * 64,
+                    }
+                ),
+                "cannot record result artifacts before classification",
+            ),
+            (
                 lambda data: data.update(warnings=[""]),
                 "must be a non-empty string",
             ),
@@ -409,21 +418,37 @@ class ReviewRoundRecordTests(unittest.TestCase):
         self.assertIsNotNone(record.approval)
 
         cases = (
-            ("missing result", lambda value: value.update(result_id=None)),
+            (
+                "missing result",
+                lambda value: value.update(result_id=None),
+                "must record its applied result and verdict",
+            ),
+            (
+                "missing result artifact",
+                lambda value: value["artifacts"].update(
+                    review_result=None
+                ),
+                "must record every applied result artifact",
+            ),
             (
                 "missing archive",
                 lambda value: value["artifacts"].update(bundle_archive=[]),
+                "must record the complete applied bundle archive",
             ),
             (
                 "missing approval",
                 lambda value: value["artifacts"].update(approval=None),
+                "approval artifact must exist exactly",
             ),
         )
-        for case, mutate in cases:
+        for case, mutate, message in cases:
             with self.subTest(case=case):
                 changed = copy.deepcopy(data)
                 mutate(changed)
-                with self.assertRaises(ArtifactValidationError):
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
                     ReviewRoundRecord.from_dict(
                         changed,
                         label="round record",
