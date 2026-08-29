@@ -9,10 +9,12 @@ import sys
 
 from . import __version__
 from .artifacts import HandoffStatus, SubmissionMode
+from .handoffs import retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
 from .runs import (
+    IncompleteReviewOutput,
     InvalidUnappliedReviewResult,
     RunPhase,
     inspect_status,
@@ -159,6 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_review_parser.set_defaults(handler=_run_apply_review)
 
+    retry_handoff_parser = commands.add_parser(
+        "retry-handoff",
+        help="recover the current durable review handoff",
+        description=(
+            "Probe the current round's local result evidence, deterministic "
+            "Reviewer session, and terminal history before adopting, "
+            "re-prompting, or relaunching that same logical request."
+        ),
+    )
+    retry_handoff_parser.set_defaults(handler=_run_retry_handoff)
+
     complete_parser = commands.add_parser(
         "complete",
         help="complete the exact approved revision",
@@ -274,8 +287,18 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                 "Marker-confirmed unapplied result: present but invalid: "
                 f"{unapplied_review.reason}"
             )
+        elif isinstance(unapplied_review, IncompleteReviewOutput):
+            print("Marker-confirmed unapplied result: none")
+            print("Unmarked review output: present and incomplete")
+            print(
+                "Incomplete output paths: "
+                + ", ".join(
+                    str(path) for path in unapplied_review.output_paths
+                )
+            )
         elif unapplied_review is None:
             print("Marker-confirmed unapplied result: none")
+            print("Unmarked review output: none")
         else:
             print("Marker-confirmed unapplied result: ready")
             print(f"Result ID: {unapplied_review.result_id}")
@@ -283,6 +306,11 @@ def _run_status(_arguments: argparse.Namespace) -> int:
             print(f"Result path: {unapplied_review.result_path}")
             print("Result authoritative: no")
             print(f"Apply command: {status.next_action}")
+        if unapplied_review is None or isinstance(
+            unapplied_review,
+            IncompleteReviewOutput,
+        ):
+            print("Recovery command: agent-squad retry-handoff")
     budget = run.review_budget
     print(
         "Review budget: "
@@ -322,6 +350,7 @@ def _run_submit(arguments: argparse.Namespace) -> int:
             f"{result.handoff_error}",
             file=sys.stderr,
         )
+        print("Next action: agent-squad retry-handoff")
         return 1
     print("Next action: wait for the Reviewer result")
     return 0
@@ -372,6 +401,41 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
     print(f"Approval authority: {result.approval_path}")
     print(f"Archived review bundle: {result.bundle_archive}")
     print(f"Next action: {result.next_action}")
+    return 0
+
+
+def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
+    result = retry_handoff(_invocation_directory())
+    print(
+        f"Recovered review handoff for run {result.run_id}, "
+        f"round {result.round_number}"
+    )
+    print(f"Request ID: {result.request_id}")
+    print(f"Reviewer: {result.reviewer_name}")
+    print(f"Request handoff: {result.handoff_status.value}")
+    if result.action is not None:
+        print(f"Recovery action: {result.action.value}")
+    if result.result_id is not None:
+        next_action = (
+            "agent-squad apply-review --result-id "
+            f"{result.result_id}"
+        )
+        print(f"Result ID: {result.result_id}")
+        print(f"Next action: {next_action}")
+        return 0
+    if result.handoff_status is HandoffStatus.FAILED:
+        print(
+            "The durable review round remains available for recovery.",
+            file=sys.stderr,
+        )
+        print(
+            "agent-squad: error: review handoff recovery failed: "
+            f"{result.handoff_error}",
+            file=sys.stderr,
+        )
+        print("Next action: agent-squad retry-handoff")
+        return 1
+    print("Next action: wait for the Reviewer result")
     return 0
 
 

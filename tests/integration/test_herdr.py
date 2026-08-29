@@ -90,6 +90,25 @@ class FakeHerdrAdapterTests(unittest.TestCase):
                         role="Reviewer",
                     )
 
+    def test_review_history_capabilities_are_required(self) -> None:
+        cases = (
+            ("agent.read", "method contract agent.read"),
+            ("agent_view", "response contracts: agent_view"),
+        )
+        for missing, message in cases:
+            with self.subTest(missing=missing):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    _, environment = install_fake_herdr(root)
+                    environment["FAKE_HERDR_SCHEMA_MISSING"] = missing
+
+                    with mock.patch.dict(os.environ, environment):
+                        with self.assertRaisesRegex(HerdrError, message):
+                            HerdrClient(root).discover(
+                                AgentKind.CLAUDE,
+                                role="Reviewer",
+                            )
+
     def test_stale_integration_error_identifies_the_role(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

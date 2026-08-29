@@ -305,8 +305,18 @@ class InvalidUnappliedReviewResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class IncompleteReviewOutput:
+    """Expected Reviewer output that has no valid local submission marker."""
+
+    output_paths: tuple[Path, ...]
+
+
 UnappliedReviewState = (
-    UnappliedReviewResult | InvalidUnappliedReviewResult | None
+    UnappliedReviewResult
+    | InvalidUnappliedReviewResult
+    | IncompleteReviewOutput
+    | None
 )
 
 
@@ -1816,6 +1826,19 @@ def _discover_unapplied_review(
         ".agent-squad-review/local-state.json"
     )
     if not os.path.lexists(marker_path):
+        output_root = (
+            active_round.review_worktree / ".agent-squad-review/output"
+        )
+        output_paths = tuple(
+            path
+            for path in (
+                output_root / "review.json",
+                output_root / "review.md",
+            )
+            if os.path.lexists(path)
+        )
+        if output_paths:
+            return IncompleteReviewOutput(output_paths=output_paths)
         return None
     try:
         evidence = load_marker_confirmed_review(
@@ -2313,6 +2336,8 @@ def _next_action(
     if phase is RunPhase.IMPLEMENTING:
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:
+        if isinstance(unapplied_review, IncompleteReviewOutput):
+            return "agent-squad retry-handoff"
         if isinstance(unapplied_review, InvalidUnappliedReviewResult):
             return (
                 "inspect the review worktree; its marker-confirmed result "
@@ -2323,10 +2348,11 @@ def _next_action(
                 "agent-squad apply-review --result-id "
                 f"{unapplied_review.result_id}"
             )
-        if handoff_status is HandoffStatus.FAILED:
-            return "recover the preserved review-request handoff"
-        if handoff_status is HandoffStatus.PENDING:
-            return "finish or recover the pending review-request handoff"
+        if handoff_status in {
+            HandoffStatus.FAILED,
+            HandoffStatus.PENDING,
+        }:
+            return "agent-squad retry-handoff"
         return "wait for the Reviewer result"
     if phase is RunPhase.APPROVED:
         return "agent-squad complete"

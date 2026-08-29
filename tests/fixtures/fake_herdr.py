@@ -12,6 +12,7 @@ import sys
 METHODS = {
     "agent.get": "AgentTarget",
     "agent.prompt": "AgentPromptParams",
+    "agent.read": "AgentReadParams",
     "agent.start": "AgentStartParams",
     "worktree.open": "WorktreeOpenParams",
 }
@@ -19,12 +20,14 @@ RESULT_TYPES = [
     "agent_info",
     "agent_prompted",
     "agent_started",
+    "agent_view",
     "session_snapshot",
     "worktree_opened",
 ]
 PARAMETER_FIELDS = {
     "AgentTarget": ["target"],
     "AgentPromptParams": ["target", "text"],
+    "AgentReadParams": ["target", "source"],
     "AgentStartParams": ["name", "kind", "pane_id", "args"],
     "WorktreeOpenParams": ["path", "label", "focus"],
 }
@@ -140,6 +143,12 @@ def main() -> int:
     if arguments == ["agent", "get", "--help"]:
         print("Usage: get <target>")
         return 0
+    if arguments == ["agent", "read", "--help"]:
+        print(
+            "Usage: read <target> --source <SOURCE> --lines <N> "
+            "--format <FORMAT>"
+        )
+        return 0
     if arguments == ["worktree", "--help"]:
         print("Commands: list open")
         return 0
@@ -158,8 +167,25 @@ def main() -> int:
             return _error("agent_not_found", "fake agent not found")
         _success("agent_info", agent=agent)
         return 0
+    if arguments[:2] == ["agent", "read"]:
+        if os.environ.get("FAKE_HERDR_FAIL_HISTORY") == "1":
+            return _error("read_failed", "injected history failure")
+        if not agent_path.is_file():
+            return _error("agent_not_found", "fake Reviewer not found")
+        reviewer = json.loads(agent_path.read_text(encoding="utf-8"))
+        agent = _agent_for_target(arguments[2], reviewer, state_root)
+        if agent is None:
+            return _error("agent_not_found", "fake agent not found")
+        history_path = state_root / f"history-{arguments[2]}.txt"
+        if history_path.is_file():
+            print(history_path.read_text(encoding="utf-8"), end="")
+        return 0
     if arguments[:2] == ["worktree", "open"]:
         path = Path(_option(arguments, "--path")).resolve(strict=True)
+        already_open = False
+        if opened_path.is_file():
+            existing = json.loads(opened_path.read_text(encoding="utf-8"))
+            already_open = existing.get("path") == str(path)
         opened = {
             "path": str(path),
             "workspace_id": "w-test",
@@ -168,7 +194,7 @@ def main() -> int:
         opened_path.write_text(json.dumps(opened), encoding="utf-8")
         _success(
             "worktree_opened",
-            already_open=False,
+            already_open=already_open,
             worktree={"path": str(path)},
             workspace={"workspace_id": "w-test"},
             tab={"tab_id": "w-test:t1"},
@@ -196,6 +222,10 @@ def main() -> int:
         agent = _agent_for_target(arguments[2], reviewer, state_root)
         if agent is None:
             return _error("agent_not_found", "fake agent not found")
+        history_path = state_root / f"history-{arguments[2]}.txt"
+        with history_path.open("a", encoding="utf-8") as history:
+            history.write(arguments[3])
+            history.write("\n")
         _success("agent_prompted", agent=agent)
         return 0
     return _error(

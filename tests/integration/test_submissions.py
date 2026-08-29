@@ -1222,8 +1222,7 @@ class SubmitCommandTests(unittest.TestCase):
                     self.assertEqual(status.returncode, 0, status.stderr)
                     self.assertIn("Request handoff: failed", status.stdout)
                     self.assertIn(
-                        "Next action: recover the preserved review-request "
-                        "handoff",
+                        "Next action: agent-squad retry-handoff",
                         status.stdout,
                     )
                     retry = run_cli(

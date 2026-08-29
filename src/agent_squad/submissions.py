@@ -32,6 +32,7 @@ from .herdr import (
     HerdrInstallation,
     format_herdr_error,
 )
+from .handoffs import format_review_request_prompt
 from .initialization import (
     AgentSquadError,
     GitWorktree,
@@ -134,7 +135,10 @@ def submit_candidate(
                     reviewer_kind=prepared.request.reviewer_kind,
                     start_args=prepared.reviewer_start_args,
                     review_worktree=prepared.review_worktree,
-                    prompt=_review_request_prompt(prepared),
+                    prompt=format_review_request_prompt(
+                        prepared.request,
+                        prepared.review_worktree,
+                    ),
                 )
             except HerdrError as error:
                 detail = format_herdr_error(str(error))
@@ -1141,32 +1145,6 @@ def _handoff_record(
         herdr_protocol=(
             installation.protocol if installation is not None else None
         ),
-    )
-
-
-def _review_request_prompt(prepared: _PreparedSubmission) -> str:
-    request = prepared.request
-    request_path = (
-        prepared.review_worktree
-        / REVIEW_DIRECTORY_NAME
-        / "input"
-        / REQUEST_FILE_NAME
-    )
-    return (
-        "AGENT_SQUAD/0.4.4 REVIEW_REQUEST\n\n"
-        f"run_id: {request.run_id}\n"
-        f"round: {request.round_number}\n"
-        f"request_id: {request.request_id}\n"
-        f"base_oid: {request.base_oid}\n"
-        f"head_oid: {request.head_oid}\n"
-        f"review_worktree: {prepared.review_worktree}\n"
-        f"request: {request_path}\n\n"
-        "Review the exact requested revision in this worktree.\n"
-        "Read the complete local review bundle, including any Developer "
-        "resolutions.\n"
-        "Do not modify tracked files.\n"
-        "Write the required review artifacts and run agent-squad "
-        "review-submit."
     )
 
 
