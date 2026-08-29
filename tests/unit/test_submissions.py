@@ -19,18 +19,6 @@ from agent_squad.initialization import (  # noqa: E402
 
 
 class SubmissionHelperTests(unittest.TestCase):
-    def test_deterministic_reviewer_name_is_stable_and_safe(self) -> None:
-        run_id = "12345678-1234-5678-9234-567812345678"
-
-        name = submissions.deterministic_reviewer_name(run_id, 1)
-
-        self.assertEqual(name, "asq-123456781234-r001-reviewer")
-        self.assertLessEqual(len(name), 32)
-        self.assertEqual(
-            submissions.deterministic_reviewer_name(run_id, 1),
-            name,
-        )
-
     def test_generated_path_matching_uses_path_components(self) -> None:
         configured = ("build/", "coverage/report/")
 

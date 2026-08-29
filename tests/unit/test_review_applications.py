@@ -13,7 +13,7 @@ from tests._support import add_src_to_path
 
 add_src_to_path()
 
-from agent_squad import review_applications  # noqa: E402
+from agent_squad import review_applications, runs  # noqa: E402
 from agent_squad.artifacts import (  # noqa: E402
     BundleArtifact,
     RoundStatus,
@@ -468,6 +468,128 @@ class GitAuthorityTests(unittest.TestCase):
                         repository,
                         active,
                     )
+
+
+class AuthoritativeTransitionTests(unittest.TestCase):
+    def test_rollback_refuses_to_overwrite_concurrently_changed_record(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            record_path = root / "run.json"
+            state_path = root / "state.json"
+            original_record = b"original record\n"
+            staged_record = b"staged record\n"
+            external_record = b"external record\n"
+            original_state = b"original state\n"
+            record_path.write_bytes(original_record)
+            state_path.write_bytes(original_state)
+            real_atomic_write = review_applications.atomic_write
+
+            def fail_state(path, content, *, mode):
+                if path == state_path:
+                    record_path.write_bytes(external_record)
+                    raise OSError("state commit failed")
+                real_atomic_write(path, content, mode=mode)
+
+            with (
+                mock.patch.object(
+                    review_applications,
+                    "atomic_write",
+                    side_effect=fail_state,
+                ),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "rollback also failed.*content changed",
+                ),
+            ):
+                review_applications._persist_authoritative_transition(
+                    records=(
+                        review_applications._StagedRecord(
+                            path=record_path,
+                            original=original_record,
+                            staged=staged_record,
+                        ),
+                    ),
+                    state_path=state_path,
+                    original_state=original_state,
+                    next_state=b"next state\n",
+                    failure_message="transition failed",
+                )
+
+            self.assertEqual(record_path.read_bytes(), external_record)
+            self.assertEqual(state_path.read_bytes(), original_state)
+
+    def test_external_state_change_preserves_staged_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            record_path = root / "run.json"
+            state_path = root / "state.json"
+            original_record = b"original record\n"
+            staged_record = b"staged record\n"
+            original_state = b"original state\n"
+            external_state = b"external state\n"
+            record_path.write_bytes(original_record)
+            state_path.write_bytes(original_state)
+            real_atomic_write = review_applications.atomic_write
+
+            def replace_state(path, content, *, mode):
+                if path == state_path:
+                    state_path.write_bytes(external_state)
+                    raise OSError("state commit lost race")
+                real_atomic_write(path, content, mode=mode)
+
+            with (
+                mock.patch.object(
+                    review_applications,
+                    "atomic_write",
+                    side_effect=replace_state,
+                ),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "state changed unexpectedly, so staged metadata was left",
+                ),
+            ):
+                review_applications._persist_authoritative_transition(
+                    records=(
+                        review_applications._StagedRecord(
+                            path=record_path,
+                            original=original_record,
+                            staged=staged_record,
+                        ),
+                    ),
+                    state_path=state_path,
+                    original_state=original_state,
+                    next_state=b"next state\n",
+                    failure_message="transition failed",
+                )
+
+            self.assertEqual(record_path.read_bytes(), staged_record)
+            self.assertEqual(state_path.read_bytes(), external_state)
+
+
+class CompletionPreconditionTests(unittest.TestCase):
+    def test_complete_rejects_approved_status_without_authority(self) -> None:
+        repository = SimpleNamespace(
+            worktree=SimpleNamespace(invocation_directory=Path("/repo"))
+        )
+        active = SimpleNamespace(
+            run_id=RUN_ID,
+            phase=runs.RunPhase.APPROVED,
+            approval=None,
+        )
+        with (
+            mock.patch.object(
+                review_applications.runs,
+                "inspect_status_locked",
+                return_value=SimpleNamespace(active_run=active),
+            ),
+            self.assertRaisesRegex(
+                review_applications.ReviewApplicationError,
+                "missing its exact approval authority",
+            ),
+        ):
+            review_applications._complete_run_locked(repository)
 
 
 class RoundReplayGuardTests(unittest.TestCase):

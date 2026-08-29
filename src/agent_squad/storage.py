@@ -20,9 +20,9 @@ class InvalidJsonError(ValueError):
 
 @dataclass(frozen=True)
 class RegularTree:
-    """Regular files and directories captured from one validated tree."""
+    """Regular file and directory paths captured from one validated tree."""
 
-    files: dict[PurePosixPath, bytes]
+    files: frozenset[PurePosixPath]
     directories: frozenset[PurePosixPath]
 
 
@@ -108,13 +108,48 @@ def append_event(path: Path, event: dict[str, object]) -> None:
             os.close(descriptor)
 
 
-def read_regular_tree(
+def inspect_regular_tree(
     root: Path,
     *,
     label: str,
     error_type: type[Exception],
 ) -> RegularTree:
-    """Read a normal tree while rejecting links and case collisions."""
+    """Inspect a normal tree while rejecting links and case collisions."""
+
+    tree, _ = _scan_regular_tree(
+        root,
+        label=label,
+        error_type=error_type,
+        capture_contents=False,
+    )
+    return tree
+
+
+def read_regular_tree(
+    root: Path,
+    *,
+    label: str,
+    error_type: type[Exception],
+) -> dict[PurePosixPath, bytes]:
+    """Read every regular file in a validated normal tree."""
+
+    _, contents = _scan_regular_tree(
+        root,
+        label=label,
+        error_type=error_type,
+        capture_contents=True,
+    )
+    return contents
+
+
+def _scan_regular_tree(
+    root: Path,
+    *,
+    label: str,
+    error_type: type[Exception],
+    capture_contents: bool,
+) -> tuple[RegularTree, dict[PurePosixPath, bytes]]:
+    """Walk one regular tree and optionally capture file contents."""
 
     try:
         root_status = root.lstat()
@@ -123,7 +158,8 @@ def read_regular_tree(
     if not stat.S_ISDIR(root_status.st_mode):
         raise error_type(f"{label} must be a normal directory: {root}")
 
-    files: dict[PurePosixPath, bytes] = {}
+    files: set[PurePosixPath] = set()
+    contents: dict[PurePosixPath, bytes] = {}
     directories: set[PurePosixPath] = set()
     folded: dict[str, PurePosixPath] = {}
     for directory, names, filenames in os.walk(root, followlinks=False):
@@ -169,13 +205,21 @@ def read_regular_tree(
                 folded=folded,
                 error_type=error_type,
             )
-            try:
-                files[relative] = path.read_bytes()
-            except OSError as error:
-                raise error_type(
-                    f"cannot read {label} file {path}: {error}"
-                ) from error
-    return RegularTree(files=files, directories=frozenset(directories))
+            files.add(relative)
+            if capture_contents:
+                try:
+                    contents[relative] = path.read_bytes()
+                except OSError as error:
+                    raise error_type(
+                        f"cannot read {label} file {path}: {error}"
+                    ) from error
+    return (
+        RegularTree(
+            files=frozenset(files),
+            directories=frozenset(directories),
+        ),
+        contents,
+    )
 
 
 def _record_tree_path(

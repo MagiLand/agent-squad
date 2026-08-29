@@ -23,8 +23,35 @@ from agent_squad.artifacts import (  # noqa: E402
     ReviewVerdict,
     RoundStatus,
     SubmissionMode,
+    deterministic_reviewer_name,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
+
+
+class DeterministicReviewerNameTests(unittest.TestCase):
+    def test_name_is_stable_and_herdr_safe(self) -> None:
+        run_id = "12345678-1234-5678-9234-567812345678"
+
+        name = deterministic_reviewer_name(run_id, 1)
+
+        self.assertEqual(name, "asq-123456781234-r001-reviewer")
+        self.assertLessEqual(len(name), 32)
+        self.assertEqual(deterministic_reviewer_name(run_id, 1), name)
+
+    def test_name_rejects_invalid_rounds_and_oversized_result(self) -> None:
+        run_id = "12345678-1234-5678-9234-567812345678"
+        cases = (
+            (0, "review round must be positive"),
+            (True, "review round must be positive"),
+            (100000, "must be a valid Herdr agent name"),
+        )
+        for round_number, message in cases:
+            with self.subTest(round_number=round_number):
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    deterministic_reviewer_name(run_id, round_number)
 
 
 def _request() -> dict[str, object]:

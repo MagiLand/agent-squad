@@ -244,10 +244,15 @@ def _prepare_submission_locked(
     round_number = 1
     request_id = str(uuid.uuid4())
     timestamp = utc_timestamp()
-    reviewer_name = deterministic_reviewer_name(
-        active.run_id,
-        round_number,
-    )
+    try:
+        reviewer_name = deterministic_reviewer_name(
+            active.run_id,
+            round_number,
+        )
+    except ArtifactValidationError as error:
+        raise SubmissionError(
+            f"cannot derive deterministic Reviewer name: {error}"
+        ) from error
     review_worktree = _review_worktree_path(
         repository,
         repository_id=active.repository.repository_id,

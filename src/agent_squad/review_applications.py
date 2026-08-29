@@ -84,6 +84,15 @@ class CompleteRunResult:
     cleanup_warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _StagedRecord:
+    """One metadata record participating in an authoritative transition."""
+
+    path: Path
+    original: bytes
+    staged: bytes
+
+
 def apply_review(
     start: Path,
     *,
@@ -153,13 +162,15 @@ def _apply_review_locked(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "apply-review requires an active reviewing round"
         )
-    ready = active.unapplied_result
-    if ready is None:
+    unapplied_review = active.unapplied_review
+    if isinstance(unapplied_review, runs.InvalidUnappliedReviewResult):
+        raise ReviewApplicationError(unapplied_review.reason)
+    if unapplied_review is None:
         raise ReviewApplicationError(
-            active.unapplied_result_error
-            or "the active round has no valid marker-confirmed result to "
+            "the active round has no valid marker-confirmed result to "
             "apply"
         )
+    ready = unapplied_review
     selected_result_id = presented_result_id or ready.result_id
     if selected_result_id != ready.result_id:
         raise ReviewApplicationError(
@@ -317,12 +328,16 @@ def _apply_review_locked(
         )
     _persist_authoritative_transition(
         records=(
-            (
-                round_path,
-                round_path.read_bytes(),
-                encode_json(next_round.to_dict()),
+            _StagedRecord(
+                path=round_path,
+                original=round_path.read_bytes(),
+                staged=encode_json(next_round.to_dict()),
             ),
-            (run_path, run_path.read_bytes(), encode_json(next_run)),
+            _StagedRecord(
+                path=run_path,
+                original=run_path.read_bytes(),
+                staged=encode_json(next_run),
+            ),
         ),
         state_path=state_path,
         original_state=original_state,
@@ -465,7 +480,13 @@ def _complete_run_locked(
         terminal_run_id=active.run_id,
     )
     _persist_authoritative_transition(
-        records=((run_path, original_run, encode_json(next_run)),),
+        records=(
+            _StagedRecord(
+                path=run_path,
+                original=original_run,
+                staged=encode_json(next_run),
+            ),
+        ),
         state_path=state_path,
         original_state=original_state,
         next_state=encode_json(next_state),
@@ -720,7 +741,7 @@ def _verify_bundle_tree(
         root,
         label=f"{label} review bundle archive",
         error_type=ReviewApplicationError,
-    ).files
+    )
     if set(actual) != set(expected):
         raise ReviewApplicationError(
             f"{label} review bundle archive does not match validated evidence"
@@ -767,7 +788,7 @@ def _write_immutable_artifact(
 
 def _persist_authoritative_transition(
     *,
-    records: tuple[tuple[Path, bytes, bytes], ...],
+    records: tuple[_StagedRecord, ...],
     state_path: Path,
     original_state: bytes,
     next_state: bytes,
@@ -776,10 +797,11 @@ def _persist_authoritative_transition(
     """Commit metadata before state and safely roll back interruptions."""
 
     try:
-        for path, _, staged in records:
-            atomic_write(path, staged, mode=0o600)
+        for record in records:
+            atomic_write(record.path, record.staged, mode=0o600)
         atomic_write(state_path, next_state, mode=0o600)
     except BaseException as error:
+        message: str | None = None
         try:
             current_state = state_path.read_bytes()
         except OSError as inspection_error:
@@ -787,43 +809,44 @@ def _persist_authoritative_transition(
                 f"{failure_message}: {error}; could not determine whether "
                 f"authoritative state committed: {inspection_error}"
             )
-            if isinstance(error, OSError):
-                raise ReviewApplicationError(message) from error
-            error.add_note(message)
-            raise
-        if current_state == next_state:
-            if isinstance(error, OSError):
-                raise ReviewApplicationError(
+        else:
+            if current_state == next_state:
+                if not isinstance(error, OSError):
+                    raise
+                message = (
                     f"{failure_message}: {error}; authoritative state was "
                     "already committed, so retry the command"
-                ) from error
-            raise
-        if current_state != original_state:
-            message = (
-                f"{failure_message}: {error}; authoritative state changed "
-                "unexpectedly, so staged metadata was left in place"
-            )
+                )
+            elif current_state != original_state:
+                message = (
+                    f"{failure_message}: {error}; authoritative state "
+                    "changed unexpectedly, so staged metadata was left in "
+                    "place"
+                )
+        if message is not None:
             if isinstance(error, OSError):
                 raise ReviewApplicationError(message) from error
             error.add_note(message)
             raise
 
         rollback_errors: list[str] = []
-        for path, original, staged in reversed(records):
+        for record in reversed(records):
             try:
-                current = path.read_bytes()
+                current = record.path.read_bytes()
             except OSError as inspection_error:
-                rollback_errors.append(f"{path}: {inspection_error}")
+                rollback_errors.append(
+                    f"{record.path}: {inspection_error}"
+                )
                 continue
-            if current == original:
+            if current == record.original:
                 continue
-            if current != staged:
-                rollback_errors.append(f"{path}: content changed")
+            if current != record.staged:
+                rollback_errors.append(f"{record.path}: content changed")
                 continue
             try:
-                atomic_write(path, original, mode=0o600)
+                atomic_write(record.path, record.original, mode=0o600)
             except OSError as restore_error:
-                rollback_errors.append(f"{path}: {restore_error}")
+                rollback_errors.append(f"{record.path}: {restore_error}")
         detail = (
             "; rollback also failed for " + ", ".join(rollback_errors)
             if rollback_errors

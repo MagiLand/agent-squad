@@ -6,7 +6,6 @@ from pathlib import Path, PurePosixPath
 import stat
 import tempfile
 import unittest
-from unittest import mock
 
 from tests._support import add_src_to_path
 
@@ -19,6 +18,7 @@ from agent_squad.storage import (  # noqa: E402
     encode_event,
     encode_json,
     exclusive_file_lock,
+    inspect_regular_tree,
     read_regular_tree,
 )
 
@@ -83,7 +83,7 @@ class ExclusiveFileLockTests(unittest.TestCase):
 
 
 class RegularTreeTests(unittest.TestCase):
-    def test_reads_regular_files_and_directories(self) -> None:
+    def test_inspects_paths_without_reading_file_contents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             nested = root / "nested"
@@ -91,7 +91,7 @@ class RegularTreeTests(unittest.TestCase):
             (root / "root.txt").write_bytes(b"root\n")
             (nested / "leaf.txt").write_bytes(b"leaf\n")
 
-            tree = read_regular_tree(
+            tree = inspect_regular_tree(
                 root,
                 label="fixture tree",
                 error_type=ValueError,
@@ -100,13 +100,33 @@ class RegularTreeTests(unittest.TestCase):
             self.assertEqual(
                 tree.files,
                 {
-                    PurePosixPath("root.txt"): b"root\n",
-                    PurePosixPath("nested/leaf.txt"): b"leaf\n",
+                    PurePosixPath("root.txt"),
+                    PurePosixPath("nested/leaf.txt"),
                 },
             )
             self.assertEqual(
                 tree.directories,
                 {PurePosixPath("nested")},
+            )
+
+    def test_reads_regular_file_contents_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "first.txt").write_bytes(b"first\n")
+            (root / "second.txt").write_bytes(b"second\n")
+
+            files = read_regular_tree(
+                root,
+                label="fixture tree",
+                error_type=ValueError,
+            )
+
+            self.assertEqual(
+                files,
+                {
+                    PurePosixPath("first.txt"): b"first\n",
+                    PurePosixPath("second.txt"): b"second\n",
+                },
             )
 
     def test_rejects_missing_non_directory_and_linked_trees(self) -> None:
@@ -132,7 +152,7 @@ class RegularTreeTests(unittest.TestCase):
             for path, message in cases:
                 with self.subTest(path=path):
                     with self.assertRaisesRegex(ValueError, message):
-                        read_regular_tree(
+                        inspect_regular_tree(
                             path,
                             label="fixture tree",
                             error_type=ValueError,
@@ -149,7 +169,7 @@ class RegularTreeTests(unittest.TestCase):
                 ValueError,
                 "directory must not be a symlink",
             ):
-                read_regular_tree(
+                inspect_regular_tree(
                     tree,
                     label="fixture tree",
                     error_type=ValueError,
@@ -158,22 +178,24 @@ class RegularTreeTests(unittest.TestCase):
     def test_rejects_case_colliding_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            (root / "Plan.md").write_bytes(b"plan\n")
-            lower = root / "plan.md"
-            if not lower.exists():
-                lower.write_bytes(b"lower\n")
-            walked = [(str(root), [], ["Plan.md", "plan.md"])]
+            folded: dict[str, PurePosixPath] = {}
+            storage._record_tree_path(
+                root / "Plan.md",
+                root=root,
+                label="fixture tree",
+                folded=folded,
+                error_type=ValueError,
+            )
 
-            with (
-                mock.patch.object(storage.os, "walk", return_value=walked),
-                self.assertRaisesRegex(
-                    ValueError,
-                    "case-colliding paths",
-                ),
+            with self.assertRaisesRegex(
+                ValueError,
+                "case-colliding paths",
             ):
-                read_regular_tree(
-                    root,
+                storage._record_tree_path(
+                    root / "plan.md",
+                    root=root,
                     label="fixture tree",
+                    folded=folded,
                     error_type=ValueError,
                 )
 

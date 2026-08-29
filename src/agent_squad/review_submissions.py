@@ -35,6 +35,7 @@ from .storage import (
     decode_json,
     encode_json,
     exclusive_file_lock,
+    inspect_regular_tree,
     read_regular_tree,
     utc_timestamp,
 )
@@ -247,7 +248,7 @@ def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
                 bundle_root,
                 label="review bundle",
                 error_type=ReviewSubmissionError,
-            ).files
+            )
             bundle_files = tuple(
                 ReviewBundleFile(
                     path=path,
@@ -606,7 +607,7 @@ def _validate_bundle_inputs(
     request: ReviewRequest,
 ) -> ReviewResult | None:
     input_root = bundle_root / "input"
-    input_tree = read_regular_tree(
+    input_tree = inspect_regular_tree(
         input_root,
         label="review bundle",
         error_type=ReviewSubmissionError,
@@ -923,7 +924,7 @@ def _validate_bundle_root_entries(bundle_root: Path) -> None:
 
 
 def _validate_output_tree(output_root: Path) -> None:
-    read_regular_tree(
+    inspect_regular_tree(
         output_root,
         label="review bundle output",
         error_type=ReviewSubmissionError,

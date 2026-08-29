@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -79,6 +80,40 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             )
             for arguments, message in cases:
                 with self.subTest(command=arguments):
+                    result = run_cli(
+                        repository,
+                        *arguments,
+                        data_home=data_home,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
+            task = root / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            started = run_cli(
+                repository,
+                "start",
+                "--task",
+                str(task),
+                "--base",
+                "main",
+                data_home=data_home,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            phase_cases = (
+                (
+                    ("apply-review",),
+                    "apply-review requires an active reviewing round",
+                ),
+                (
+                    ("complete",),
+                    "complete requires an approved run",
+                ),
+            )
+            for arguments, message in phase_cases:
+                with self.subTest(command=arguments, phase="implementing"):
                     result = run_cli(
                         repository,
                         *arguments,
@@ -527,6 +562,38 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     review_path.chmod(0o400)
 
             archive_root = round_directory / "bundle"
+            archived_request = archive_root / "input/request.json"
+            with self.subTest(case="archive core digest diverges"):
+                original_request = archived_request.read_bytes()
+                original_round = round_path.read_bytes()
+                changed_request = original_request + b" "
+                round_value = json.loads(original_round.decode("utf-8"))
+                manifest = round_value["artifacts"]["bundle_archive"]
+                request_entry = next(
+                    item
+                    for item in manifest
+                    if item["path"] == "bundle/input/request.json"
+                )
+                request_entry["sha256"] = hashlib.sha256(
+                    changed_request
+                ).hexdigest()
+                archived_request.chmod(0o600)
+                archived_request.write_bytes(changed_request)
+                round_path.write_text(
+                    f"{json.dumps(round_value, indent=2)}\n",
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        "archive does not preserve bundle/input/request.json",
+                    ):
+                        runs.inspect_status(prepared.repository)
+                finally:
+                    archived_request.write_bytes(original_request)
+                    archived_request.chmod(0o400)
+                    round_path.write_bytes(original_round)
+
             archived_result = archive_root / "output/review.json"
             with self.subTest(case="removed archived result"):
                 original = archived_result.read_bytes()
@@ -657,6 +724,44 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             self.assertEqual(run_path.read_bytes(), run_before)
             approval_path = round_directory / "approval.json"
             first_approval = approval_path.read_bytes()
+            approval_mode = stat.S_IMODE(approval_path.stat().st_mode)
+            tampered_approval = json.loads(first_approval.decode("utf-8"))
+            tampered_approval["head_oid"] = "f" * 40
+            retry_cases = (
+                (
+                    "corrupt leftover",
+                    b"{not json\n",
+                    "existing approval artifact is invalid",
+                ),
+                (
+                    "tampered leftover",
+                    (
+                        f"{json.dumps(tampered_approval, indent=2)}\n".encode(
+                            "utf-8"
+                        )
+                    ),
+                    "existing immutable artifact differs",
+                ),
+            )
+            for case, content, message in retry_cases:
+                with self.subTest(case=case):
+                    approval_path.chmod(0o600)
+                    approval_path.write_bytes(content)
+                    try:
+                        with self.assertRaisesRegex(
+                            review_applications.ReviewApplicationError,
+                            message,
+                        ):
+                            review_applications.apply_review(
+                                prepared.repository,
+                                result_id=str(review["result_id"]),
+                            )
+                    finally:
+                        approval_path.write_bytes(first_approval)
+                        approval_path.chmod(approval_mode)
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    self.assertEqual(round_path.read_bytes(), round_before)
+                    self.assertEqual(run_path.read_bytes(), run_before)
 
             with mock.patch.object(
                 review_applications,
@@ -888,6 +993,27 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                             )
                     finally:
                         state_path.write_bytes(original_state)
+
+            repository = review_applications.load_initialized_repository(
+                prepared.repository
+            )
+            current_identity = runs.repository_identity(repository.worktree)
+            changed_identity = replace(
+                current_identity,
+                repository_id="different-live-repository",
+            )
+            with (
+                mock.patch.object(
+                    runs,
+                    "repository_identity",
+                    return_value=changed_identity,
+                ),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "active run repository ID does not match the current",
+                ),
+            ):
+                review_applications.complete_run(prepared.repository)
 
     def test_completion_requires_exact_head_and_clean_worktree(self) -> None:
         cases = (

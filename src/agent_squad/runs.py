@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import tempfile
+from typing import cast
 import uuid
 
 from .artifacts import (
@@ -44,7 +45,7 @@ from .storage import (
     encode_event,
     encode_json,
     exclusive_file_lock,
-    read_regular_tree,
+    inspect_regular_tree,
     utc_timestamp,
 )
 from .validation import JsonValidator
@@ -289,6 +290,27 @@ class StartRunResult:
 
 
 @dataclass(frozen=True)
+class UnappliedReviewResult:
+    """One validated marker-confirmed result awaiting application."""
+
+    result_id: str
+    verdict: ReviewVerdict
+    result_path: Path
+
+
+@dataclass(frozen=True)
+class InvalidUnappliedReviewResult:
+    """One marker-confirmed result that failed current revalidation."""
+
+    reason: str
+
+
+UnappliedReviewState = (
+    UnappliedReviewResult | InvalidUnappliedReviewResult | None
+)
+
+
+@dataclass(frozen=True)
 class ActiveRunStatus:
     """Validated active-run details used by the status command."""
 
@@ -312,8 +334,7 @@ class ActiveRunStatus:
     active_round: ActiveRoundRecord | None
     handoff: HandoffRecord | None
     review_worktree_available: bool | None
-    unapplied_result: UnappliedReviewResult | None
-    unapplied_result_error: str | None
+    unapplied_review: UnappliedReviewState
     approval: ApprovalRecord | None
     review_budget: ReviewBudget
 
@@ -328,15 +349,6 @@ class RepositoryStatus:
     worktree_git_dir: Path
     active_run: ActiveRunStatus | None
     next_action: str
-
-
-@dataclass(frozen=True)
-class UnappliedReviewResult:
-    """One validated marker-confirmed result awaiting application."""
-
-    result_id: str
-    verdict: ReviewVerdict
-    result_path: Path
 
 
 @dataclass(frozen=True)
@@ -753,7 +765,7 @@ def _inspect_status(
             record=record,
             approved_head_oid=approved_head_oid,
         )
-    unapplied_result, unapplied_result_error = _discover_unapplied_result(
+    unapplied_review = _discover_unapplied_review(
         phase=phase,
         active_round=active_round,
         active_run_id=active_run_id,
@@ -764,12 +776,7 @@ def _inspect_status(
     next_action = _next_action(
         phase,
         handoff_status=handoff.status if handoff is not None else None,
-        result_id=(
-            unapplied_result.result_id
-            if unapplied_result is not None
-            else None
-        ),
-        result_error=unapplied_result_error,
+        unapplied_review=unapplied_review,
     )
     return RepositoryStatus(
         repository_root=current_identity.implementation_root,
@@ -797,8 +804,7 @@ def _inspect_status(
             active_round=active_round,
             handoff=handoff,
             review_worktree_available=review_worktree_available,
-            unapplied_result=unapplied_result,
-            unapplied_result_error=unapplied_result_error,
+            unapplied_review=unapplied_review,
             approval=approval,
             review_budget=budget,
         ),
@@ -1565,31 +1571,37 @@ def _validate_approval_artifacts(
 ) -> ApprovalRecord:
     """Validate archived evidence and exact authority for an approved run."""
 
-    if round_record.status is not RoundStatus.APPLIED:
-        raise RunStateError("an approved run must reference an applied round")
     if round_record.verdict is not ReviewVerdict.APPROVED:
         raise RunStateError(
             "an approved run must reference an approved review verdict"
         )
-    if round_record.result_id is None:
-        raise RunStateError("an approved round must record its result ID")
     if approved_head_oid != round_record.head_oid:
         raise RunStateError(
             "approved head does not match the applied review round"
         )
     required_artifacts = {
-        "review result": (round_record.review_result, "review.json"),
-        "review Markdown": (round_record.review_markdown, "review.md"),
-        "review marker": (round_record.review_marker, "review-marker.json"),
-        "approval": (round_record.approval, "approval.json"),
+        "review result": (
+            cast(BundleArtifact, round_record.review_result),
+            "review.json",
+        ),
+        "review Markdown": (
+            cast(BundleArtifact, round_record.review_markdown),
+            "review.md",
+        ),
+        "review marker": (
+            cast(BundleArtifact, round_record.review_marker),
+            "review-marker.json",
+        ),
+        "approval": (
+            cast(BundleArtifact, round_record.approval),
+            "approval.json",
+        ),
     }
     resolved: dict[str, tuple[BundleArtifact, Path]] = {}
     round_directory = (
         run_directory / "rounds" / f"{round_record.round_number:03d}"
     )
     for label, (artifact, expected_path) in required_artifacts.items():
-        if artifact is None:
-            raise RunStateError(f"approved round is missing its {label}")
         if artifact.path != expected_path:
             raise RunStateError(
                 f"approved round {label} path must be {expected_path}"
@@ -1767,7 +1779,7 @@ def _validate_archive_tree(
 ) -> None:
     """Reject missing, extra, unusual, or case-colliding archive entries."""
 
-    files = read_regular_tree(
+    files = inspect_regular_tree(
         root,
         label="approved bundle archive",
         error_type=RunStateError,
@@ -1781,7 +1793,7 @@ def _validate_archive_tree(
         )
 
 
-def _discover_unapplied_result(
+def _discover_unapplied_review(
     *,
     phase: RunPhase,
     active_round: ActiveRoundRecord | None,
@@ -1789,7 +1801,7 @@ def _discover_unapplied_result(
     current_head_oid: str | None,
     object_format: str,
     review_worktree_available: bool | None,
-) -> tuple[UnappliedReviewResult | None, str | None]:
+) -> UnappliedReviewState:
     """Probe the expected active bundle for a valid local result marker."""
 
     if (
@@ -1797,20 +1809,19 @@ def _discover_unapplied_result(
         or active_round is None
         or not review_worktree_available
     ):
-        return None, None
+        return None
     marker_path = active_round.review_worktree / (
         ".agent-squad-review/local-state.json"
     )
     if not os.path.lexists(marker_path):
-        return None, None
+        return None
     try:
         evidence = load_marker_confirmed_review(
             active_round.review_worktree
         )
     except AgentSquadError as error:
-        return (
-            None,
-            f"marker-confirmed review result is invalid: {error}",
+        return InvalidUnappliedReviewResult(
+            reason=f"marker-confirmed review result is invalid: {error}",
         )
     comparisons = (
         (evidence.request.run_id, active_run_id, "run ID"),
@@ -1838,18 +1849,16 @@ def _discover_unapplied_result(
     )
     for actual, expected, label in comparisons:
         if actual != expected:
-            return (
-                None,
-                f"marker-confirmed review {label} does not match the active "
-                "round",
+            return InvalidUnappliedReviewResult(
+                reason=(
+                    f"marker-confirmed review {label} does not match the "
+                    "active round"
+                ),
             )
-    return (
-        UnappliedReviewResult(
-            result_id=evidence.review.result_id,
-            verdict=evidence.review.verdict,
-            result_path=evidence.review_path,
-        ),
-        None,
+    return UnappliedReviewResult(
+        result_id=evidence.review.result_id,
+        verdict=evidence.review.verdict,
+        result_path=evidence.review_path,
     )
 
 
@@ -2297,19 +2306,21 @@ def _next_action(
     phase: RunPhase,
     *,
     handoff_status: HandoffStatus | None = None,
-    result_id: str | None = None,
-    result_error: str | None = None,
+    unapplied_review: UnappliedReviewState = None,
 ) -> str:
     if phase is RunPhase.IMPLEMENTING:
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:
-        if result_error is not None:
+        if isinstance(unapplied_review, InvalidUnappliedReviewResult):
             return (
                 "inspect the review worktree; its marker-confirmed result "
                 "did not revalidate"
             )
-        if result_id is not None:
-            return f"agent-squad apply-review --result-id {result_id}"
+        if isinstance(unapplied_review, UnappliedReviewResult):
+            return (
+                "agent-squad apply-review --result-id "
+                f"{unapplied_review.result_id}"
+            )
         if handoff_status is HandoffStatus.FAILED:
             return "recover the preserved review-request handoff"
         if handoff_status is HandoffStatus.PENDING:

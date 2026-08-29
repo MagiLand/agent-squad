@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import copy
 from dataclasses import replace
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,9 +17,9 @@ add_src_to_path()
 from agent_squad import runs  # noqa: E402
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
-    BundleArtifact,
     HandoffRecord,
     HandoffStatus,
+    ReviewRoundRecord,
     ReviewVerdict,
     RoundStatus,
     SubmissionMode,
@@ -218,12 +216,26 @@ class ProtocolValueValidationTests(unittest.TestCase):
             "wait for the Reviewer result",
         )
         result_id = "87654321-4321-6789-a234-678912345678"
+        ready = runs.UnappliedReviewResult(
+            result_id=result_id,
+            verdict=ReviewVerdict.APPROVED,
+            result_path=Path("/review.json"),
+        )
         self.assertEqual(
             runs._next_action(
                 runs.RunPhase.REVIEWING,
-                result_id=result_id,
+                unapplied_review=ready,
             ),
             f"agent-squad apply-review --result-id {result_id}",
+        )
+        invalid = runs.InvalidUnappliedReviewResult("invalid marker")
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                unapplied_review=invalid,
+            ),
+            "inspect the review worktree; its marker-confirmed result did "
+            "not revalidate",
         )
         self.assertEqual(
             runs._next_action(
@@ -732,98 +744,82 @@ class RunArtifactValidationTests(unittest.TestCase):
 
 
 class ApprovalArtifactGuardTests(unittest.TestCase):
-    def test_approval_validator_rejects_invalid_round_authority(self) -> None:
-        base = SimpleNamespace(
-            status=RoundStatus.APPLIED,
-            verdict=ReviewVerdict.APPROVED,
-            result_id="87654321-4321-6789-a234-678912345678",
-            head_oid="a" * 40,
-            round_number=1,
-            review_result=object(),
-            review_markdown=object(),
-            review_marker=object(),
-            approval=object(),
-            bundle_archive=(),
+    def _applied_round(self, verdict: str) -> ReviewRoundRecord:
+        digest = "d" * 64
+        result_id = "87654321-4321-6789-a234-678912345678"
+
+        def artifact(path: str) -> dict[str, str]:
+            return {"path": path, "sha256": digest}
+
+        return ReviewRoundRecord.from_dict(
+            {
+                "schema_version": 1,
+                "created_at": "2026-08-29T00:00:00Z",
+                "updated_at": "2026-08-29T00:00:00Z",
+                "run_id": "12345678-1234-5678-9234-567812345678",
+                "round": 1,
+                "mode": "new_revision",
+                "request_id": "abcdefab-1234-5678-9234-567812345678",
+                "result_id": result_id,
+                "verdict": verdict,
+                "base_oid": "b" * 40,
+                "head_oid": "a" * 40,
+                "git_object_format": "sha1",
+                "status": "applied",
+                "review_worktree": "/review",
+                "reviewer": {
+                    "name": "asq-123456781234-r001-reviewer",
+                    "kind": "claude",
+                    "start_args": [],
+                },
+                "artifacts": {
+                    "request": artifact("request.json"),
+                    "implementation_report": artifact(
+                        "implementation-report.md"
+                    ),
+                    "bundle_inputs": [artifact("input/request.json")],
+                    "review_result": artifact("review.json"),
+                    "review_markdown": artifact("review.md"),
+                    "review_marker": artifact("review-marker.json"),
+                    "approval": (
+                        artifact("approval.json")
+                        if verdict == "approved"
+                        else None
+                    ),
+                    "bundle_archive": [
+                        artifact("bundle/input/request.json")
+                    ],
+                },
+                "warnings": [],
+            },
+            label="fixture round",
         )
+
+    def test_approval_validator_keeps_reachable_authority_guards(
+        self,
+    ) -> None:
         cases = (
             (
-                "status",
-                RoundStatus.REVIEWING,
-                "must reference an applied round",
-            ),
-            (
-                "verdict",
-                ReviewVerdict.CHANGES_REQUESTED,
+                self._applied_round("changes_requested"),
+                "a" * 40,
                 "must reference an approved review verdict",
             ),
-            ("result_id", None, "must record its result ID"),
-            ("head_oid", "b" * 40, "approved head does not match"),
+            (
+                self._applied_round("approved"),
+                "b" * 40,
+                "approved head does not match",
+            ),
         )
-        for field, value, message in cases:
-            with self.subTest(field=field):
-                record = copy.copy(base)
-                setattr(record, field, value)
+        for round_record, approved_head_oid, message in cases:
+            with self.subTest(message=message):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._validate_approval_artifacts(
                         run_directory=Path("/run"),
-                        round_record=record,
-                        run_id="87654321-4321-6789-a234-678912345678",
+                        round_record=round_record,
+                        run_id=round_record.run_id,
                         record=SimpleNamespace(),
-                        approved_head_oid="a" * 40,
+                        approved_head_oid=approved_head_oid,
                     )
-
-    def test_approval_validator_requires_each_convenience_artifact(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            run_directory = Path(temporary_directory).resolve()
-            round_directory = run_directory / "rounds/001"
-            round_directory.mkdir(parents=True)
-            artifacts = {}
-            for field, path in (
-                ("review_result", "review.json"),
-                ("review_markdown", "review.md"),
-                ("review_marker", "review-marker.json"),
-                ("approval", "approval.json"),
-            ):
-                content = f"{field}\n".encode("utf-8")
-                (round_directory / path).write_bytes(content)
-                artifacts[field] = BundleArtifact(
-                    path=path,
-                    sha256=hashlib.sha256(content).hexdigest(),
-                )
-            base = SimpleNamespace(
-                status=RoundStatus.APPLIED,
-                verdict=ReviewVerdict.APPROVED,
-                result_id="87654321-4321-6789-a234-678912345678",
-                head_oid="a" * 40,
-                round_number=1,
-                bundle_archive=(),
-                **artifacts,
-            )
-            cases = (
-                ("review_result", "review result"),
-                ("review_markdown", "review Markdown"),
-                ("review_marker", "review marker"),
-                ("approval", "approval"),
-            )
-            for field, label in cases:
-                with self.subTest(field=field):
-                    record = copy.copy(base)
-                    setattr(record, field, None)
-                    with self.assertRaisesRegex(
-                        runs.RunStateError,
-                        f"missing its {label}",
-                    ):
-                        runs._validate_approval_artifacts(
-                            run_directory=run_directory,
-                            round_record=record,
-                            run_id=(
-                                "87654321-4321-6789-a234-678912345678"
-                            ),
-                            record=SimpleNamespace(),
-                            approved_head_oid="a" * 40,
-                        )
 
 
 if __name__ == "__main__":
