@@ -286,8 +286,6 @@ def _prepare_submission_locked(
             head_oid=head_oid,
         )
         round_number = 1
-        previous_review_path = None
-        previous_response_path = None
     else:
         previous = _load_applied_changes_review(
             run_directory,
@@ -299,27 +297,25 @@ def _prepare_submission_locked(
             previous_reviewed_head_oid=previous.review.head_oid,
         )
         round_number = active.current_round + 1
-        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
-        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
 
     report = _capture_report(
         report_path,
         repository.worktree.invocation_directory,
     )
-    if is_first_round:
+    if previous is None:
+        previous_review_path = None
+        previous_response_path = None
         if response_path is not None:
             raise SubmissionError(
                 "the first review round does not accept --response"
             )
     else:
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
         if response_path is None:
             raise SubmissionError(
                 "a submission after changes_requested requires --response "
                 "<response.json>"
-            )
-        if previous is None:
-            raise SubmissionError(
-                "a follow-up submission requires one applied prior review"
             )
         implementation_response = _capture_response(
             response_path,

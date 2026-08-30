@@ -777,6 +777,8 @@ def _inspect_status(
                 ),
             )
         )
+        if phase is RunPhase.IMPLEMENTING:
+            review_worktree_available = None
     approval: ApprovalRecord | None = None
     if phase is RunPhase.APPROVED:
         if round_record is None:

@@ -853,6 +853,14 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 self.assertEqual(status.returncode, 0, status.stderr)
                 self.assertIn("Phase: implementing", status.stdout)
                 self.assertIn(
+                    f"Review worktree: {prepared.review_worktree}",
+                    status.stdout,
+                )
+                self.assertNotIn(
+                    "Review worktree available:",
+                    status.stdout,
+                )
+                self.assertIn(
                     "Next action: agent-squad submit --report <report.md> "
                     "--response <response.json>",
                     status.stdout,
