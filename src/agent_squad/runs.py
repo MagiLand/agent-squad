@@ -777,8 +777,6 @@ def _inspect_status(
                 ),
             )
         )
-        if phase is RunPhase.IMPLEMENTING:
-            review_worktree_available = None
     approval: ApprovalRecord | None = None
     if phase is RunPhase.APPROVED:
         if round_record is None:
@@ -1447,8 +1445,8 @@ def _validate_active_review_artifacts(
     current_head_oid: str | None,
     active_round: ActiveRoundRecord,
     validate_live_worktree: bool = True,
-) -> tuple[bool, ReviewRoundRecord]:
-    """Validate round artifacts and report review-worktree availability."""
+) -> tuple[bool | None, ReviewRoundRecord]:
+    """Validate round artifacts and optionally report worktree availability."""
 
     round_directory = (
         run_directory / "rounds" / f"{current_round:03d}"
@@ -1647,7 +1645,7 @@ def _validate_active_review_artifacts(
 
     review_worktree = active_round.review_worktree
     if not validate_live_worktree:
-        return os.path.lexists(review_worktree), round_record
+        return None, round_record
     if not os.path.lexists(review_worktree):
         return False, round_record
     if review_worktree.is_symlink() or not review_worktree.is_dir():
