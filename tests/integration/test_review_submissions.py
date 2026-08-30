@@ -46,6 +46,7 @@ def _prepare_round(
     root: Path,
     *,
     allowed_generated_paths: tuple[str, ...] = (),
+    review_limit: int | None = None,
     include_tracked_symlink: bool = False,
     include_nested_tracked_file: bool = False,
 ) -> _PreparedRound:
@@ -61,7 +62,7 @@ def _prepare_round(
     )
     if initialized.returncode != 0:
         raise AssertionError(initialized.stderr)
-    if allowed_generated_paths:
+    if allowed_generated_paths or review_limit is not None:
         configuration_path = repository / ".agent-squad/config.json"
         configuration = json.loads(
             configuration_path.read_text(encoding="utf-8")
@@ -69,6 +70,8 @@ def _prepare_round(
         configuration["allowed_generated_paths"] = list(
             allowed_generated_paths
         )
+        if review_limit is not None:
+            configuration["max_completed_change_reviews"] = review_limit
         _write_json_fixture(configuration_path, configuration)
     task = root / "task.md"
     task.write_text(
@@ -833,6 +836,26 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                         (prepared.bundle / "local-state.json").exists()
                     )
                     self.assertEqual(_result_prompt_events(prepared), [])
+
+    def test_previous_response_without_review_is_a_request_shape_error(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            request_value = copy.deepcopy(prepared.request)
+            request_value["previous_review_path"] = None
+            request = ReviewRequest.from_dict(request_value)
+            (
+                prepared.bundle / "input/previous-review.json"
+            ).unlink()
+
+            with self.assertRaisesRegex(
+                ReviewSubmissionError,
+                "^a previous response requires a previous review$",
+            ):
+                _validate_bundle_inputs(prepared.bundle, request)
 
     def test_previous_round_result_id_is_rejected_before_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -666,15 +666,15 @@ def _validate_bundle_inputs(
             bundle_root.joinpath(*previous_response_path.parts),
             "previous response",
         )
+        if previous_review is None:
+            raise ReviewSubmissionError(
+                "a previous response requires a previous review"
+            )
         try:
             response = ReviewResponse.from_dict(
                 response_value,
                 object_format=request.object_format,
             )
-            if previous_review is None:
-                raise ArtifactValidationError(
-                    "a previous response requires a previous review"
-                )
             validate_review_response(
                 response,
                 previous_review,

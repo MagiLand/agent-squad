@@ -12,6 +12,14 @@ from .validation import JsonValidator
 
 
 REVIEWER_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+REVIEW_RESULT_FILE_NAME = "review.json"
+ROUND_RESPONSE_FILE_NAME = "response.json"
+PREVIOUS_REVIEW_BUNDLE_PATH = "input/previous-review.json"
+PREVIOUS_RESPONSE_BUNDLE_PATH = "input/previous-response.json"
+CORRECTION_SUBMIT_NEXT_ACTION = (
+    "agent-squad submit --report <report.md> --response <response.json> "
+    "after addressing every blocking finding"
+)
 
 
 class ArtifactValidationError(ValueError):
@@ -759,15 +767,12 @@ class FindingResponse:
             data["evidence"],
             f"{label}.evidence",
         )
-        verification = _require_string(
-            data["verification"],
-            f"{label}.verification",
-        )
+        verification = data["verification"]
+        if not isinstance(verification, str) or "\x00" in verification:
+            raise ArtifactValidationError(
+                f"{label}.verification must be a string without null bytes"
+            )
         if disposition is ResponseDisposition.FIXED:
-            if not changed_files:
-                raise ArtifactValidationError(
-                    f"{label}.changed_files is required when fixed"
-                )
             if not verification.strip():
                 raise ArtifactValidationError(
                     f"{label}.verification is required when fixed"
@@ -1358,18 +1363,18 @@ class ReviewRequest:
             data["previous_response_path"],
             "review request.previous_response_path",
         )
-        if previous_review_path not in (None, "input/previous-review.json"):
+        if previous_review_path not in (None, PREVIOUS_REVIEW_BUNDLE_PATH):
             raise ArtifactValidationError(
                 "review request.previous_review_path must be "
-                "input/previous-review.json when present"
+                f"{PREVIOUS_REVIEW_BUNDLE_PATH} when present"
             )
         if previous_response_path not in (
             None,
-            "input/previous-response.json",
+            PREVIOUS_RESPONSE_BUNDLE_PATH,
         ):
             raise ArtifactValidationError(
                 "review request.previous_response_path must be "
-                "input/previous-response.json when present"
+                f"{PREVIOUS_RESPONSE_BUNDLE_PATH} when present"
             )
         if round_number == 1 and (
             previous_review_path is not None

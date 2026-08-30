@@ -869,9 +869,18 @@ class ReviewResponseTests(unittest.TestCase):
     ) -> None:
         structural_cases = (
             (
-                "fixed without changed files",
-                lambda data: data["responses"][0].update(changed_files=[]),
-                "changed_files is required when fixed",
+                "non-string verification",
+                lambda data: data["responses"][0].update(
+                    verification=None
+                ),
+                "verification must be a string without null bytes",
+            ),
+            (
+                "null-byte verification",
+                lambda data: data["responses"][0].update(
+                    verification="make test\x00ignored"
+                ),
+                "verification must be a string without null bytes",
             ),
             (
                 "fixed without verification",
@@ -953,6 +962,41 @@ class ReviewResponseTests(unittest.TestCase):
                     message,
                 ):
                     validate_review_response(response, review, mode)
+
+    def test_response_allows_disposition_specific_empty_fields(self) -> None:
+        review = ReviewResult.from_dict(
+            _review_result(),
+            object_format="sha1",
+        )
+
+        fixed_data = _review_response()
+        fixed_data["responses"][0]["changed_files"] = []
+        fixed = ReviewResponse.from_dict(
+            fixed_data,
+            object_format="sha1",
+        )
+        validate_review_response(
+            fixed,
+            review,
+            SubmissionMode.NEW_REVISION,
+        )
+
+        rejected_data = _review_response()
+        rejected_data["responses"][0].update(
+            disposition="rejected",
+            changed_files=[],
+            evidence=["feature.txt:1 already contains the required value"],
+            verification="",
+        )
+        rejected = ReviewResponse.from_dict(
+            rejected_data,
+            object_format="sha1",
+        )
+        validate_review_response(
+            rejected,
+            review,
+            SubmissionMode.RECONSIDERATION,
+        )
 
 
 class ReviewerLocalMarkerTests(unittest.TestCase):

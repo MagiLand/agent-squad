@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .artifacts import HandoffStatus, SubmissionMode
+from .artifacts import HandoffStatus, ReviewVerdict, SubmissionMode
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
@@ -378,11 +378,11 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
     )
     print(f"Round: {result.round_number}")
     print(f"Verdict: {result.verdict.value}")
-    if result.approval_path is None:
-        print(f"Reviewed head: {result.head_oid}")
-    else:
+    if result.verdict is ReviewVerdict.APPROVED:
         print(f"Approved head: {result.head_oid}")
         print(f"Approval authority: {result.approval_path}")
+    else:
+        print(f"Reviewed head: {result.head_oid}")
     print(f"Archived review bundle: {result.bundle_archive}")
     print(f"Next action: {result.next_action}")
     for warning in result.cleanup_warnings:

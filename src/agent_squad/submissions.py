@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import tempfile
+from typing import NoReturn
 import uuid
 
 from . import runs
@@ -20,11 +21,14 @@ from .artifacts import (
     BundleArtifact,
     HandoffRecord,
     HandoffStatus,
+    PREVIOUS_RESPONSE_BUNDLE_PATH,
+    PREVIOUS_REVIEW_BUNDLE_PATH,
     ReviewRequest,
     ReviewResponse,
     ReviewResult,
     ReviewRoundRecord,
     ReviewVerdict,
+    ROUND_RESPONSE_FILE_NAME,
     ResponseDisposition,
     RoundStatus,
     SubmissionMode,
@@ -70,6 +74,18 @@ class SubmissionError(AgentSquadError):
     """Raised when a review request cannot be prepared safely."""
 
 
+def _raise_submission_failure(
+    error: BaseException,
+    message: str,
+) -> NoReturn:
+    """Preserve interruptions while normalizing ordinary failures."""
+
+    if isinstance(error, Exception):
+        raise SubmissionError(message) from error
+    error.add_note(message)
+    raise error
+
+
 _VALIDATOR = JsonValidator(SubmissionError)
 
 
@@ -88,7 +104,6 @@ class ImplementationResponse:
 
     source_path: Path
     content: bytes
-    response: ReviewResponse
 
 
 @dataclass(frozen=True)
@@ -96,7 +111,6 @@ class _AppliedChangesReview:
     """Validated prior review authority used by the next submission."""
 
     round_directory: Path
-    round_record: ReviewRoundRecord
     review: ReviewResult
     review_bytes: bytes
 
@@ -218,13 +232,15 @@ def _prepare_submission_locked(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "submit is allowed only while implementing"
         )
-    unused_run = active.current_round == 0
-    if unused_run and (
+    is_first_round = active.current_round == 0
+    if is_first_round and (
         active.current_head_oid is not None
         or active.active_round is not None
         or active.handoff is not None
     ):
-        raise SubmissionError("unused run state is internally inconsistent")
+        raise SubmissionError(
+            "first-round run state is internally inconsistent"
+        )
     _validate_branch_identity(active.repository, repository.worktree)
 
     report = _capture_report(
@@ -259,7 +275,7 @@ def _prepare_submission_locked(
     additional_bundle_contents: tuple[
         tuple[BundleArtifact, bytes], ...
     ] = ()
-    if unused_run:
+    if is_first_round:
         if response_path is not None:
             raise SubmissionError(
                 "the first review round does not accept --response"
@@ -295,8 +311,8 @@ def _prepare_submission_locked(
             mode=mode,
         )
         round_number = active.current_round + 1
-        previous_review_path = "input/previous-review.json"
-        previous_response_path = "input/previous-response.json"
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
         additional_bundle_contents = (
             (
                 BundleArtifact(
@@ -418,7 +434,7 @@ def _prepare_submission_locked(
     round_directory_committed = False
     run_record_written = False
     response_authority_path = (
-        previous.round_directory / "response.json"
+        previous.round_directory / ROUND_RESPONSE_FILE_NAME
         if previous is not None
         else None
     )
@@ -573,10 +589,7 @@ def _prepare_submission_locked(
                     f"committed after {error}: {inspection_error}; staged "
                     "artifacts were left in place"
                 )
-                if isinstance(error, Exception):
-                    raise SubmissionError(message) from error
-                error.add_note(message)
-                raise
+                _raise_submission_failure(error, message)
             if (
                 next_state_bytes is not None
                 and current_state == next_state_bytes
@@ -585,20 +598,14 @@ def _prepare_submission_locked(
                     "the review request is durable, but state persistence "
                     f"reported an error; retry the command: {error}"
                 )
-                if isinstance(error, Exception):
-                    raise SubmissionError(message) from error
-                error.add_note(message)
-                raise
+                _raise_submission_failure(error, message)
             if current_state != original_state:
                 message = (
                     "authoritative state changed unexpectedly after a "
                     f"review-request failure ({error}); staged artifacts "
                     "were left in place"
                 )
-                if isinstance(error, Exception):
-                    raise SubmissionError(message) from error
-                error.add_note(message)
-                raise
+                _raise_submission_failure(error, message)
         if commit_point_reached:
             if isinstance(error, SubmissionError):
                 raise
@@ -606,10 +613,7 @@ def _prepare_submission_locked(
                 "the review request is durable, but its persisted event "
                 f"could not be recorded: {error}"
             )
-            if isinstance(error, Exception):
-                raise SubmissionError(message) from error
-            error.add_note(message)
-            raise
+            _raise_submission_failure(error, message)
         cleanup_errors: list[str] = []
         if response_written and response_authority_path is not None:
             try:
@@ -681,15 +685,11 @@ def _prepare_submission_locked(
             else ""
         )
         if isinstance(error, AgentSquadError):
-            raise SubmissionError(f"{error}.{cleanup_note}") from error
+            _raise_submission_failure(error, f"{error}.{cleanup_note}")
         message = (
             f"could not prepare the review request: {error}.{cleanup_note}"
         )
-        if isinstance(error, Exception):
-            raise SubmissionError(message) from error
-        if cleanup_note:
-            error.add_note(message)
-        raise
+        _raise_submission_failure(error, message)
 
     return _PreparedSubmission(
         repository=repository,
@@ -857,87 +857,43 @@ def _load_applied_changes_review(
         active.current_round < 1
         or active.current_head_oid is None
         or active_round is None
-        or active_round.status is not RoundStatus.APPLIED
-        or active_round.result_id is None
     ):
         raise SubmissionError(
             "a follow-up submission requires one applied prior review"
         )
-    round_directory = (
-        run_directory / ROUNDS_DIRECTORY_NAME / f"{active.current_round:03d}"
-    )
     try:
-        round_record = ReviewRoundRecord.from_dict(
-            runs.load_json_object(
-                round_directory / ROUND_RECORD_FILE_NAME,
-                "previous applied round record",
-            ),
-            label="previous applied round record",
-        )
-    except (ArtifactValidationError, runs.RunStateError) as error:
-        raise SubmissionError(str(error)) from error
-    comparisons = (
-        (round_record.run_id, active.run_id, "run ID"),
-        (round_record.round_number, active.current_round, "round number"),
-        (round_record.request_id, active_round.request_id, "request ID"),
-        (round_record.result_id, active_round.result_id, "result ID"),
-        (round_record.base_oid, active.base_oid, "base OID"),
-        (round_record.head_oid, active.current_head_oid, "head OID"),
-        (round_record.status, RoundStatus.APPLIED, "status"),
-        (
-            round_record.verdict,
-            ReviewVerdict.CHANGES_REQUESTED,
-            "verdict",
-        ),
-    )
-    for actual, expected, label in comparisons:
-        if actual != expected:
-            raise SubmissionError(
-                f"previous applied round {label} does not match "
-                "authoritative state"
-            )
-    review_artifact = round_record.review_result
-    if review_artifact is None or review_artifact.path != "review.json":
-        raise SubmissionError(
-            "previous applied round must record review.json"
-        )
-    review_bytes = _read_file(round_directory / review_artifact.path)
-    if hashlib.sha256(review_bytes).hexdigest() != review_artifact.sha256:
-        raise SubmissionError(
-            "previous review does not match its authoritative digest"
-        )
-    try:
-        review_value = decode_json(review_bytes.decode("utf-8"))
-        review = ReviewResult.from_dict(
-            review_value,
+        authority = runs.latest_applied_review_before(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round + 1,
+            base_oid=active.base_oid,
             object_format=active.git_object_format,
         )
-    except (
-        UnicodeDecodeError,
-        InvalidJsonError,
-        ArtifactValidationError,
-    ) as error:
-        raise SubmissionError(f"previous review is invalid: {error}") \
-            from error
-    review_comparisons = (
-        (review.run_id, active.run_id, "run ID"),
-        (review.round_number, active.current_round, "round number"),
-        (review.request_id, active_round.request_id, "request ID"),
-        (review.result_id, active_round.result_id, "result ID"),
-        (review.base_oid, active.base_oid, "base OID"),
-        (review.head_oid, active.current_head_oid, "head OID"),
-        (review.verdict, ReviewVerdict.CHANGES_REQUESTED, "verdict"),
-    )
-    for actual, expected, label in review_comparisons:
-        if actual != expected:
-            raise SubmissionError(
-                f"previous review {label} does not match authoritative state"
-            )
+    except runs.RunStateError as error:
+        raise SubmissionError(str(error)) from error
+    round_record = authority.round_record
+    if round_record.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+        raise SubmissionError(
+            "a follow-up submission requires an applied changes_requested "
+            "review"
+        )
+    if round_record.round_number == active.current_round:
+        comparisons = (
+            (round_record.request_id, active_round.request_id, "request ID"),
+            (round_record.result_id, active_round.result_id, "result ID"),
+            (round_record.head_oid, active.current_head_oid, "head OID"),
+            (active_round.status, RoundStatus.APPLIED, "status"),
+        )
+        for actual, expected, label in comparisons:
+            if actual != expected:
+                raise SubmissionError(
+                    f"previous applied round {label} does not match "
+                    "authoritative state"
+                )
     return _AppliedChangesReview(
-        round_directory=round_directory,
-        round_record=round_record,
-        review=review,
-        review_bytes=review_bytes,
+        round_directory=authority.round_directory,
+        review=authority.review,
+        review_bytes=authority.review_bytes,
     )
 
 
@@ -1004,7 +960,6 @@ def _capture_response(
     return ImplementationResponse(
         source_path=resolved,
         content=content,
-        response=response,
     )
 
 

@@ -17,9 +17,10 @@ from .artifacts import (
     ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
-    ReviewResult,
+    CORRECTION_SUBMIT_NEXT_ACTION,
     ReviewRoundRecord,
     ReviewVerdict,
+    REVIEW_RESULT_FILE_NAME,
     RoundStatus,
 )
 from .initialization import (
@@ -51,7 +52,6 @@ from .storage import (
 
 APPROVAL_FILE_NAME = "approval.json"
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
-REVIEW_RESULT_FILE_NAME = "review.json"
 REVIEW_MARKDOWN_FILE_NAME = "review.md"
 REVIEW_MARKER_FILE_NAME = "review-marker.json"
 
@@ -153,6 +153,23 @@ def _apply_review_locked(
         raise ReviewApplicationError(
             "there is no active run with a review result to apply"
         )
+    active_result_id = (
+        active.active_round.result_id
+        if active.active_round is not None
+        else None
+    )
+    if (
+        presented_result_id is not None
+        and presented_result_id != active_result_id
+    ):
+        historical = _historical_result_replay(
+            repository,
+            active,
+            result_id=presented_result_id,
+            next_action=status.next_action,
+        )
+        if historical is not None:
+            return historical
     if active.phase is runs.RunPhase.APPROVED:
         return _approved_replay(
             repository,
@@ -223,6 +240,15 @@ def _apply_review_locked(
         raise ReviewApplicationError(
             f"valid verdict {evidence.review.verdict.value} is not supported "
             "by this command version; no state was changed"
+        )
+    if (
+        evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED
+        and active.review_budget.completed_change_reviews + 1
+        >= active.review_budget.effective_limit
+    ):
+        raise ReviewApplicationError(
+            "review budget exhaustion is not supported by this command "
+            "version; no state was changed"
         )
 
     run_directory = runs.safe_run_directory(
@@ -312,17 +338,12 @@ def _apply_review_locked(
         completed_change_reviews = (
             active.review_budget.completed_change_reviews + 1
         )
-        if completed_change_reviews >= active.review_budget.effective_limit:
-            raise ReviewApplicationError(
-                "review budget exhaustion is not supported by this command "
-                "version; no state was changed"
-            )
         next_budget = replace(
             active.review_budget,
             completed_change_reviews=completed_change_reviews,
         )
         next_phase = runs.RunPhase.IMPLEMENTING
-        next_action = "continue implementing the captured task"
+        next_action = CORRECTION_SUBMIT_NEXT_ACTION
         approved_head_oid = None
 
     next_round = replace(
@@ -400,7 +421,7 @@ def _apply_review_locked(
             f"be recorded: {error}"
         ) from error
 
-    cleanup_warnings = ()
+    cleanup_warnings: tuple[str, ...] = ()
     if evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
         cleanup_warnings = _cleanup_review_resources(repository, active)
     return ApplyReviewResult(
@@ -414,6 +435,90 @@ def _apply_review_locked(
         replayed=False,
         next_action=next_action,
         cleanup_warnings=cleanup_warnings,
+    )
+
+
+def _historical_result_replay(
+    repository: InitializedRepository,
+    active: runs.ActiveRunStatus,
+    *,
+    result_id: str,
+    next_action: str,
+) -> ApplyReviewResult | None:
+    """Return a recorded outcome without repeating authoritative effects."""
+
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    try:
+        matched = runs.find_recorded_review_round(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+            result_id=result_id,
+        )
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
+    if matched is None:
+        return None
+    round_directory, round_record = matched
+    if round_record.status is not RoundStatus.APPLIED:
+        raise ReviewApplicationError(
+            f"result ID {result_id} was previously classified "
+            f"{round_record.status.value} in round "
+            f"{round_record.round_number}; no state was changed"
+        )
+    try:
+        authority = runs.validate_applied_review_round(
+            round_directory=round_directory,
+            round_record=round_record,
+            run_id=active.run_id,
+            round_number=round_record.round_number,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+        )
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
+    _verify_bundle_tree(
+        round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
+        round_record.bundle_archive,
+        label="historical",
+    )
+    approval_path: Path | None = None
+    if authority.review.verdict is ReviewVerdict.APPROVED:
+        approval_artifact = round_record.approval
+        if approval_artifact is None:
+            raise ReviewApplicationError(
+                "historical approved result is missing approval authority"
+            )
+        _verify_recorded_artifact(
+            round_directory,
+            approval_artifact,
+            expected_path=APPROVAL_FILE_NAME,
+            label="historical approval authority",
+        )
+        approval_path = round_directory / APPROVAL_FILE_NAME
+    elif authority.review.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+        raise ReviewApplicationError(
+            f"historical applied verdict {authority.review.verdict.value} "
+            "is not supported by this command version"
+        )
+    return ApplyReviewResult(
+        run_id=active.run_id,
+        round_number=round_record.round_number,
+        result_id=result_id,
+        verdict=authority.review.verdict,
+        head_oid=authority.review.head_oid,
+        approval_path=approval_path,
+        bundle_archive=(
+            round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
+        ),
+        replayed=True,
+        next_action=next_action,
+        cleanup_warnings=(),
     )
 
 
@@ -505,21 +610,24 @@ def _changes_requested_replay(
         repository.control_root,
         active.run_id,
     )
-    round_directory = (
-        run_directory / "rounds" / f"{active.current_round:03d}"
-    )
     try:
-        round_record = ReviewRoundRecord.from_dict(
-            runs.load_json_object(
-                round_directory / "round.json",
-                "applied changes-requested round record",
-            ),
-            label="applied changes-requested round record",
+        matched = runs.find_recorded_review_round(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+            result_id=active_round.result_id,
         )
-    except (ArtifactValidationError, runs.RunStateError) as error:
+    except runs.RunStateError as error:
         raise ReviewApplicationError(str(error)) from error
+    if matched is None:
+        raise ReviewApplicationError(
+            "the applied changes-requested result is missing from "
+            "authoritative round history"
+        )
+    round_directory, round_record = matched
     comparisons = (
-        (round_record.run_id, active.run_id, "run ID"),
         (round_record.round_number, active.current_round, "round number"),
         (round_record.request_id, active_round.request_id, "request ID"),
         (round_record.result_id, active_round.result_id, "result ID"),
@@ -537,36 +645,21 @@ def _changes_requested_replay(
                 f"applied changes-requested round {label} does not match "
                 "authoritative state"
             )
-    review_artifact = round_record.review_result
-    if review_artifact is None:
-        raise ReviewApplicationError(
-            "applied changes-requested round is missing its review artifact"
-        )
-    review_bytes = _verify_recorded_artifact(
-        round_directory,
-        review_artifact,
-        expected_path=REVIEW_RESULT_FILE_NAME,
-        label="applied review result",
-    )
     try:
-        review = ReviewResult.from_dict(
-            decode_json(review_bytes.decode("utf-8")),
+        authority = runs.validate_applied_review_round(
+            round_directory=round_directory,
+            round_record=round_record,
+            run_id=active.run_id,
+            round_number=active.current_round,
+            base_oid=active.base_oid,
             object_format=active.git_object_format,
         )
-    except (
-        UnicodeDecodeError,
-        InvalidJsonError,
-        ArtifactValidationError,
-    ) as error:
-        raise ReviewApplicationError(
-            f"applied review result is invalid: {error}"
-        ) from error
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
+    review = authority.review
     if (
-        review.run_id != active.run_id
-        or review.round_number != active.current_round
-        or review.request_id != active_round.request_id
+        review.request_id != active_round.request_id
         or review.result_id != active_round.result_id
-        or review.head_oid != active.current_head_oid
         or review.verdict is not ReviewVerdict.CHANGES_REQUESTED
     ):
         raise ReviewApplicationError(
@@ -606,7 +699,7 @@ def _changes_requested_replay(
         approval_path=None,
         bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
         replayed=True,
-        next_action="continue implementing the captured task",
+        next_action=CORRECTION_SUBMIT_NEXT_ACTION,
         cleanup_warnings=cleanup_warnings,
     )
 
@@ -995,8 +1088,9 @@ def _verify_recorded_artifact(
     try:
         content = path.read_bytes()
     except OSError as error:
-        raise ReviewApplicationError(f"cannot read {label} {path}: {error}") \
-            from error
+        raise ReviewApplicationError(
+            f"cannot read {label} {path}: {error}"
+        ) from error
     if hashlib.sha256(content).hexdigest() != artifact.sha256:
         raise ReviewApplicationError(
             f"{label} does not match its authoritative digest"
