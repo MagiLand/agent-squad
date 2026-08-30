@@ -772,6 +772,9 @@ def _inspect_status(
                 current_round=current_round,
                 current_head_oid=current_head_oid,
                 active_round=validated_round,
+                validate_live_worktree=(
+                    phase is not RunPhase.IMPLEMENTING
+                ),
             )
         )
     approval: ApprovalRecord | None = None

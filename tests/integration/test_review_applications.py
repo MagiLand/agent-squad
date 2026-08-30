@@ -803,6 +803,82 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             self.assertEqual(round_path.read_bytes(), round_before_replay)
             self.assertEqual(events_path.read_bytes(), events_before_replay)
 
+    def test_changes_requested_status_accepts_retained_clean_worktree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            run(
+                [
+                    "git",
+                    "worktree",
+                    "lock",
+                    str(prepared.review_worktree),
+                ],
+                cwd=prepared.repository,
+            )
+            try:
+                applied = run_cli(
+                    prepared.repository,
+                    "apply-review",
+                    "--result-id",
+                    str(review["result_id"]),
+                    data_home=prepared.data_home,
+                    env_overrides=prepared.environment,
+                )
+
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+                self.assertIn(
+                    "could not remove review worktree",
+                    applied.stderr,
+                )
+                self.assertTrue(prepared.review_worktree.is_dir())
+                self.assertFalse(
+                    (
+                        prepared.review_worktree / ".agent-squad-review"
+                    ).exists()
+                )
+
+                status = run_cli(
+                    prepared.repository,
+                    "status",
+                    data_home=prepared.data_home,
+                    env_overrides=prepared.environment,
+                )
+
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertIn("Phase: implementing", status.stdout)
+                self.assertIn(
+                    "Next action: agent-squad submit --report <report.md> "
+                    "--response <response.json>",
+                    status.stdout,
+                )
+            finally:
+                run(
+                    [
+                        "git",
+                        "worktree",
+                        "unlock",
+                        str(prepared.review_worktree),
+                    ],
+                    cwd=prepared.repository,
+                    check=False,
+                )
+                run(
+                    [
+                        "git",
+                        "worktree",
+                        "remove",
+                        str(prepared.review_worktree),
+                    ],
+                    cwd=prepared.repository,
+                    check=False,
+                )
+
     def test_budget_exhaustion_refuses_before_authoritative_writes(
         self,
     ) -> None:

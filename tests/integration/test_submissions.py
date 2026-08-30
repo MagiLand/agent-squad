@@ -390,6 +390,38 @@ class SubmitCommandTests(unittest.TestCase):
                     )
                     self.assertFalse(fake_log.exists())
 
+    def test_first_round_rejects_response_before_round_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            response = root / "response.json"
+            response.write_text("{}\n", encoding="utf-8")
+            state_path = repository / ".agent-squad/state.json"
+            state_before = state_path.read_bytes()
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertIn(
+                "the first review round does not accept --response",
+                submitted.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            _, run_directory = _artifacts(repository)
+            self.assertFalse((run_directory / "rounds").exists())
+
     def test_sha256_submission_preserves_full_object_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -467,6 +499,9 @@ class SubmitCommandTests(unittest.TestCase):
             repository, _, report, _, _ = _start_run(root)
             _commit_candidate(repository)
             verify = submissions._verify_review_worktree
+            validate_cleanliness = (
+                submissions._validate_implementation_cleanliness
+            )
 
             def verify_then_advance(*args: object, **kwargs: object) -> None:
                 verify(*args, **kwargs)
@@ -478,6 +513,11 @@ class SubmitCommandTests(unittest.TestCase):
                     "_verify_review_worktree",
                     side_effect=verify_then_advance,
                 ),
+                mock.patch.object(
+                    submissions,
+                    "_validate_implementation_cleanliness",
+                    wraps=validate_cleanliness,
+                ) as cleanliness,
                 self.assertRaisesRegex(
                     submissions.SubmissionError,
                     "HEAD changed while the review request was being "
@@ -490,6 +530,7 @@ class SubmitCommandTests(unittest.TestCase):
                     mode="new_revision",
                 )
 
+            self.assertEqual(cleanliness.call_count, 2)
             state, run_directory = _artifacts(repository)
             self.assertEqual(state["phase"], "implementing")
             self.assertFalse((run_directory / "rounds").exists())
@@ -1066,6 +1107,39 @@ class SubmitCommandTests(unittest.TestCase):
                 ).read_bytes(),
                 report_bytes,
             )
+
+    def test_untracked_report_through_symlink_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, _, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            report = repository / "implementation-report.md"
+            report_bytes = b"# Implementation Report\n\nReady for review.\n"
+            report.write_bytes(report_bytes)
+            repository_alias = root / "repository-alias"
+            repository_alias.symlink_to(repository, target_is_directory=True)
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(repository_alias / report.name),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            state, _ = _artifacts(repository)
+            review_worktree = Path(
+                state["active_round"]["review_worktree"]
+            )
+            captured_report = (
+                review_worktree
+                / ".agent-squad-review/input/implementation-report.md"
+            )
+            self.assertEqual(captured_report.read_bytes(), report_bytes)
 
     def test_status_rejects_tampered_round_and_bundle_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

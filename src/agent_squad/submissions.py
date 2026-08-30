@@ -317,7 +317,10 @@ def _prepare_submission_locked(
                 "a submission after changes_requested requires --response "
                 "<response.json>"
             )
-        assert previous is not None
+        if previous is None:
+            raise SubmissionError(
+                "a follow-up submission requires one applied prior review"
+            )
         implementation_response = _capture_response(
             response_path,
             repository.worktree.invocation_directory,
@@ -349,10 +352,6 @@ def _prepare_submission_locked(
     artifact_sources = [report.source_path]
     if implementation_response is not None:
         artifact_sources.append(implementation_response.source_path)
-    _validate_implementation_cleanliness(
-        repository,
-        artifact_sources=tuple(artifact_sources),
-    )
     warnings = _sensitive_change_warnings(
         repository.worktree.root,
         active.base_oid,
@@ -828,7 +827,7 @@ def _submission_artifact_candidate(
     """Resolve an artifact name for the pre-ingest clean-tree scan."""
 
     candidate = path if path.is_absolute() else invocation_directory / path
-    return Path(os.path.abspath(candidate))
+    return candidate.resolve(strict=False)
 
 
 def _capture_report(
