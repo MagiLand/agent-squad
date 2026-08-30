@@ -12,14 +12,13 @@ from .validation import JsonValidator
 
 
 REVIEWER_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+APPROVAL_FILE_NAME = "approval.json"
+REVIEW_MARKDOWN_FILE_NAME = "review.md"
+REVIEW_MARKER_FILE_NAME = "review-marker.json"
 REVIEW_RESULT_FILE_NAME = "review.json"
 ROUND_RESPONSE_FILE_NAME = "response.json"
 PREVIOUS_REVIEW_BUNDLE_PATH = "input/previous-review.json"
 PREVIOUS_RESPONSE_BUNDLE_PATH = "input/previous-response.json"
-CORRECTION_SUBMIT_NEXT_ACTION = (
-    "agent-squad submit --report <report.md> --response <response.json> "
-    "after addressing every blocking finding"
-)
 
 
 class ArtifactValidationError(ValueError):

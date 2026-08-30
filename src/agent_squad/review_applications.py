@@ -14,10 +14,12 @@ import uuid
 
 from . import runs
 from .artifacts import (
+    APPROVAL_FILE_NAME,
     ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
-    CORRECTION_SUBMIT_NEXT_ACTION,
+    REVIEW_MARKDOWN_FILE_NAME,
+    REVIEW_MARKER_FILE_NAME,
     ReviewRoundRecord,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
@@ -50,10 +52,7 @@ from .storage import (
 )
 
 
-APPROVAL_FILE_NAME = "approval.json"
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
-REVIEW_MARKDOWN_FILE_NAME = "review.md"
-REVIEW_MARKER_FILE_NAME = "review-marker.json"
 
 
 class ReviewApplicationError(AgentSquadError):
@@ -343,7 +342,7 @@ def _apply_review_locked(
             completed_change_reviews=completed_change_reviews,
         )
         next_phase = runs.RunPhase.IMPLEMENTING
-        next_action = CORRECTION_SUBMIT_NEXT_ACTION
+        next_action = runs.CORRECTION_SUBMIT_NEXT_ACTION
         approved_head_oid = None
 
     next_round = replace(
@@ -475,10 +474,7 @@ def _historical_result_replay(
         authority = runs.validate_applied_review_round(
             round_directory=round_directory,
             round_record=round_record,
-            run_id=active.run_id,
             round_number=round_record.round_number,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
         )
     except runs.RunStateError as error:
         raise ReviewApplicationError(str(error)) from error
@@ -649,10 +645,7 @@ def _changes_requested_replay(
         authority = runs.validate_applied_review_round(
             round_directory=round_directory,
             round_record=round_record,
-            run_id=active.run_id,
             round_number=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
         )
     except runs.RunStateError as error:
         raise ReviewApplicationError(str(error)) from error
@@ -699,7 +692,7 @@ def _changes_requested_replay(
         approval_path=None,
         bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
         replayed=True,
-        next_action=CORRECTION_SUBMIT_NEXT_ACTION,
+        next_action=runs.CORRECTION_SUBMIT_NEXT_ACTION,
         cleanup_warnings=cleanup_warnings,
     )
 
@@ -1075,7 +1068,7 @@ def _verify_recorded_artifact(
     *,
     expected_path: str,
     label: str,
-) -> bytes:
+) -> None:
     if artifact.path != expected_path:
         raise ReviewApplicationError(
             f"{label} path must be {expected_path}"
@@ -1095,7 +1088,6 @@ def _verify_recorded_artifact(
         raise ReviewApplicationError(
             f"{label} does not match its authoritative digest"
         )
-    return content
 
 
 def _persist_authoritative_transition(

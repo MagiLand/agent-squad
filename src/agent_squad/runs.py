@@ -16,14 +16,16 @@ import uuid
 
 from .artifacts import (
     ActiveRoundRecord,
+    APPROVAL_FILE_NAME,
     ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
-    CORRECTION_SUBMIT_NEXT_ACTION,
     HandoffRecord,
     HandoffStatus,
     PREVIOUS_RESPONSE_BUNDLE_PATH,
     PREVIOUS_REVIEW_BUNDLE_PATH,
+    REVIEW_MARKDOWN_FILE_NAME,
+    REVIEW_MARKER_FILE_NAME,
     ReviewRequest,
     ReviewResult,
     ReviewRoundRecord,
@@ -63,6 +65,11 @@ RUN_RECORD_FILE_NAME = "run.json"
 TASK_FILE_NAME = "task.md"
 EVENT_LOG_FILE_NAME = "events.jsonl"
 CONTEXT_DIRECTORY_NAME = "context"
+CORRECTION_SUBMIT_NEXT_ACTION = (
+    "agent-squad submit --report <report.md> --response <response.json> "
+    "--mode <new_revision|reconsideration> after addressing every "
+    "blocking finding"
+)
 
 
 class RunError(AgentSquadError):
@@ -788,8 +795,15 @@ def _inspect_status(
         object_format=record.object_format,
         review_worktree_available=review_worktree_available,
     )
+    correction_required = (
+        phase is RunPhase.IMPLEMENTING
+        and round_record is not None
+        and round_record.status is RoundStatus.APPLIED
+        and round_record.verdict is ReviewVerdict.CHANGES_REQUESTED
+    )
     next_action = _next_action(
         phase,
+        correction_required=correction_required,
         handoff_status=handoff.status if handoff is not None else None,
         unapplied_review=unapplied_review,
     )
@@ -1619,6 +1633,13 @@ def _validate_active_review_artifacts(
                     f"bundle-input digest: {error}"
                 ) from error
 
+    if round_record.status is RoundStatus.APPLIED:
+        validate_applied_review_round(
+            round_directory=round_directory,
+            round_record=round_record,
+            round_number=current_round,
+        )
+
     review_worktree = active_round.review_worktree
     if not validate_live_worktree:
         return os.path.lexists(review_worktree), round_record
@@ -1667,10 +1688,7 @@ def latest_applied_review_before(
             return validate_applied_review_round(
                 round_directory=round_directory,
                 round_record=round_record,
-                run_id=run_id,
                 round_number=round_number,
-                base_oid=base_oid,
-                object_format=object_format,
             )
     raise RunStateError(
         "a correction-round request has no previous applied review"
@@ -1714,32 +1732,24 @@ def validate_applied_review_round(
     *,
     round_directory: Path,
     round_record: ReviewRoundRecord,
-    run_id: str,
     round_number: int,
-    base_oid: str,
-    object_format: str,
 ) -> AppliedReviewAuthority:
     """Validate an applied round and its canonical review evidence."""
 
-    comparisons = (
-        (round_record.run_id, run_id, "run ID"),
-        (round_record.round_number, round_number, "round number"),
-        (round_record.base_oid, base_oid, "base OID"),
-        (round_record.object_format, object_format, "object format"),
-        (round_record.status, RoundStatus.APPLIED, "status"),
-    )
-    for actual, expected, label in comparisons:
-        if actual != expected:
-            raise RunStateError(
-                f"applied round {round_number} {label} does not match "
-                "authoritative history"
-            )
+    if round_record.status is not RoundStatus.APPLIED:
+        raise RunStateError(
+            f"applied round {round_number} status does not match "
+            "authoritative history"
+        )
     review_artifact = round_record.review_result
-    if review_artifact is None or (
-        review_artifact.path != REVIEW_RESULT_FILE_NAME
-    ):
+    if review_artifact is None:
         raise RunStateError(
             f"applied round {round_number} must record "
+            f"{REVIEW_RESULT_FILE_NAME}"
+        )
+    if review_artifact.path != REVIEW_RESULT_FILE_NAME:
+        raise RunStateError(
+            f"applied round {round_number} review result path must be "
             f"{REVIEW_RESULT_FILE_NAME}"
         )
     review_path = _captured_path(
@@ -1756,7 +1766,7 @@ def validate_applied_review_round(
         review_bytes = review_path.read_bytes()
         review = ReviewResult.from_dict(
             decode_json(review_bytes.decode("utf-8")),
-            object_format=object_format,
+            object_format=round_record.object_format,
         )
     except OSError as error:
         raise RunStateError(
@@ -1865,19 +1875,19 @@ def _validate_approval_artifacts(
     required_artifacts = {
         "review result": (
             cast(BundleArtifact, round_record.review_result),
-            "review.json",
+            REVIEW_RESULT_FILE_NAME,
         ),
         "review Markdown": (
             cast(BundleArtifact, round_record.review_markdown),
-            "review.md",
+            REVIEW_MARKDOWN_FILE_NAME,
         ),
         "review marker": (
             cast(BundleArtifact, round_record.review_marker),
-            "review-marker.json",
+            REVIEW_MARKER_FILE_NAME,
         ),
         "approval": (
             cast(BundleArtifact, round_record.approval),
-            "approval.json",
+            APPROVAL_FILE_NAME,
         ),
     }
     resolved: dict[str, tuple[BundleArtifact, Path]] = {}
@@ -2234,7 +2244,7 @@ def _validate_active_state_shape(
     handoff: HandoffRecord | None,
     object_format: str,
 ) -> ActiveRoundRecord | None:
-    """Validate state relationships and return a reviewing round."""
+    """Validate state relationships and return a round for artifact checks."""
 
     if current_head_oid is not None:
         _require_oid(current_head_oid, object_format, "state.current_head_oid")
@@ -2279,7 +2289,7 @@ def _validate_active_state_shape(
             raise RunStateError(
                 "an implementing run must record a closed active round"
             )
-        return None
+        return closed_round
     if phase is RunPhase.APPROVED:
         if current_round < 1 or current_head_oid is None:
             raise RunStateError(
@@ -2594,11 +2604,12 @@ def _idle_status(identity: RepositoryIdentity) -> RepositoryStatus:
 def _next_action(
     phase: RunPhase,
     *,
+    correction_required: bool = False,
     handoff_status: HandoffStatus | None = None,
     unapplied_review: UnappliedReviewState = None,
 ) -> str:
     if phase is RunPhase.IMPLEMENTING:
-        if handoff_status is not None:
+        if correction_required:
             return CORRECTION_SUBMIT_NEXT_ACTION
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:

@@ -91,7 +91,7 @@ agent-squad apply-review --result-id <result-id>
 
 Application independently repeats every identity, schema, hash, head, tracked-integrity, and Reviewer check. It archives the complete bundle before changing authoritative state, and repeating the same application does not duplicate the outcome, budget effect, or event.
 
-For `changes_requested`, application increments the consumed review budget once, returns the run to `implementing`, and safely removes the archived round's detached worktree. Address every blocking finding in a versioned `response.json`. A `fixed` disposition requires a new committed revision, rationale, changed-file list, and verification command. A `rejected` disposition requires concrete evidence.
+For `changes_requested`, application increments the consumed review budget once, returns the run to `implementing`, and safely removes the archived round's detached worktree. Address every blocking finding in a versioned `response.json`. A `fixed` disposition requires a new committed revision, rationale, and a verification command. A `rejected` disposition requires concrete evidence.
 
 Submit the correction with both artifacts:
 

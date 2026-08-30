@@ -107,15 +107,6 @@ class ImplementationResponse:
 
 
 @dataclass(frozen=True)
-class _AppliedChangesReview:
-    """Validated prior review authority used by the next submission."""
-
-    round_directory: Path
-    review: ReviewResult
-    review_bytes: bytes
-
-
-@dataclass(frozen=True)
 class SubmitResult:
     """Durable outcome of preparing and attempting one review request."""
 
@@ -243,9 +234,22 @@ def _prepare_submission_locked(
         )
     _validate_branch_identity(active.repository, repository.worktree)
 
-    report = _capture_report(
-        report_path,
-        repository.worktree.invocation_directory,
+    artifact_candidates = [
+        _submission_artifact_candidate(
+            report_path,
+            repository.worktree.invocation_directory,
+        )
+    ]
+    if response_path is not None:
+        artifact_candidates.append(
+            _submission_artifact_candidate(
+                response_path,
+                repository.worktree.invocation_directory,
+            )
+        )
+    _validate_implementation_cleanliness(
+        repository,
+        artifact_sources=tuple(artifact_candidates),
     )
     object_format = _current_object_format(repository.worktree.root)
     if object_format != active.git_object_format:
@@ -270,16 +274,12 @@ def _prepare_submission_locked(
     run_record = runs.load_json_object(run_record_path, "active run record")
     original_run_record = run_record_path.read_bytes()
 
-    previous: _AppliedChangesReview | None = None
+    previous: runs.AppliedReviewAuthority | None = None
     implementation_response: ImplementationResponse | None = None
     additional_bundle_contents: tuple[
         tuple[BundleArtifact, bytes], ...
     ] = ()
     if is_first_round:
-        if response_path is not None:
-            raise SubmissionError(
-                "the first review round does not accept --response"
-            )
         _validate_first_submission_mode(
             mode,
             base_oid=active.base_oid,
@@ -298,11 +298,26 @@ def _prepare_submission_locked(
             head_oid=head_oid,
             previous_reviewed_head_oid=previous.review.head_oid,
         )
+        round_number = active.current_round + 1
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
+
+    report = _capture_report(
+        report_path,
+        repository.worktree.invocation_directory,
+    )
+    if is_first_round:
+        if response_path is not None:
+            raise SubmissionError(
+                "the first review round does not accept --response"
+            )
+    else:
         if response_path is None:
             raise SubmissionError(
                 "a submission after changes_requested requires --response "
                 "<response.json>"
             )
+        assert previous is not None
         implementation_response = _capture_response(
             response_path,
             repository.worktree.invocation_directory,
@@ -310,9 +325,6 @@ def _prepare_submission_locked(
             previous_review=previous.review,
             mode=mode,
         )
-        round_number = active.current_round + 1
-        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
-        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
         additional_bundle_contents = (
             (
                 BundleArtifact(
@@ -606,7 +618,7 @@ def _prepare_submission_locked(
                     "were left in place"
                 )
                 _raise_submission_failure(error, message)
-        if commit_point_reached:
+        else:
             if isinstance(error, SubmissionError):
                 raise
             message = (
@@ -809,6 +821,16 @@ def _validate_branch_identity(
         )
 
 
+def _submission_artifact_candidate(
+    path: Path,
+    invocation_directory: Path,
+) -> Path:
+    """Resolve an artifact name for the pre-ingest clean-tree scan."""
+
+    candidate = path if path.is_absolute() else invocation_directory / path
+    return Path(os.path.abspath(candidate))
+
+
 def _capture_report(
     path: Path,
     invocation_directory: Path,
@@ -851,7 +873,7 @@ def _capture_report(
 def _load_applied_changes_review(
     run_directory: Path,
     active: runs.ActiveRunStatus,
-) -> _AppliedChangesReview:
+) -> runs.AppliedReviewAuthority:
     active_round = active.active_round
     if (
         active.current_round < 1
@@ -890,11 +912,7 @@ def _load_applied_changes_review(
                     f"previous applied round {label} does not match "
                     "authoritative state"
                 )
-    return _AppliedChangesReview(
-        round_directory=authority.round_directory,
-        review=authority.review,
-        review_bytes=authority.review_bytes,
-    )
+    return authority
 
 
 def _capture_response(
