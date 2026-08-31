@@ -9,7 +9,7 @@ import sys
 
 from . import __version__
 from .artifacts import HandoffStatus, ReviewVerdict, SubmissionMode
-from .handoffs import retry_handoff
+from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
@@ -21,6 +21,14 @@ from .runs import (
     start_run,
 )
 from .submissions import submit_candidate
+
+
+_RECOVERY_ACTION_LABELS = {
+    HandoffRecoveryAction.ADOPTED: "adopted existing request",
+    HandoffRecoveryAction.REPROMPTED: "re-prompted Reviewer",
+    HandoffRecoveryAction.RELAUNCHED: "relaunched Reviewer",
+    HandoffRecoveryAction.RESULT_READY: "use marker-confirmed result",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -296,6 +304,7 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                 "Marker-confirmed unapplied result: present but invalid: "
                 f"{unapplied_review.reason}"
             )
+            print("Recovery command: agent-squad retry-handoff")
         elif isinstance(unapplied_review, IncompleteReviewOutput):
             print("Marker-confirmed unapplied result: none")
             print("Unmarked review output: present and incomplete")
@@ -305,9 +314,11 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                     str(path) for path in unapplied_review.output_paths
                 )
             )
+            print("Recovery command: agent-squad retry-handoff")
         elif unapplied_review is None:
             print("Marker-confirmed unapplied result: none")
             print("Unmarked review output: none")
+            print("Recovery command: agent-squad retry-handoff")
         else:
             print("Marker-confirmed unapplied result: ready")
             print(f"Result ID: {unapplied_review.result_id}")
@@ -315,11 +326,6 @@ def _run_status(_arguments: argparse.Namespace) -> int:
             print(f"Result path: {unapplied_review.result_path}")
             print("Result authoritative: no")
             print(f"Apply command: {status.next_action}")
-        if unapplied_review is None or isinstance(
-            unapplied_review,
-            IncompleteReviewOutput,
-        ):
-            print("Recovery command: agent-squad retry-handoff")
     budget = run.review_budget
     print(
         "Review budget: "
@@ -429,7 +435,10 @@ def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
     print(f"Reviewer: {result.reviewer_name}")
     print(f"Request handoff: {result.handoff_status.value}")
     if result.action is not None:
-        print(f"Recovery action: {result.action.value}")
+        print(
+            "Recovery action: "
+            f"{_RECOVERY_ACTION_LABELS[result.action]}"
+        )
     if result.result_id is not None:
         next_action = (
             "agent-squad apply-review --result-id "

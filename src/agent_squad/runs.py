@@ -2642,10 +2642,7 @@ def _next_action(
         if isinstance(unapplied_review, IncompleteReviewOutput):
             return "agent-squad retry-handoff"
         if isinstance(unapplied_review, InvalidUnappliedReviewResult):
-            return (
-                "inspect the review worktree; its marker-confirmed result "
-                "did not revalidate"
-            )
+            return "agent-squad retry-handoff"
         if isinstance(unapplied_review, UnappliedReviewResult):
             return (
                 "agent-squad apply-review --result-id "

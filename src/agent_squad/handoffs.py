@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import copy
 from dataclasses import dataclass
 from enum import StrEnum
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from . import runs
 from .artifacts import (
+    ActiveRoundRecord,
     ArtifactValidationError,
     HandoffRecord,
     HandoffStatus,
@@ -20,7 +22,11 @@ from .herdr import (
     HerdrInstallation,
     format_herdr_error,
 )
-from .initialization import AgentSquadError, load_initialized_repository
+from .initialization import (
+    AgentSquadError,
+    REVIEW_DIRECTORY_NAME,
+    load_initialized_repository,
+)
 from .storage import (
     append_event,
     atomic_write,
@@ -37,10 +43,10 @@ class HandoffRecoveryError(AgentSquadError):
 class HandoffRecoveryAction(StrEnum):
     """Observable way in which one logical handoff was recovered."""
 
-    ADOPTED = "adopted existing request"
-    REPROMPTED = "re-prompted Reviewer"
-    RELAUNCHED = "relaunched Reviewer"
-    RESULT_READY = "use marker-confirmed result"
+    ADOPTED = "adopted"
+    REPROMPTED = "reprompted"
+    RELAUNCHED = "relaunched"
+    RESULT_READY = "result_ready"
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,107 @@ class RetryHandoffResult:
     handoff_error: str | None
     action: HandoffRecoveryAction | None
     result_id: str | None
+
+
+def review_request_handoff_record(
+    *,
+    round_number: int,
+    target: str,
+    status: HandoffStatus,
+    timestamp: str,
+    error: str | None,
+    installation: HerdrInstallation | None,
+) -> HandoffRecord:
+    """Build the canonical durable state for one request handoff."""
+
+    return HandoffRecord(
+        round_number=round_number,
+        status=status,
+        target=target,
+        last_error=error,
+        updated_at=timestamp,
+        herdr_version=(
+            installation.version if installation is not None else None
+        ),
+        herdr_protocol=(
+            installation.protocol if installation is not None else None
+        ),
+    )
+
+
+def record_review_request_handoff(
+    control_root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+    request_id: str,
+    target: str,
+    status: HandoffStatus,
+    error: str | None,
+    installation: HerdrInstallation | None,
+    event_name: str,
+    error_type: type[AgentSquadError],
+    extra_event_fields: Mapping[str, object] | None = None,
+) -> None:
+    """Persist one request handoff and its ordered event record."""
+
+    timestamp = utc_timestamp()
+    handoff = review_request_handoff_record(
+        round_number=round_number,
+        target=target,
+        status=status,
+        timestamp=timestamp,
+        error=error,
+        installation=installation,
+    )
+    state_path = control_root / runs.STATE_FILE_NAME
+    state = runs.load_json_object(state_path, "authoritative state")
+    if state.get("active_run_id") != run_id:
+        raise error_type(
+            "active run changed before the review handoff was recorded"
+        )
+    state_round = state.get("active_round")
+    if not isinstance(state_round, dict) or (
+        state_round.get("request_id") != request_id
+    ):
+        raise error_type(
+            "active round changed before the review handoff was recorded"
+        )
+
+    next_state = copy.deepcopy(state)
+    next_state["updated_at"] = timestamp
+    next_state["handoff"] = handoff.to_dict()
+    try:
+        atomic_write(state_path, encode_json(next_state), mode=0o600)
+    except OSError as write_error:
+        raise error_type(
+            f"could not record review handoff state: {write_error}"
+        ) from write_error
+
+    event: dict[str, object] = {
+        "timestamp": timestamp,
+        "event": event_name,
+        "run_id": run_id,
+        "round": round_number,
+        "request_id": request_id,
+        "target": target,
+        "error": error,
+    }
+    if extra_event_fields is not None:
+        event.update(extra_event_fields)
+    try:
+        append_event(
+            control_root
+            / runs.RUNS_DIRECTORY_NAME
+            / run_id
+            / runs.EVENT_LOG_FILE_NAME,
+            event,
+        )
+    except OSError as event_error:
+        raise error_type(
+            "the handoff state is durable, but its event could not be "
+            f"recorded: {event_error}"
+        ) from event_error
 
 
 def retry_handoff(
@@ -100,22 +207,21 @@ def retry_handoff(
                     action=HandoffRecoveryAction.RESULT_READY,
                     result_id=active.unapplied_review.result_id,
                 )
-            if isinstance(
-                active.unapplied_review,
-                runs.InvalidUnappliedReviewResult,
-            ):
-                raise HandoffRecoveryError(
-                    "the active round has marker-confirmed output that did "
-                    "not revalidate; inspect agent-squad status before "
-                    "retrying"
-                )
             if not active.review_worktree_available:
                 raise HandoffRecoveryError(
                     "the expected review worktree is unavailable; refusing "
                     "to create replacement review authority"
                 )
 
-            request = _load_active_request(repository.control_root, active)
+            request = _load_active_request(
+                repository.control_root,
+                run_id=active.run_id,
+                active_round=active_round,
+            )
+            prompt = format_review_request_prompt(
+                request,
+                active_round.review_worktree,
+            )
             client = herdr_client or HerdrClient(repository.worktree.root)
             installation: HerdrInstallation | None = None
             try:
@@ -127,11 +233,10 @@ def retry_handoff(
                     reviewer_name=active_round.reviewer_name,
                     reviewer_kind=active.reviewer_kind,
                     review_worktree=active_round.review_worktree,
-                    request_id=active_round.request_id,
                 )
                 if (
-                    probe.session is not None
-                    and probe.request_seen
+                    probe.history is not None
+                    and prompt in probe.history
                     and handoff.status is not HandoffStatus.SENT
                 ):
                     action = HandoffRecoveryAction.ADOPTED
@@ -141,10 +246,7 @@ def retry_handoff(
                         reviewer_kind=active.reviewer_kind,
                         start_args=active.reviewer_start_args,
                         review_worktree=active_round.review_worktree,
-                        prompt=format_review_request_prompt(
-                            request,
-                            active_round.review_worktree,
-                        ),
+                        prompt=prompt,
                     )
                     action = (
                         HandoffRecoveryAction.REPROMPTED
@@ -156,13 +258,15 @@ def retry_handoff(
                 _record_handoff(
                     repository.control_root,
                     active=active,
+                    active_round=active_round,
                     status=HandoffStatus.FAILED,
                     error=detail,
                     installation=installation,
                     action=None,
                 )
-                return _result(
+                return _recovery_result(
                     active,
+                    active_round,
                     status=HandoffStatus.FAILED,
                     error=detail,
                     action=None,
@@ -171,13 +275,15 @@ def retry_handoff(
             _record_handoff(
                 repository.control_root,
                 active=active,
+                active_round=active_round,
                 status=HandoffStatus.SENT,
                 error=None,
                 installation=installation,
                 action=action,
             )
-            return _result(
+            return _recovery_result(
                 active,
+                active_round,
                 status=HandoffStatus.SENT,
                 error=None,
                 action=action,
@@ -195,6 +301,7 @@ def _record_handoff(
     control_root: Path,
     *,
     active: runs.ActiveRunStatus,
+    active_round: ActiveRoundRecord,
     status: HandoffStatus,
     error: str | None,
     installation: HerdrInstallation | None,
@@ -202,71 +309,25 @@ def _record_handoff(
 ) -> None:
     """Persist one recovery attempt against the unchanged logical request."""
 
-    active_round = active.active_round
-    if active_round is None:
-        raise HandoffRecoveryError("the active review round disappeared")
-    timestamp = utc_timestamp()
-    handoff = HandoffRecord(
+    record_review_request_handoff(
+        control_root,
+        run_id=active.run_id,
         round_number=active_round.round_number,
-        status=status,
+        request_id=active_round.request_id,
         target=active_round.reviewer_name,
-        last_error=error,
-        updated_at=timestamp,
-        herdr_version=(
-            installation.version if installation is not None else None
+        status=status,
+        error=error,
+        installation=installation,
+        event_name=(
+            "review_request_recovered"
+            if status is HandoffStatus.SENT
+            else "review_request_recovery_failed"
         ),
-        herdr_protocol=(
-            installation.protocol if installation is not None else None
-        ),
+        error_type=HandoffRecoveryError,
+        extra_event_fields={
+            "action": action.value if action is not None else None,
+        },
     )
-    state_path = control_root / runs.STATE_FILE_NAME
-    state = runs.load_json_object(state_path, "authoritative state")
-    if state.get("active_run_id") != active.run_id:
-        raise HandoffRecoveryError(
-            "active run changed before recovery could be recorded"
-        )
-    state_round = state.get("active_round")
-    if not isinstance(state_round, dict) or (
-        state_round.get("request_id") != active_round.request_id
-    ):
-        raise HandoffRecoveryError(
-            "active round changed before recovery could be recorded"
-        )
-    next_state = copy.deepcopy(state)
-    next_state["updated_at"] = timestamp
-    next_state["handoff"] = handoff.to_dict()
-    try:
-        atomic_write(state_path, encode_json(next_state), mode=0o600)
-    except OSError as write_error:
-        raise HandoffRecoveryError(
-            f"could not record review handoff recovery: {write_error}"
-        ) from write_error
-    try:
-        append_event(
-            control_root
-            / runs.RUNS_DIRECTORY_NAME
-            / active.run_id
-            / runs.EVENT_LOG_FILE_NAME,
-            {
-                "timestamp": timestamp,
-                "event": (
-                    "review_request_recovered"
-                    if status is HandoffStatus.SENT
-                    else "review_request_recovery_failed"
-                ),
-                "run_id": active.run_id,
-                "round": active_round.round_number,
-                "request_id": active_round.request_id,
-                "target": active_round.reviewer_name,
-                "action": action.value if action is not None else None,
-                "error": error,
-            },
-        )
-    except OSError as event_error:
-        raise HandoffRecoveryError(
-            "the recovered handoff state is durable, but its event could "
-            f"not be recorded: {event_error}"
-        ) from event_error
 
 
 def format_review_request_prompt(
@@ -276,7 +337,7 @@ def format_review_request_prompt(
     """Return the canonical short control prompt for one review request."""
 
     request_path = (
-        review_worktree / ".agent-squad-review/input/request.json"
+        review_worktree / REVIEW_DIRECTORY_NAME / "input" / "request.json"
     )
     return (
         "AGENT_SQUAD/0.4.4 REVIEW_REQUEST\n\n"
@@ -298,17 +359,16 @@ def format_review_request_prompt(
 
 def _load_active_request(
     control_root: Path,
-    active: runs.ActiveRunStatus,
+    *,
+    run_id: str,
+    active_round: ActiveRoundRecord,
 ) -> ReviewRequest:
     """Reload the already-validated immutable request for prompt reuse."""
 
-    active_round = active.active_round
-    if active_round is None:
-        raise HandoffRecoveryError("the active review request is incomplete")
     request_path = (
         control_root
         / runs.RUNS_DIRECTORY_NAME
-        / active.run_id
+        / run_id
         / "rounds"
         / f"{active_round.round_number:03d}"
         / "request.json"
@@ -323,16 +383,14 @@ def _load_active_request(
         ) from error
 
 
-def _result(
+def _recovery_result(
     active: runs.ActiveRunStatus,
+    active_round: ActiveRoundRecord,
     *,
     status: HandoffStatus,
     error: str | None,
     action: HandoffRecoveryAction | None,
 ) -> RetryHandoffResult:
-    active_round = active.active_round
-    if active_round is None:
-        raise HandoffRecoveryError("the active review round disappeared")
     return RetryHandoffResult(
         run_id=active.run_id,
         round_number=active_round.round_number,

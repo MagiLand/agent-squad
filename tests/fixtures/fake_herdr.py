@@ -162,6 +162,12 @@ def main() -> int:
         if not agent_path.is_file():
             return _error("agent_not_found", "fake Reviewer not found")
         reviewer = json.loads(agent_path.read_text(encoding="utf-8"))
+        if (
+            os.environ.get("FAKE_HERDR_AGENT_GONE") == "1"
+            and reviewer.get("name") == arguments[2]
+        ):
+            agent_path.unlink()
+            return _error("agent_not_found", "fake Reviewer disappeared")
         agent = _agent_for_target(arguments[2], reviewer, state_root)
         if agent is None:
             return _error("agent_not_found", "fake agent not found")

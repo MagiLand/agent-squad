@@ -38,6 +38,35 @@ def _actual_herdr_invocations(environment: dict[str, str]) -> list[list[str]]:
     ]
 
 
+def _invocations_of(
+    environment: dict[str, str],
+    *prefix: str,
+) -> list[list[str]]:
+    """Return real fake-Herdr calls beginning with one command prefix."""
+
+    return [
+        arguments
+        for arguments in _actual_herdr_invocations(environment)
+        if _is_invocation(arguments, *prefix)
+    ]
+
+
+def _is_invocation(arguments: list[str], *prefix: str) -> bool:
+    return arguments[:len(prefix)] == list(prefix)
+
+
+def _assert_single_round(
+    test_case: unittest.TestCase,
+    run_directory: Path,
+) -> None:
+    """Assert recovery retained the one authoritative review round."""
+
+    test_case.assertEqual(
+        [path.name for path in (run_directory / "rounds").iterdir()],
+        ["001"],
+    )
+
+
 class ReviewHandoffRecoveryTests(unittest.TestCase):
     def test_prompt_failure_reprompts_the_same_reviewer_and_request(
         self,
@@ -103,28 +132,20 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             self.assertEqual(recovered_run_directory, run_directory)
             self.assertEqual(request_path.read_bytes(), request_bytes)
             self.assertEqual(bundle_request.read_bytes(), bundle_bytes)
-            self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
-            )
+            _assert_single_round(self, run_directory)
 
             invocations = _actual_herdr_invocations(environment)
-            starts = [
-                arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "start"]
-            ]
+            starts = _invocations_of(environment, "agent", "start")
             prompts = [
                 arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "prompt"]
-                and arguments[2] == original_round["reviewer_name"]
+                for arguments in _invocations_of(
+                    environment,
+                    "agent",
+                    "prompt",
+                )
+                if arguments[2] == original_round["reviewer_name"]
             ]
-            history_reads = [
-                arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "read"]
-            ]
+            history_reads = _invocations_of(environment, "agent", "read")
             self.assertEqual(len(starts), 1)
             self.assertEqual(len(prompts), 2)
             self.assertEqual(prompts[0][3], prompts[1][3])
@@ -132,18 +153,70 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             prompt_positions = [
                 index
                 for index, arguments in enumerate(invocations)
-                if arguments[:2] == ["agent", "prompt"]
+                if _is_invocation(arguments, "agent", "prompt")
                 and arguments[2] == original_round["reviewer_name"]
             ]
             history_position = next(
                 index
                 for index, arguments in enumerate(invocations)
-                if arguments[:2] == ["agent", "read"]
+                if _is_invocation(arguments, "agent", "read")
             )
             self.assertLess(
                 history_position,
                 prompt_positions[1],
             )
+
+    def test_retry_prompt_failure_preserves_the_same_recoverable_round(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            prompt_failure = dict(environment)
+            prompt_failure["FAKE_HERDR_FAIL_PROMPT"] = "1"
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=prompt_failure,
+            )
+            self.assertEqual(submitted.returncode, 1)
+            original_state, run_directory = _artifacts(repository)
+            original_round = original_state["active_round"]
+
+            failed = run_cli(
+                repository,
+                "retry-handoff",
+                data_home=data_home,
+                env_overrides=prompt_failure,
+            )
+
+            self.assertEqual(failed.returncode, 1)
+            self.assertIn("injected prompt failure", failed.stderr)
+            self.assertIn(
+                "Next action: agent-squad retry-handoff",
+                failed.stdout,
+            )
+            failed_state, _ = _artifacts(repository)
+            self.assertEqual(failed_state["active_round"], original_round)
+            self.assertEqual(failed_state["handoff"]["status"], "failed")
+            _assert_single_round(self, run_directory)
+            events = [
+                json.loads(line)
+                for line in (run_directory / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                events[-1]["event"],
+                "review_request_recovery_failed",
+            )
+            self.assertIsNone(events[-1]["action"])
 
     def test_lost_result_notification_uses_marker_without_herdr_probe(
         self,
@@ -247,12 +320,9 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             )
             state, run_directory = _artifacts(prepared.repository)
             self.assertEqual(state["current_round"], 1)
-            self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
-            )
+            _assert_single_round(self, run_directory)
 
-    def test_history_failure_sends_no_prompt_and_allows_an_exact_retry(
+    def test_history_failure_falls_back_to_reprompting_the_same_request(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -277,55 +347,18 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             history_failure = dict(environment)
             history_failure["FAKE_HERDR_FAIL_HISTORY"] = "1"
 
-            failed = run_cli(
+            recovered = run_cli(
                 repository,
                 "retry-handoff",
                 data_home=data_home,
                 env_overrides=history_failure,
             )
 
-            self.assertEqual(failed.returncode, 1)
-            self.assertIn("injected history failure", failed.stderr)
-            self.assertIn(
-                "Next action: agent-squad retry-handoff",
-                failed.stdout,
-            )
-            failed_state, _ = _artifacts(repository)
-            self.assertEqual(failed_state["current_round"], 1)
-            self.assertEqual(
-                failed_state["active_round"]["request_id"],
-                request_id,
-            )
-            self.assertEqual(failed_state["handoff"]["status"], "failed")
-            invocations = _actual_herdr_invocations(environment)
-            reviewer_prompts = [
-                arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "prompt"]
-                and arguments[2]
-                == original_state["active_round"]["reviewer_name"]
-            ]
-            self.assertEqual(len(reviewer_prompts), 1)
-
-            status = run_cli(
-                repository,
-                "status",
-                data_home=data_home,
-                env_overrides=environment,
-            )
-            self.assertEqual(status.returncode, 0, status.stderr)
-            self.assertIn(
-                "Next action: agent-squad retry-handoff",
-                status.stdout,
-            )
-
-            recovered = run_cli(
-                repository,
-                "retry-handoff",
-                data_home=data_home,
-                env_overrides=environment,
-            )
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn(
+                "Recovery action: re-prompted Reviewer",
+                recovered.stdout,
+            )
             recovered_state, _ = _artifacts(repository)
             self.assertEqual(recovered_state["current_round"], 1)
             self.assertEqual(
@@ -333,8 +366,34 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 request_id,
             )
             self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
+                recovered_state["handoff"]["status"],
+                "sent",
+            )
+            reviewer_prompts = [
+                arguments
+                for arguments in _invocations_of(
+                    environment,
+                    "agent",
+                    "prompt",
+                )
+                if arguments[2]
+                == original_state["active_round"]["reviewer_name"]
+            ]
+            self.assertEqual(len(reviewer_prompts), 2)
+            self.assertEqual(
+                len(_invocations_of(environment, "agent", "read")),
+                1,
+            )
+            _assert_single_round(self, run_directory)
+            events = [
+                json.loads(line)
+                for line in (run_directory / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                events[-1]["action"],
+                "reprompted",
             )
 
     def test_start_failure_relaunches_the_deterministic_reviewer(
@@ -380,30 +439,117 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(recovered_state["active_round"], original_round)
             self.assertEqual(recovered_state["handoff"]["status"], "sent")
-            invocations = _actual_herdr_invocations(environment)
-            starts = [
-                arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "start"]
-            ]
-            history_reads = [
-                arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "read"]
-            ]
+            starts = _invocations_of(environment, "agent", "start")
+            history_reads = _invocations_of(environment, "agent", "read")
             reviewer_prompts = [
                 arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "prompt"]
-                and arguments[2] == original_round["reviewer_name"]
+                for arguments in _invocations_of(
+                    environment,
+                    "agent",
+                    "prompt",
+                )
+                if arguments[2] == original_round["reviewer_name"]
             ]
             self.assertEqual(len(starts), 2)
             self.assertEqual(len(history_reads), 0)
             self.assertEqual(len(reviewer_prompts), 1)
-            self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
+            _assert_single_round(self, run_directory)
+
+    def test_sent_request_relaunches_a_reviewer_who_disappeared(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            original_state, run_directory = _artifacts(prepared.repository)
+            original_round = original_state["active_round"]
+            reviewer_gone = dict(prepared.environment)
+            reviewer_gone["FAKE_HERDR_AGENT_GONE"] = "1"
+
+            recovered = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=reviewer_gone,
             )
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn(
+                "Recovery action: relaunched Reviewer",
+                recovered.stdout,
+            )
+            recovered_state, _ = _artifacts(prepared.repository)
+            self.assertEqual(
+                recovered_state["active_run_id"],
+                original_state["active_run_id"],
+            )
+            self.assertEqual(recovered_state["active_round"], original_round)
+            self.assertEqual(recovered_state["handoff"]["status"], "sent")
+            self.assertEqual(
+                len(
+                    _invocations_of(
+                        prepared.environment,
+                        "agent",
+                        "start",
+                    )
+                ),
+                2,
+            )
+            _assert_single_round(self, run_directory)
+
+    def test_invalid_marker_evidence_can_reprompt_the_same_round(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            _write_review(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            (prepared.review_worktree / "reviewer-notes.md").write_text(
+                "untracked scratch output\n",
+                encoding="utf-8",
+            )
+            original_state, run_directory = _artifacts(prepared.repository)
+            original_round = original_state["active_round"]
+
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn(
+                "Marker-confirmed unapplied result: present but invalid",
+                status.stdout,
+            )
+            self.assertIn(
+                "Recovery command: agent-squad retry-handoff",
+                status.stdout,
+            )
+            self.assertIn(
+                "Next action: agent-squad retry-handoff",
+                status.stdout,
+            )
+
+            recovered = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn(
+                "Recovery action: re-prompted Reviewer",
+                recovered.stdout,
+            )
+            recovered_state, _ = _artifacts(prepared.repository)
+            self.assertEqual(recovered_state["active_round"], original_round)
+            self.assertEqual(recovered_state["handoff"]["status"], "sent")
+            _assert_single_round(self, run_directory)
 
     def test_history_adopts_a_delivered_request_whose_state_is_pending(
         self,
@@ -468,20 +614,17 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             ]
             self.assertTrue(
                 any(
-                    arguments[:2] == ["agent", "read"]
+                    _is_invocation(arguments, "agent", "read")
                     for arguments in new_invocations
                 )
             )
             self.assertFalse(
                 any(
-                    arguments[:2] == ["agent", "prompt"]
+                    _is_invocation(arguments, "agent", "prompt")
                     for arguments in new_invocations
                 )
             )
-            self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
-            )
+            _assert_single_round(self, run_directory)
 
     def test_repeated_recovery_and_notifications_keep_one_logical_result(
         self,
@@ -556,10 +699,7 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 final_state["active_round"]["result_id"],
                 review["result_id"],
             )
-            self.assertEqual(
-                [path.name for path in (run_directory / "rounds").iterdir()],
-                ["001"],
-            )
+            _assert_single_round(self, run_directory)
             approval = json.loads(
                 (run_directory / "rounds/001/approval.json").read_text(
                     encoding="utf-8"
@@ -570,12 +710,14 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 original_round["request_id"],
             )
             self.assertEqual(approval["result_id"], review["result_id"])
-            invocations = _actual_herdr_invocations(prepared.environment)
             reviewer_prompts = [
                 arguments
-                for arguments in invocations
-                if arguments[:2] == ["agent", "prompt"]
-                and arguments[2] == original_round["reviewer_name"]
+                for arguments in _invocations_of(
+                    prepared.environment,
+                    "agent",
+                    "prompt",
+                )
+                if arguments[2] == original_round["reviewer_name"]
             ]
             self.assertEqual(len(reviewer_prompts), 3)
 

@@ -224,8 +224,11 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 status.stdout,
             )
             self.assertIn(
-                "Next action: inspect the review worktree; its "
-                "marker-confirmed result did not revalidate",
+                "Recovery command: agent-squad retry-handoff",
+                status.stdout,
+            )
+            self.assertIn(
+                "Next action: agent-squad retry-handoff",
                 status.stdout,
             )
 

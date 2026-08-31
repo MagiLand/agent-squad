@@ -353,8 +353,7 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 runs.RunPhase.REVIEWING,
                 unapplied_review=invalid,
             ),
-            "inspect the review worktree; its marker-confirmed result did "
-            "not revalidate",
+            "agent-squad retry-handoff",
         )
         self.assertEqual(
             runs._next_action(

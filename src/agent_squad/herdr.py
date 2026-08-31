@@ -44,8 +44,7 @@ class ReviewerSession:
 class ReviewRequestProbe:
     """Read-only evidence found for one deterministic review request."""
 
-    session: ReviewerSession | None
-    request_seen: bool
+    history: str | None
 
 
 class HerdrClient:
@@ -54,7 +53,6 @@ class HerdrClient:
     _REQUIRED_METHODS = {
         "agent.get": "AgentTarget",
         "agent.prompt": "AgentPromptParams",
-        "agent.read": "AgentReadParams",
         "agent.start": "AgentStartParams",
         "worktree.open": "WorktreeOpenParams",
     }
@@ -62,14 +60,12 @@ class HerdrClient:
         "agent_info",
         "agent_prompted",
         "agent_started",
-        "agent_view",
         "session_snapshot",
         "worktree_opened",
     }
     _REQUIRED_PARAMETER_FIELDS = {
         "AgentTarget": {"target"},
         "AgentPromptParams": {"target", "text"},
-        "AgentReadParams": {"target", "source"},
         "AgentStartParams": {"name", "kind", "pane_id", "args"},
         "WorktreeOpenParams": {"path", "label", "focus"},
     }
@@ -78,10 +74,6 @@ class HerdrClient:
         (("agent", "start", "--help"), ("--kind", "--pane")),
         (("agent", "prompt", "--help"), ()),
         (("agent", "get", "--help"), ()),
-        (
-            ("agent", "read", "--help"),
-            ("--source", "--lines", "--format"),
-        ),
         (("worktree", "--help"), ("open",)),
         (
             ("worktree", "open", "--help"),
@@ -406,50 +398,41 @@ class HerdrClient:
         reviewer_name: str,
         reviewer_kind: AgentKind,
         review_worktree: Path,
-        request_id: str,
     ) -> ReviewRequestProbe:
         """Inspect the expected Reviewer and its recent terminal history."""
 
         existing = self._get_agent(reviewer_name)
         if existing is None:
-            return ReviewRequestProbe(session=None, request_seen=False)
+            return ReviewRequestProbe(history=None)
         self._validate_agent(
             existing,
             reviewer_name=reviewer_name,
             reviewer_kind=reviewer_kind,
             review_worktree=review_worktree,
         )
-        history = self._run(
-            (
-                "agent",
-                "read",
-                reviewer_name,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "1000",
-                "--format",
-                "text",
+        try:
+            history_probe = self._run(
+                (
+                    "agent",
+                    "read",
+                    reviewer_name,
+                    "--source",
+                    "recent-unwrapped",
+                    "--lines",
+                    "1000",
+                    "--format",
+                    "text",
+                ),
+                allow_failure=True,
             )
-        ).stdout
-        request_seen = (
-            "AGENT_SQUAD/0.4.4 REVIEW_REQUEST" in history
-            and f"request_id: {request_id}" in history
+        except HerdrError:
+            return ReviewRequestProbe(history=None)
+        history = (
+            history_probe.stdout
+            if history_probe.returncode == 0
+            else None
         )
-        return ReviewRequestProbe(
-            session=ReviewerSession(
-                workspace_id=_required_text(
-                    existing.get("workspace_id"),
-                    "existing Reviewer workspace_id",
-                ),
-                pane_id=_required_text(
-                    existing.get("pane_id"),
-                    "existing Reviewer pane_id",
-                ),
-                adopted=True,
-            ),
-            request_seen=request_seen,
-        )
+        return ReviewRequestProbe(history=history)
 
     def dispatch_review_result(
         self,

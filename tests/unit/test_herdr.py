@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -89,6 +90,89 @@ class HerdrHelperTests(unittest.TestCase):
             ("agent", "get", "codex-main"),
             allow_failure=True,
         )
+
+    def test_history_probe_degrades_read_failure_to_no_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            review_worktree = Path(temporary_directory)
+            reviewer_name = "asq-12345678-r001-reviewer"
+            client = HerdrClient(review_worktree)
+            existing = {
+                "name": reviewer_name,
+                "agent": "claude",
+                "cwd": str(review_worktree),
+            }
+            process = mock.Mock(
+                returncode=1,
+                stdout="",
+                stderr="history is unavailable",
+            )
+
+            with (
+                mock.patch.object(
+                    client,
+                    "_get_agent",
+                    return_value=existing,
+                ),
+                mock.patch.object(
+                    client,
+                    "_run",
+                    return_value=process,
+                ) as run_command,
+            ):
+                probe = client.probe_review_request(
+                    reviewer_name=reviewer_name,
+                    reviewer_kind=AgentKind.CLAUDE,
+                    review_worktree=review_worktree,
+                )
+
+            self.assertIsNone(probe.history)
+            run_command.assert_called_once_with(
+                (
+                    "agent",
+                    "read",
+                    reviewer_name,
+                    "--source",
+                    "recent-unwrapped",
+                    "--lines",
+                    "1000",
+                    "--format",
+                    "text",
+                ),
+                allow_failure=True,
+            )
+
+    def test_history_probe_degrades_execution_error_to_no_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            review_worktree = Path(temporary_directory)
+            reviewer_name = "asq-12345678-r001-reviewer"
+            client = HerdrClient(review_worktree)
+            existing = {
+                "name": reviewer_name,
+                "agent": "claude",
+                "cwd": str(review_worktree),
+            }
+
+            with (
+                mock.patch.object(
+                    client,
+                    "_get_agent",
+                    return_value=existing,
+                ),
+                mock.patch.object(
+                    client,
+                    "_run",
+                    side_effect=HerdrError("history timed out"),
+                ),
+            ):
+                probe = client.probe_review_request(
+                    reviewer_name=reviewer_name,
+                    reviewer_kind=AgentKind.CLAUDE,
+                    review_worktree=review_worktree,
+                )
+
+            self.assertIsNone(probe.history)
 
 
 if __name__ == "__main__":
