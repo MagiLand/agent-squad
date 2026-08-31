@@ -371,7 +371,6 @@ def _preserve_invalid_review_evidence(
             PurePosixPath("output") / REVIEW_MARKDOWN_FILE_NAME,
         ),
         (MARKER_PATH.name, MARKER_PATH),
-        (RETIRED_RESULTS_PATH.name, RETIRED_RESULTS_PATH),
     )
     try:
         with exclusive_file_lock(lock_path):
@@ -379,6 +378,9 @@ def _preserve_invalid_review_evidence(
                 bundle_root,
                 label="invalid marker-confirmed review bundle",
                 error_type=HandoffRecoveryError,
+                ignored_root_entries=frozenset(
+                    {RETIRED_RESULTS_PATH.name}
+                ),
             )
             captured = {
                 name: bundle_files[path]

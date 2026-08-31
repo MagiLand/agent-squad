@@ -36,6 +36,38 @@ def _marker_confirmed_review(
     )
 
 
+def _marker_confirmed_retired_review(root: Path):
+    prepared = _prepare_round(root)
+    review = _write_review(prepared)
+    submitted = run_cli(
+        prepared.review_worktree,
+        "review-submit",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if submitted.returncode != 0:
+        raise AssertionError(submitted.stderr)
+    marker = prepared.bundle / "local-state.json"
+    marker.write_bytes(b'{"schema_version":\n')
+    recovered = run_cli(
+        prepared.repository,
+        "retry-handoff",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if recovered.returncode != 0:
+        raise AssertionError(recovered.stderr)
+    resubmitted = run_cli(
+        prepared.review_worktree,
+        "review-submit",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if resubmitted.returncode != 0:
+        raise AssertionError(resubmitted.stderr)
+    return prepared, review
+
+
 def _submit_with_lost_notification(prepared, *, verdict: str = "approved"):
     review = _write_review(prepared, verdict=verdict)
     failing_environment = dict(prepared.environment)
@@ -2104,6 +2136,145 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 json.loads(state_path.read_text(encoding="utf-8"))["phase"],
                 "approved",
             )
+
+    def test_failed_apply_retry_ignores_live_advisory_changes(self) -> None:
+        cases = ("missing", "malformed", "mismatched", "directory")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_retired_review(root)
+                    control_root = prepared.repository / ".agent-squad"
+                    state_path = control_root / "state.json"
+                    state_before = state_path.read_bytes()
+                    state = json.loads(state_before.decode("utf-8"))
+                    run_directory = (
+                        control_root
+                        / "runs"
+                        / str(state["active_run_id"])
+                    )
+                    round_directory = run_directory / "rounds/001"
+                    advisory = prepared.bundle / "retired-results.json"
+                    authority = round_directory / "retired-results.json"
+                    self.assertEqual(
+                        advisory.read_bytes(),
+                        authority.read_bytes(),
+                    )
+                    real_atomic_write = review_applications.atomic_write
+
+                    def fail_state_commit(path, content, *, mode):
+                        if (
+                            path.resolve() == state_path.resolve()
+                            and b'"phase": "approved"' in content
+                        ):
+                            raise OSError("injected state commit failure")
+                        real_atomic_write(path, content, mode=mode)
+
+                    with mock.patch.object(
+                        review_applications,
+                        "atomic_write",
+                        side_effect=fail_state_commit,
+                    ):
+                        with self.assertRaisesRegex(
+                            review_applications.ReviewApplicationError,
+                            "injected state commit failure",
+                        ):
+                            review_applications.apply_review(
+                                prepared.repository,
+                                result_id=str(review["result_id"]),
+                            )
+
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    archive_root = round_directory / "bundle"
+                    archive_before = {
+                        path.relative_to(archive_root).as_posix(): (
+                            path.read_bytes()
+                        )
+                        for path in archive_root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertIn("retired-results.json", archive_before)
+                    if case == "missing":
+                        advisory.unlink()
+                    elif case == "malformed":
+                        advisory.write_bytes(b'{"schema_version":\n')
+                    elif case == "mismatched":
+                        mismatched = json.loads(
+                            authority.read_text(encoding="utf-8")
+                        )
+                        mismatched["request_id"] = (
+                            "99999999-9999-4999-8999-999999999999"
+                        )
+                        advisory.write_text(
+                            f"{json.dumps(mismatched, indent=2)}\n",
+                            encoding="utf-8",
+                        )
+                    else:
+                        advisory.unlink()
+                        advisory.mkdir()
+
+                    retried = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+
+                    self.assertFalse(retried.replayed)
+                    archive_after = {
+                        path.relative_to(archive_root).as_posix(): (
+                            path.read_bytes()
+                        )
+                        for path in archive_root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertEqual(archive_after, archive_before)
+                    final_state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(final_state["phase"], "approved")
+                    round_record = json.loads(
+                        (round_directory / "round.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    manifest = {
+                        str(item["path"])[len("bundle/"):]: item["sha256"]
+                        for item in round_record["artifacts"]["bundle_archive"]
+                    }
+                    self.assertEqual(
+                        manifest,
+                        {
+                            path: hashlib.sha256(content).hexdigest()
+                            for path, content in archive_before.items()
+                        },
+                    )
+                    events_path = run_directory / "events.jsonl"
+                    applied_events = [
+                        event
+                        for event in (
+                            json.loads(line)
+                            for line in events_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        )
+                        if event["event"] == "review_applied"
+                    ]
+                    self.assertEqual(len(applied_events), 1)
+                    replayed = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    self.assertTrue(replayed.replayed)
+                    replay_events = [
+                        event
+                        for event in (
+                            json.loads(line)
+                            for line in events_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        )
+                        if event["event"] == "review_applied"
+                    ]
+                    self.assertEqual(len(replay_events), 1)
 
     def test_interruptions_rollback_uncommitted_state_transitions(
         self,

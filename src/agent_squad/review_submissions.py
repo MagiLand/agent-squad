@@ -7,6 +7,7 @@ from datetime import datetime
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import stat
 
 from .artifacts import (
@@ -1125,6 +1126,7 @@ def mirror_retired_review_identities(
             "authoritative retired review identities are missing"
         )
     path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    _remove_advisory_directory(path)
     atomic_write(path, encode_json(ledger.to_dict()), mode=0o600)
     persisted = _load_retired_review_ledger(
         bundle_root,
@@ -1135,6 +1137,28 @@ def mirror_retired_review_identities(
             "Reviewer-side retired review identities differ from local "
             "authority"
         )
+
+
+def _remove_advisory_directory(path: Path) -> None:
+    """Remove an advisory directory without following linked entries."""
+
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise ReviewSubmissionError(
+            f"cannot inspect Reviewer-side retired review identities: {error}"
+        ) from error
+    if not stat.S_ISDIR(status.st_mode):
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        raise ReviewSubmissionError(
+            f"cannot remove invalid Reviewer-side retired review identities: "
+            f"{error}"
+        ) from error
 
 
 def _load_retired_review_ledger(

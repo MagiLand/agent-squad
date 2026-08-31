@@ -772,6 +772,153 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             )
             _assert_single_round(self, run_directory)
 
+    def test_invalid_marker_recovery_repairs_non_regular_advisory(
+        self,
+    ) -> None:
+        cases = ("directory", "symlink")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared = _prepare_round(root)
+                    review = _write_review(prepared)
+                    submitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        submitted.returncode,
+                        0,
+                        submitted.stderr,
+                    )
+                    marker = prepared.bundle / "local-state.json"
+                    malformed_marker = b'{"schema_version":\n'
+                    marker.write_bytes(malformed_marker)
+                    advisory = prepared.bundle / "retired-results.json"
+                    external = root / "external-advisory"
+                    if case == "directory":
+                        advisory.mkdir()
+                    else:
+                        external.write_bytes(b"external\n")
+                        advisory.symlink_to(external)
+
+                    original_state, run_directory = _artifacts(
+                        prepared.repository
+                    )
+                    original_round = original_state["active_round"]
+                    reviewer_name = str(original_round["reviewer_name"])
+                    prompts_before = [
+                        arguments
+                        for arguments in _invocations_of(
+                            prepared.environment,
+                            "agent",
+                            "prompt",
+                        )
+                        if arguments[2] == reviewer_name
+                    ]
+
+                    recovered = run_cli(
+                        prepared.repository,
+                        "retry-handoff",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(
+                        recovered.returncode,
+                        0,
+                        recovered.stderr,
+                    )
+                    self.assertIn(
+                        "Recovery action: re-prompted Reviewer",
+                        recovered.stdout,
+                    )
+                    self.assertFalse(marker.exists())
+                    self.assertTrue(advisory.is_file())
+                    self.assertFalse(advisory.is_symlink())
+                    authority = (
+                        run_directory / "rounds/001/retired-results.json"
+                    )
+                    self.assertEqual(
+                        advisory.read_bytes(),
+                        authority.read_bytes(),
+                    )
+                    if case == "symlink":
+                        self.assertEqual(
+                            external.read_bytes(),
+                            b"external\n",
+                        )
+                    recovered_state, recovered_run_directory = _artifacts(
+                        prepared.repository
+                    )
+                    self.assertEqual(recovered_run_directory, run_directory)
+                    self.assertEqual(
+                        recovered_state["active_run_id"],
+                        original_state["active_run_id"],
+                    )
+                    self.assertEqual(recovered_state["current_round"], 1)
+                    self.assertEqual(
+                        recovered_state["active_round"]["request_id"],
+                        original_round["request_id"],
+                    )
+                    reviewer_prompts = [
+                        arguments
+                        for arguments in _invocations_of(
+                            prepared.environment,
+                            "agent",
+                            "prompt",
+                        )
+                        if arguments[2] == reviewer_name
+                    ]
+                    self.assertEqual(
+                        len(reviewer_prompts),
+                        len(prompts_before) + 1,
+                    )
+                    diagnostics = list(
+                        (
+                            run_directory
+                            / "rounds/001/diagnostics/invalid-results"
+                        ).iterdir()
+                    )
+                    self.assertEqual(len(diagnostics), 1)
+                    self.assertEqual(
+                        (diagnostics[0] / "local-state.json").read_bytes(),
+                        malformed_marker,
+                    )
+                    validation_error = json.loads(
+                        (diagnostics[0] / "validation-error.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    self.assertEqual(
+                        validation_error["captured_files"],
+                        ["local-state.json", "review.json", "review.md"],
+                    )
+
+                    notification_retry = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        notification_retry.returncode,
+                        0,
+                        notification_retry.stderr,
+                    )
+                    recreated = json.loads(marker.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        recreated["result_id"],
+                        review["result_id"],
+                    )
+                    self.assertEqual(
+                        authority.read_bytes(),
+                        advisory.read_bytes(),
+                    )
+                    _assert_single_round(self, run_directory)
+
     def test_apply_rejects_retired_id_after_reviewer_ledger_deletion(
         self,
     ) -> None:

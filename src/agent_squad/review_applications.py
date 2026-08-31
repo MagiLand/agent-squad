@@ -36,6 +36,7 @@ from .initialization import (
 )
 from .review_submissions import (
     MarkerConfirmedReview,
+    RETIRED_RESULTS_PATH,
     ReviewSubmissionError,
     load_marker_confirmed_review,
     verify_flagged_tracked_files,
@@ -405,7 +406,11 @@ def _apply_review_locked(
         _ensure_event(
             run_directory / runs.EVENT_LOG_FILE_NAME,
             _review_applied_event(
-                timestamp=timestamp,
+                timestamp=(
+                    approval.created_at
+                    if approval is not None
+                    else timestamp
+                ),
                 run_id=active.run_id,
                 round_number=active.current_round,
                 request_id=evidence.request.request_id,
@@ -971,28 +976,25 @@ def _archive_bundle(
     evidence: MarkerConfirmedReview,
 ) -> tuple[BundleArtifact, ...]:
     archive_root = round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
-    manifest = tuple(
-        BundleArtifact(
-            path=(
-                PurePosixPath(BUNDLE_ARCHIVE_DIRECTORY_NAME) / item.path
-            ).as_posix(),
-            sha256=hashlib.sha256(item.content).hexdigest(),
-        )
-        for item in evidence.bundle_files
-    )
+    live_files = {
+        item.path: item.content for item in evidence.bundle_files
+    }
+    manifest = _bundle_manifest(live_files)
     if os.path.lexists(archive_root):
-        _verify_bundle_tree(archive_root, manifest, label="existing")
-        return manifest
+        return _validate_existing_bundle_archive(
+            archive_root,
+            live_files=live_files,
+        )
 
     staging = Path(
         tempfile.mkdtemp(prefix=".bundle.", dir=round_directory)
     )
     try:
         staging.chmod(0o700)
-        for item in evidence.bundle_files:
-            destination = staging.joinpath(*item.path.parts)
+        for path, content in live_files.items():
+            destination = staging.joinpath(*path.parts)
             destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-            atomic_write(destination, item.content, mode=0o400)
+            atomic_write(destination, content, mode=0o400)
         _verify_bundle_tree(staging, manifest, label="staged")
         staging.replace(archive_root)
         _make_archive_read_only(archive_root)
@@ -1000,6 +1002,59 @@ def _archive_bundle(
         if os.path.lexists(staging):
             shutil.rmtree(staging, ignore_errors=True)
         raise
+    _verify_bundle_tree(archive_root, manifest, label="existing")
+    return manifest
+
+
+def _bundle_manifest(
+    files: dict[PurePosixPath, bytes],
+) -> tuple[BundleArtifact, ...]:
+    return tuple(
+        BundleArtifact(
+            path=(
+                PurePosixPath(BUNDLE_ARCHIVE_DIRECTORY_NAME) / path
+            ).as_posix(),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        for path, content in sorted(
+            files.items(),
+            key=lambda item: str(item[0]),
+        )
+    )
+
+
+def _validate_existing_bundle_archive(
+    archive_root: Path,
+    *,
+    live_files: dict[PurePosixPath, bytes],
+) -> tuple[BundleArtifact, ...]:
+    archived_files = read_regular_tree(
+        archive_root,
+        label="existing review bundle archive",
+        error_type=ReviewApplicationError,
+    )
+    required_live = {
+        path: content
+        for path, content in live_files.items()
+        if path != RETIRED_RESULTS_PATH
+    }
+    required_archived = {
+        path: content
+        for path, content in archived_files.items()
+        if path != RETIRED_RESULTS_PATH
+    }
+    if set(required_archived) != set(required_live):
+        raise ReviewApplicationError(
+            "existing review bundle archive does not match validated evidence"
+        )
+    for path, content in required_archived.items():
+        if hashlib.sha256(content).digest() != hashlib.sha256(
+            required_live[path]
+        ).digest():
+            raise ReviewApplicationError(
+                f"existing review bundle digest mismatch for {path}"
+            )
+    manifest = _bundle_manifest(archived_files)
     _verify_bundle_tree(archive_root, manifest, label="existing")
     return manifest
 

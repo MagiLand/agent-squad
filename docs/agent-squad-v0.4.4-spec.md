@@ -1236,6 +1236,14 @@ The archived bundle preserves:
 - the output reviewed and applied;
 - the Reviewer-local submission marker.
 
+If application is retried after the complete bundle archive was written but
+before the authoritative state transition committed, the existing archive is
+the provisional snapshot. The retry MUST revalidate every authoritative
+bundle entry against current evidence, retain any optional advisory
+`retired-results.json` snapshot already present in that archive, and derive
+the eventual authoritative manifest from the verified archive. A mutable live
+advisory mirror MUST NOT invalidate or redefine the provisional archive.
+
 Convenience copies of `review.json`, `review.md`, and other key artifacts MAY also exist at the round root.
 
 ### 23.9 Reviewer session lifecycle
