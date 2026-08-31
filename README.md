@@ -87,6 +87,8 @@ Recovery first checks the expected review output and Reviewer-local marker. Mark
 
 When no valid result is ready, recovery checks the deterministic Reviewer session and, when Herdr supports it, reads recent terminal history before sending anything. It can adopt a request already visible in history, re-prompt the existing Reviewer, or relaunch the deterministic Reviewer in the same review worktree. If optional history diagnostics are unavailable or fail, recovery safely falls back to re-prompting. Every path reuses the run ID, round, request ID, Reviewer name, worktree, and bundle; repeated recovery never allocates a replacement round.
 
+If recovery must remove a malformed or mismatched marker, it first binds that result ID to its original digest in implementation-owned round storage. A copy in the review bundle gives `review-submit` early feedback, but implementation-side status and application enforce the authoritative binding even if the disposable bundle copy is removed. Corrected content must use a new result ID.
+
 ## Apply a review, correct findings, and complete
 
 From the detached review worktree, the Reviewer writes the structured result and Markdown companion, then submits them:

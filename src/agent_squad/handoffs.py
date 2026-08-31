@@ -42,7 +42,9 @@ from .review_submissions import (
     RETIRED_RESULTS_PATH,
     SUBMISSION_LOCK_PATH,
     ReviewSubmissionError,
+    mirror_retired_review_identities,
     record_retired_review_identity,
+    retired_review_identity_digest,
 )
 from .storage import (
     InvalidJsonError,
@@ -401,16 +403,50 @@ def _preserve_invalid_review_evidence(
                 if marker_bytes is not None
                 else None
             )
-            if disposition is not None and disposition.blocks_resubmission:
+            should_remove_marker = (
+                disposition is not None
+                and disposition.blocks_resubmission
+            )
+            authoritative_root: Path | None = None
+            authoritative_digest: str | None = None
+            if (
+                disposition is not None
+                and disposition.result_id is not None
+                and disposition.review_sha256 is not None
+            ):
+                authoritative_root = _review_round_directory(
+                    control_root,
+                    run_id=active.run_id,
+                    round_number=active_round.round_number,
+                )
+                authoritative_digest = retired_review_identity_digest(
+                    authoritative_root,
+                    request=request,
+                    result_id=disposition.result_id,
+                )
+                if (
+                    authoritative_digest is not None
+                    and authoritative_digest
+                    != disposition.review_sha256
+                ):
+                    should_remove_marker = True
+            if should_remove_marker and disposition is not None:
                 if (
                     disposition.result_id is not None
                     and disposition.review_sha256 is not None
                 ):
-                    record_retired_review_identity(
+                    assert authoritative_root is not None
+                    if authoritative_digest is None:
+                        record_retired_review_identity(
+                            authoritative_root,
+                            request=request,
+                            result_id=disposition.result_id,
+                            review_sha256=disposition.review_sha256,
+                        )
+                    mirror_retired_review_identities(
+                        authoritative_root,
                         bundle_root,
                         request=request,
-                        result_id=disposition.result_id,
-                        review_sha256=disposition.review_sha256,
                     )
                 _remove_captured_marker(
                     bundle_root.joinpath(*MARKER_PATH.parts),
@@ -545,18 +581,10 @@ def _invalid_results_directory(
 ) -> Path:
     """Return a validated local diagnostic parent without following links."""
 
-    run_directory = runs.safe_run_directory(control_root, run_id)
-    rounds_root = _require_owned_directory(
-        run_directory / "rounds",
-        parent=run_directory,
-        label="review rounds",
-        create=False,
-    )
-    round_directory = _require_owned_directory(
-        rounds_root / f"{round_number:03d}",
-        parent=rounds_root,
-        label="active review round",
-        create=False,
+    round_directory = _review_round_directory(
+        control_root,
+        run_id=run_id,
+        round_number=round_number,
     )
     diagnostics = _require_owned_directory(
         round_directory / "diagnostics",
@@ -569,6 +597,29 @@ def _invalid_results_directory(
         parent=diagnostics,
         label="invalid-result diagnostics",
         create=True,
+    )
+
+
+def _review_round_directory(
+    control_root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+) -> Path:
+    """Return one validated implementation-owned review round directory."""
+
+    run_directory = runs.safe_run_directory(control_root, run_id)
+    rounds_root = _require_owned_directory(
+        run_directory / "rounds",
+        parent=run_directory,
+        label="review rounds",
+        create=False,
+    )
+    return _require_owned_directory(
+        rounds_root / f"{round_number:03d}",
+        parent=rounds_root,
+        label="active review round",
+        create=False,
     )
 
 
@@ -777,7 +828,12 @@ def _classify_marker_for_recovery(
             )
         )
         if marker_matches and review_matches_request:
-            return _MarkerRecoveryDisposition(False, None, None)
+            assert review_digest is not None
+            return _MarkerRecoveryDisposition(
+                False,
+                review.result_id,
+                review_digest,
+            )
 
     if marker is not None:
         return _MarkerRecoveryDisposition(

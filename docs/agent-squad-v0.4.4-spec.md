@@ -672,6 +672,7 @@ A consuming repository SHOULD use a layout equivalent to:
             │   ├── request.json
             │   ├── implementation-report.md
             │   ├── response.json
+            │   ├── retired-results.json
             │   ├── review.json
             │   ├── review.md
             │   ├── diagnostics/
@@ -1138,10 +1139,13 @@ Suggested layout:
 ├── output/
 │   ├── review.json
 │   └── review.md
+├── retired-results.json
 └── local-state.json
 ```
 
 Files that are not applicable MAY be absent. When the run has recorded Developer resolutions, every resolution JSON and companion Markdown MUST be present in the bundle in ascending `created_at` order.
+
+`retired-results.json` is present only after recovery retires a marker-confirmed result identity. The implementation-owned round copy is authoritative. The review-bundle copy is an advisory mirror that allows `review-submit` to reject contradictory reuse early without requiring access to `.agent-squad/`.
 
 The bundle MUST contain every protocol artifact the round-scoped Reviewer needs without requiring write access to the implementation worktree's `.agent-squad/` directory.
 
@@ -2582,6 +2586,8 @@ The Reviewer MAY rerun `review-submit` with the same result ID and digest to res
 A corrected review artifact after a rejected local submission SHOULD use a new result ID unless the original result was never marker-confirmed.
 
 The exact correction rule MUST be deterministic and tested.
+
+Before recovery removes a marker-confirmed result identity, it MUST durably bind that result ID to its original review digest in implementation-owned round storage. A Reviewer-local mirror MAY provide earlier rejection, but implementation-side discovery and `apply-review` MUST enforce the authoritative binding even when that mirror is absent.
 
 ### 31.7 Recorded result replay and unknown-result refusal
 

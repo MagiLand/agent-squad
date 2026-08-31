@@ -218,9 +218,17 @@ def _apply_review_locked(
         raise ReviewApplicationError(
             "reviewing state lost its active round before validation"
         )
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    round_directory = (
+        run_directory / "rounds" / f"{active.current_round:03d}"
+    )
     try:
         evidence = load_marker_confirmed_review(
-            active_round.review_worktree
+            active_round.review_worktree,
+            authoritative_results_root=round_directory,
         )
     except ReviewSubmissionError as error:
         raise ReviewApplicationError(
@@ -250,13 +258,6 @@ def _apply_review_locked(
             "version; no state was changed"
         )
 
-    run_directory = runs.safe_run_directory(
-        repository.control_root,
-        active.run_id,
-    )
-    round_directory = (
-        run_directory / "rounds" / f"{active.current_round:03d}"
-    )
     round_path = round_directory / "round.json"
     state_path = repository.control_root / runs.STATE_FILE_NAME
     run_path = run_directory / runs.RUN_RECORD_FILE_NAME
@@ -1248,7 +1249,18 @@ def _cleanup_review_resources(
     if not os.path.lexists(review_worktree):
         return ()
     try:
-        evidence = load_marker_confirmed_review(review_worktree)
+        run_directory = runs.safe_run_directory(
+            repository.control_root,
+            active.run_id,
+        )
+        evidence = load_marker_confirmed_review(
+            review_worktree,
+            authoritative_results_root=(
+                run_directory
+                / "rounds"
+                / f"{active.current_round:03d}"
+            ),
+        )
         _validate_evidence(repository, active, evidence)
     except AgentSquadError as error:
         return (

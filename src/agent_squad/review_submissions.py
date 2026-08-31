@@ -143,7 +143,7 @@ class _RetiredReviewIdentity:
 
 @dataclass(frozen=True)
 class _RetiredReviewLedger:
-    """Reviewer-local history that prevents contradictory result reuse."""
+    """Request-scoped history that prevents contradictory result reuse."""
 
     created_at: str
     run_id: str
@@ -332,7 +332,11 @@ def submit_review_result(
         ) from error
 
 
-def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
+def load_marker_confirmed_review(
+    start: Path,
+    *,
+    authoritative_results_root: Path | None = None,
+) -> MarkerConfirmedReview:
     """Independently validate one submitted result without notifying anyone."""
 
     worktree = discover_git_worktree(start)
@@ -376,6 +380,16 @@ def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
                 result_id=review.result_id,
                 review_digest=review_digest,
             )
+            if authoritative_results_root is not None:
+                authoritative_ledger = _load_retired_review_ledger(
+                    authoritative_results_root,
+                    request=request,
+                )
+                _assert_retired_result_reuse(
+                    authoritative_ledger,
+                    result_id=review.result_id,
+                    review_digest=review_digest,
+                )
 
             marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
             marker_value, marker_bytes = _load_json_file(
@@ -998,12 +1012,12 @@ def _assert_fresh_result_id(
 
 
 def record_retired_review_identity(
-    bundle_root: Path,
+    root: Path,
     *,
     request: ReviewRequest,
     result_id: str,
     review_sha256: str,
-) -> None:
+) -> _RetiredReviewLedger:
     """Durably reserve one result identity before its marker is removed."""
 
     _VALIDATOR.require_uuid(result_id, "retired review result ID")
@@ -1012,7 +1026,7 @@ def record_retired_review_identity(
         "retired review result digest",
     )
     ledger = _load_retired_review_ledger(
-        bundle_root,
+        root,
         request=request,
     )
     if ledger is not None:
@@ -1030,7 +1044,7 @@ def record_retired_review_identity(
                     "retired review result ID is already bound to a "
                     "different digest"
                 )
-            return
+            return ledger
 
     retired_at = utc_timestamp()
     identity = _RetiredReviewIdentity(
@@ -1054,15 +1068,64 @@ def record_retired_review_identity(
             request_id=ledger.request_id,
             results=(*ledger.results, identity),
         )
-    path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    path = root.joinpath(*RETIRED_RESULTS_PATH.parts)
     atomic_write(path, encode_json(next_ledger.to_dict()), mode=0o600)
     persisted = _load_retired_review_ledger(
-        bundle_root,
+        root,
         request=request,
     )
     if persisted != next_ledger:
         raise ReviewSubmissionError(
             "persisted retired review identities differ from validated data"
+        )
+    return next_ledger
+
+
+def retired_review_identity_digest(
+    root: Path,
+    *,
+    request: ReviewRequest,
+    result_id: str,
+) -> str | None:
+    """Return the authoritative digest already reserved for one result ID."""
+
+    _VALIDATOR.require_uuid(result_id, "retired review result ID")
+    ledger = _load_retired_review_ledger(root, request=request)
+    if ledger is None:
+        return None
+    identity = next(
+        (item for item in ledger.results if item.result_id == result_id),
+        None,
+    )
+    return identity.review_sha256 if identity is not None else None
+
+
+def mirror_retired_review_identities(
+    authoritative_root: Path,
+    bundle_root: Path,
+    *,
+    request: ReviewRequest,
+) -> None:
+    """Refresh the Reviewer-side advisory ledger from local authority."""
+
+    ledger = _load_retired_review_ledger(
+        authoritative_root,
+        request=request,
+    )
+    if ledger is None:
+        raise ReviewSubmissionError(
+            "authoritative retired review identities are missing"
+        )
+    path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    atomic_write(path, encode_json(ledger.to_dict()), mode=0o600)
+    persisted = _load_retired_review_ledger(
+        bundle_root,
+        request=request,
+    )
+    if persisted != ledger:
+        raise ReviewSubmissionError(
+            "Reviewer-side retired review identities differ from local "
+            "authority"
         )
 
 

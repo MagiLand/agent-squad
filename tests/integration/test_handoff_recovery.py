@@ -677,6 +677,13 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            authoritative_ledger = (
+                run_directory / "rounds/001/retired-results.json"
+            )
+            self.assertEqual(
+                authoritative_ledger.read_bytes(),
+                (prepared.bundle / "retired-results.json").read_bytes(),
+            )
             self.assertEqual(
                 retired["run_id"],
                 original_state["active_run_id"],
@@ -765,6 +772,139 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             )
             _assert_single_round(self, run_directory)
 
+    def test_apply_rejects_retired_id_after_reviewer_ledger_deletion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            original_review = _write_review(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            marker = prepared.bundle / "local-state.json"
+            marker.write_bytes(b'{"schema_version":\n')
+
+            recovered = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertFalse(marker.exists())
+            reviewer_ledger = prepared.bundle / "retired-results.json"
+            _, run_directory = _artifacts(prepared.repository)
+            authoritative_ledger = (
+                run_directory / "rounds/001/retired-results.json"
+            )
+            self.assertTrue(reviewer_ledger.is_file())
+            self.assertEqual(
+                authoritative_ledger.read_bytes(),
+                reviewer_ledger.read_bytes(),
+            )
+            reviewer_ledger.unlink()
+            authoritative_before = authoritative_ledger.read_bytes()
+
+            corrected_review = _write_review(
+                prepared,
+                verdict="changes_requested",
+            )
+            corrected_review["result_id"] = original_review["result_id"]
+            (prepared.bundle / "output/review.json").write_text(
+                f"{json.dumps(corrected_review, indent=2)}\n",
+                encoding="utf-8",
+            )
+            reviewer_accepted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                reviewer_accepted.returncode,
+                0,
+                reviewer_accepted.stderr,
+            )
+            state_path = prepared.repository / ".agent-squad/state.json"
+            state_before = state_path.read_bytes()
+
+            rejected = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(original_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn(
+                "corrected review content needs a new result ID",
+                rejected.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertEqual(
+                authoritative_ledger.read_bytes(),
+                authoritative_before,
+            )
+
+            recovered_again = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                recovered_again.returncode,
+                0,
+                recovered_again.stderr,
+            )
+            self.assertFalse(marker.exists(), recovered_again.stdout)
+            self.assertTrue(reviewer_ledger.is_file())
+            self.assertEqual(
+                authoritative_ledger.read_bytes(),
+                reviewer_ledger.read_bytes(),
+            )
+
+            corrected_review["result_id"] = (
+                "44444444-4444-4444-8444-444444444444"
+            )
+            (prepared.bundle / "output/review.json").write_text(
+                f"{json.dumps(corrected_review, indent=2)}\n",
+                encoding="utf-8",
+            )
+            resubmitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(resubmitted.returncode, 0, resubmitted.stderr)
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(corrected_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            final_state, final_run_directory = _artifacts(
+                prepared.repository
+            )
+            self.assertEqual(final_run_directory, run_directory)
+            self.assertEqual(final_state["current_round"], 1)
+            self.assertEqual(
+                final_state["active_round"]["result_id"],
+                corrected_review["result_id"],
+            )
+            _assert_single_round(self, run_directory)
+
     def test_retired_identity_write_failure_keeps_malformed_marker(
         self,
     ) -> None:
@@ -827,6 +967,12 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 (prepared.bundle / "retired-results.json").exists()
             )
             _, run_directory = _artifacts(prepared.repository)
+            self.assertFalse(
+                (
+                    run_directory
+                    / "rounds/001/retired-results.json"
+                ).exists()
+            )
             diagnostics = list(
                 (
                     run_directory
@@ -972,6 +1118,13 @@ print(result.marker_created)
                             _, run_directory = _artifacts(
                                 prepared.repository
                             )
+                            authoritative_ledger = (
+                                run_directory
+                                / "rounds/001/retired-results.json"
+                            )
+                            self.assertFalse(
+                                authoritative_ledger.exists()
+                            )
                             diagnostics = list(
                                 (
                                     run_directory
@@ -995,6 +1148,12 @@ print(result.marker_created)
                 self.assertTrue(marker.exists())
                 self.assertTrue(
                     (prepared.bundle / "retired-results.json").exists()
+                )
+                self.assertEqual(
+                    authoritative_ledger.read_bytes(),
+                    (
+                        prepared.bundle / "retired-results.json"
+                    ).read_bytes(),
                 )
                 self.assertEqual(diagnostics[0].name, diagnostic_id)
                 self.assertEqual(

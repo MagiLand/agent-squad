@@ -99,6 +99,167 @@ class ReviewSubmissionHelperTests(unittest.TestCase):
                     review_digest="b" * 64,
                 )
 
+    def test_retired_identity_ledger_appends_distinct_ids_in_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle = Path(temporary_directory)
+            request = SimpleNamespace(
+                run_id="12345678-1234-5678-9234-567812345678",
+                round_number=1,
+                request_id="87654321-4321-6789-a234-678912345678",
+            )
+            first_id = "11111111-1111-4111-8111-111111111111"
+            second_id = "22222222-2222-4222-8222-222222222222"
+
+            with mock.patch.object(
+                review_submissions,
+                "utc_timestamp",
+                side_effect=(
+                    "2026-08-31T14:00:00Z",
+                    "2026-08-31T14:01:00Z",
+                ),
+            ):
+                review_submissions.record_retired_review_identity(
+                    bundle,
+                    request=request,
+                    result_id=first_id,
+                    review_sha256="a" * 64,
+                )
+                review_submissions.record_retired_review_identity(
+                    bundle,
+                    request=request,
+                    result_id=second_id,
+                    review_sha256="b" * 64,
+                )
+
+            ledger = review_submissions._load_retired_review_ledger(
+                bundle,
+                request=request,
+            )
+            self.assertIsNotNone(ledger)
+            assert ledger is not None
+            self.assertEqual(ledger.created_at, "2026-08-31T14:00:00Z")
+            self.assertEqual(
+                [identity.result_id for identity in ledger.results],
+                [first_id, second_id],
+            )
+            self.assertEqual(
+                [identity.review_sha256 for identity in ledger.results],
+                ["a" * 64, "b" * 64],
+            )
+
+    def test_failed_retired_identity_replacement_preserves_prior_ledger(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            bundle = Path(temporary_directory)
+            request = SimpleNamespace(
+                run_id="12345678-1234-5678-9234-567812345678",
+                round_number=1,
+                request_id="87654321-4321-6789-a234-678912345678",
+            )
+            first_id = "11111111-1111-4111-8111-111111111111"
+            review_submissions.record_retired_review_identity(
+                bundle,
+                request=request,
+                result_id=first_id,
+                review_sha256="a" * 64,
+            )
+            path = bundle / review_submissions.RETIRED_RESULTS_PATH.name
+            original = path.read_bytes()
+
+            with (
+                mock.patch.object(
+                    review_submissions,
+                    "atomic_write",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(OSError, "disk full"),
+            ):
+                review_submissions.record_retired_review_identity(
+                    bundle,
+                    request=request,
+                    result_id="22222222-2222-4222-8222-222222222222",
+                    review_sha256="b" * 64,
+                )
+
+            self.assertEqual(path.read_bytes(), original)
+            ledger = review_submissions._load_retired_review_ledger(
+                bundle,
+                request=request,
+            )
+            self.assertIsNotNone(ledger)
+            assert ledger is not None
+            self.assertEqual(
+                [identity.result_id for identity in ledger.results],
+                [first_id],
+            )
+
+    def test_failed_retired_identity_mirror_preserves_previous_copy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            authority = root / "authority"
+            bundle = root / "bundle"
+            authority.mkdir()
+            bundle.mkdir()
+            request = SimpleNamespace(
+                run_id="12345678-1234-5678-9234-567812345678",
+                round_number=1,
+                request_id="87654321-4321-6789-a234-678912345678",
+            )
+            first_id = "11111111-1111-4111-8111-111111111111"
+            review_submissions.record_retired_review_identity(
+                authority,
+                request=request,
+                result_id=first_id,
+                review_sha256="a" * 64,
+            )
+            review_submissions.record_retired_review_identity(
+                bundle,
+                request=request,
+                result_id=first_id,
+                review_sha256="a" * 64,
+            )
+            review_submissions.record_retired_review_identity(
+                authority,
+                request=request,
+                result_id="22222222-2222-4222-8222-222222222222",
+                review_sha256="b" * 64,
+            )
+            path = bundle / review_submissions.RETIRED_RESULTS_PATH.name
+            original = path.read_bytes()
+
+            with (
+                mock.patch.object(
+                    review_submissions,
+                    "atomic_write",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(OSError, "disk full"),
+            ):
+                review_submissions.mirror_retired_review_identities(
+                    authority,
+                    bundle,
+                    request=request,
+                )
+
+            self.assertEqual(path.read_bytes(), original)
+            review_submissions.mirror_retired_review_identities(
+                authority,
+                bundle,
+                request=request,
+            )
+            self.assertEqual(
+                path.read_bytes(),
+                (
+                    authority
+                    / review_submissions.RETIRED_RESULTS_PATH.name
+                ).read_bytes(),
+            )
+
     def test_retired_identity_ledger_rejects_invalid_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             bundle = Path(temporary_directory)

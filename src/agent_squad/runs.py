@@ -809,6 +809,11 @@ def _inspect_status(
         current_head_oid=current_head_oid,
         object_format=record.object_format,
         review_worktree_available=review_worktree_available,
+        authoritative_results_root=(
+            run_directory / "rounds" / f"{current_round:03d}"
+            if validated_round is not None
+            else None
+        ),
     )
     correction_required = (
         phase is RunPhase.IMPLEMENTING
@@ -2109,6 +2114,7 @@ def _discover_unapplied_review(
     current_head_oid: str | None,
     object_format: str,
     review_worktree_available: bool | None,
+    authoritative_results_root: Path | None,
 ) -> UnappliedReviewState:
     """Probe the expected active bundle for a valid local result marker."""
 
@@ -2138,7 +2144,8 @@ def _discover_unapplied_review(
         return None
     try:
         evidence = load_marker_confirmed_review(
-            active_round.review_worktree
+            active_round.review_worktree,
+            authoritative_results_root=authoritative_results_root,
         )
     except AgentSquadError as error:
         return InvalidUnappliedReviewResult(
