@@ -46,6 +46,7 @@ def _prepare_round(
     root: Path,
     *,
     allowed_generated_paths: tuple[str, ...] = (),
+    review_limit: int | None = None,
     include_tracked_symlink: bool = False,
     include_nested_tracked_file: bool = False,
 ) -> _PreparedRound:
@@ -61,7 +62,7 @@ def _prepare_round(
     )
     if initialized.returncode != 0:
         raise AssertionError(initialized.stderr)
-    if allowed_generated_paths:
+    if allowed_generated_paths or review_limit is not None:
         configuration_path = repository / ".agent-squad/config.json"
         configuration = json.loads(
             configuration_path.read_text(encoding="utf-8")
@@ -69,6 +70,8 @@ def _prepare_round(
         configuration["allowed_generated_paths"] = list(
             allowed_generated_paths
         )
+        if review_limit is not None:
+            configuration["max_completed_change_reviews"] = review_limit
         _write_json_fixture(configuration_path, configuration)
     task = root / "task.md"
     task.write_text(
@@ -269,7 +272,10 @@ def _prepare_multi_input_round(
         request=copy.deepcopy(first_round.request),
     )
     input_root = prepared.bundle / "input"
-    previous_review = _review_result(first_round.request, "approved")
+    previous_review = _review_result(
+        first_round.request,
+        "changes_requested",
+    )
     previous_review["result_id"] = (
         "44444444-4444-4444-8444-444444444444"
     )
@@ -279,7 +285,29 @@ def _prepare_multi_input_round(
     )
     _write_json_fixture(
         input_root / "previous-response.json",
-        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "created_at": "2026-08-26T12:00:30Z",
+            "response_id": (
+                "55555555-5555-4555-8555-555555555555"
+            ),
+            "supersedes_response_id": None,
+            "resolution_ids": [],
+            "run_id": previous_review["run_id"],
+            "review_round": previous_review["round"],
+            "review_result_id": previous_review["result_id"],
+            "reviewed_head_oid": previous_review["head_oid"],
+            "responses": [
+                {
+                    "finding_id": "REV-001",
+                    "disposition": "fixed",
+                    "rationale": "Completed the requested correction.",
+                    "changed_files": ["feature.txt"],
+                    "evidence": [],
+                    "verification": "python -m unittest discover -s tests",
+                }
+            ],
+        },
     )
     resolution_root = input_root / "resolutions"
     resolution_root.mkdir()
@@ -623,12 +651,15 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             previous_review = json.loads(
                 previous_review_path.read_text(encoding="utf-8")
             )
+            previous_response = json.loads(
+                previous_response_path.read_text(encoding="utf-8")
+            )
 
             def restore_inputs() -> None:
                 _write_json_fixture(previous_review_path, previous_review)
                 _write_json_fixture(
                     previous_response_path,
-                    {"schema_version": 1},
+                    previous_response,
                 )
                 for index, resolution in enumerate(resolutions, start=1):
                     resolution_json = (
@@ -671,9 +702,10 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                     "invalid previous response",
                     lambda: _write_json_fixture(
                         previous_response_path,
-                        {"schema_version": 2},
+                        {**previous_response, "schema_version": 2},
                     ),
-                    "previous response.schema_version must be 1",
+                    "previous response failed validation: implementation "
+                    "response.schema_version must be 1",
                 ),
                 (
                     "tampered companion",
@@ -804,6 +836,26 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                         (prepared.bundle / "local-state.json").exists()
                     )
                     self.assertEqual(_result_prompt_events(prepared), [])
+
+    def test_previous_response_without_review_is_a_request_shape_error(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            request_value = copy.deepcopy(prepared.request)
+            request_value["previous_review_path"] = None
+            request = ReviewRequest.from_dict(request_value)
+            (
+                prepared.bundle / "input/previous-review.json"
+            ).unlink()
+
+            with self.assertRaisesRegex(
+                ReviewSubmissionError,
+                "^a previous response requires a previous review$",
+            ):
+                _validate_bundle_inputs(prepared.bundle, request)
 
     def test_previous_round_result_id_is_rejected_before_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

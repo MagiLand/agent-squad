@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -69,6 +70,108 @@ def _active_state_arguments(**overrides: object) -> dict[str, object]:
     }
     arguments.update(overrides)
     return arguments
+
+
+def _write_history_round(
+    run_directory: Path,
+    round_number: int,
+    *,
+    status: str = "applied",
+    result_id: str | None = None,
+    object_format: str = "sha1",
+) -> tuple[dict[str, object], dict[str, object]]:
+    run_id = "12345678-1234-5678-9234-567812345678"
+    request_id = (
+        f"{round_number:08d}-1111-4111-8111-"
+        f"{round_number:012d}"
+    )
+    resolved_result_id = result_id or (
+        f"{round_number + 100:08d}-2222-4222-8222-"
+        f"{round_number + 100:012d}"
+    )
+    oid_length = 64 if object_format == "sha256" else 40
+    base_oid = "b" * oid_length
+    head_oid = "a" * oid_length
+    review = {
+        "schema_version": 1,
+        "created_at": "2026-08-29T00:00:00Z",
+        "result_id": resolved_result_id,
+        "request_id": request_id,
+        "run_id": run_id,
+        "round": round_number,
+        "base_oid": base_oid,
+        "head_oid": head_oid,
+        "verdict": "changes_requested",
+        "summary": "One blocking correction is required.",
+        "findings": [
+            {
+                "id": "REV-001",
+                "severity": "high",
+                "blocking": True,
+                "category": "correctness",
+                "file": "feature.txt",
+                "line_start": 1,
+                "line_end": 1,
+                "problem": "The value is incomplete.",
+                "evidence": "The file contains a placeholder.",
+                "impact": "Consumers see incomplete content.",
+                "required_change": "Complete the value.",
+                "verification": "Run the focused test.",
+            }
+        ],
+        "non_blocking_observations": [],
+    }
+    review_bytes = f"{json.dumps(review, indent=2)}\n".encode("utf-8")
+    digest = hashlib.sha256(review_bytes).hexdigest()
+
+    def artifact(path: str, sha256: str = "d" * 64) -> dict[str, str]:
+        return {"path": path, "sha256": sha256}
+
+    record = {
+        "schema_version": 1,
+        "created_at": "2026-08-29T00:00:00Z",
+        "updated_at": "2026-08-29T00:00:00Z",
+        "run_id": run_id,
+        "round": round_number,
+        "mode": "new_revision",
+        "request_id": request_id,
+        "result_id": resolved_result_id,
+        "verdict": "changes_requested",
+        "base_oid": base_oid,
+        "head_oid": head_oid,
+        "git_object_format": object_format,
+        "status": status,
+        "review_worktree": f"/review/round-{round_number:03d}",
+        "reviewer": {
+            "name": (
+                "asq-123456781234-"
+                f"r{round_number:03d}-reviewer"
+            ),
+            "kind": "claude",
+            "start_args": [],
+        },
+        "artifacts": {
+            "request": artifact("request.json"),
+            "implementation_report": artifact(
+                "implementation-report.md"
+            ),
+            "bundle_inputs": [artifact("input/request.json")],
+            "review_result": artifact("review.json", digest),
+            "review_markdown": artifact("review.md"),
+            "review_marker": artifact("review-marker.json"),
+            "approval": None,
+            "bundle_archive": [artifact("bundle/input/request.json")],
+        },
+        "warnings": [],
+    }
+    round_directory = run_directory / "rounds" / f"{round_number:03d}"
+    round_directory.mkdir(parents=True)
+    (round_directory / "review.json").write_bytes(review_bytes)
+    (round_directory / "round.json").write_text(
+        f"{json.dumps(record, indent=2)}\n",
+        encoding="utf-8",
+    )
+    return record, review
 
 
 class ReviewBudgetTests(unittest.TestCase):
@@ -210,6 +313,22 @@ class ProtocolValueValidationTests(unittest.TestCase):
         self.assertEqual(
             runs._next_action(runs.RunPhase.IMPLEMENTING),
             "continue implementing the captured task",
+        )
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.IMPLEMENTING,
+                handoff_status=runs.HandoffStatus.SENT,
+            ),
+            "continue implementing the captured task",
+        )
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.IMPLEMENTING,
+                correction_required=True,
+            ),
+            "agent-squad submit --report <report.md> --response "
+            "<response.json> --mode <new_revision|reconsideration> after "
+            "addressing every blocking finding",
         )
         self.assertEqual(
             runs._next_action(runs.RunPhase.REVIEWING),
@@ -705,7 +824,9 @@ class RunArtifactValidationTests(unittest.TestCase):
                 active_round=_active_round(RoundStatus.APPLIED),
             )
         )
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.status, RoundStatus.APPLIED)
 
     def test_approved_state_binds_one_applied_result_and_exact_head(
         self,
@@ -751,6 +872,291 @@ class RunArtifactValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(runs.RunStateError, message):
                     runs._validate_active_state_shape(**arguments)
+
+
+class AppliedReviewHistoryTests(unittest.TestCase):
+    def test_latest_applied_review_ignores_later_non_applied_rounds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            _, first_review = _write_history_round(run_directory, 1)
+            _write_history_round(run_directory, 2, status="invalid")
+
+            authority = runs.latest_applied_review_before(
+                run_directory=run_directory,
+                run_id=str(first_review["run_id"]),
+                current_round=3,
+                base_oid=str(first_review["base_oid"]),
+                object_format="sha1",
+            )
+
+            self.assertEqual(authority.round_record.round_number, 1)
+            self.assertEqual(
+                authority.review.result_id,
+                first_review["result_id"],
+            )
+
+    def test_historical_round_identity_is_validated_field_by_field(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "run ID",
+                lambda record: record.update(
+                    run_id="87654321-4321-6789-a234-678912345678"
+                ),
+                {},
+            ),
+            (
+                "round number",
+                lambda record: record.update(round=2),
+                {},
+            ),
+            (
+                "base OID",
+                lambda record: record.update(base_oid="c" * 40),
+                {},
+            ),
+            (
+                "object format",
+                lambda record: record.update(
+                    git_object_format="sha256",
+                    base_oid="b" * 64,
+                    head_oid="a" * 64,
+                ),
+                {"base_oid": "b" * 64},
+            ),
+        )
+        for message, mutate, overrides in cases:
+            with self.subTest(field=message):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    run_directory = Path(temporary_directory) / "run"
+                    record, review = _write_history_round(run_directory, 1)
+                    mutate(record)
+                    round_path = run_directory / "rounds/001/round.json"
+                    round_path.write_text(
+                        f"{json.dumps(record, indent=2)}\n",
+                        encoding="utf-8",
+                    )
+                    arguments = {
+                        "run_directory": run_directory,
+                        "run_id": str(review["run_id"]),
+                        "round_number": 1,
+                        "base_oid": str(review["base_oid"]),
+                        "object_format": "sha1",
+                        **overrides,
+                    }
+
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        message,
+                    ):
+                        runs._load_historical_round_record(**arguments)
+
+    def test_historical_round_sequence_requires_normal_directories(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            rounds = run_directory / "rounds"
+            rounds.mkdir(parents=True)
+            (rounds / "001").write_text("not a directory\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "history must contain normal directories",
+            ):
+                runs.latest_applied_review_before(
+                    run_directory=run_directory,
+                    run_id="12345678-1234-5678-9234-567812345678",
+                    current_round=2,
+                    base_oid="b" * 40,
+                    object_format="sha1",
+                )
+
+    def test_latest_history_requires_an_applied_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            _, review = _write_history_round(
+                run_directory,
+                1,
+                status="invalid",
+            )
+
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "no previous applied review",
+            ):
+                runs.latest_applied_review_before(
+                    run_directory=run_directory,
+                    run_id=str(review["run_id"]),
+                    current_round=2,
+                    base_oid=str(review["base_oid"]),
+                    object_format="sha1",
+                )
+
+    def test_applied_review_digest_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            _, review = _write_history_round(run_directory, 1)
+            (run_directory / "rounds/001/review.json").write_text(
+                "tampered\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "review result digest does not match",
+            ):
+                runs.latest_applied_review_before(
+                    run_directory=run_directory,
+                    run_id=str(review["run_id"]),
+                    current_round=2,
+                    base_oid=str(review["base_oid"]),
+                    object_format="sha1",
+                )
+
+    def test_applied_review_validator_requires_applied_review_authority(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            _, review = _write_history_round(run_directory, 1)
+            round_directory, round_record = (
+                runs._load_historical_round_record(
+                    run_directory=run_directory,
+                    run_id=str(review["run_id"]),
+                    round_number=1,
+                    base_oid=str(review["base_oid"]),
+                    object_format="sha1",
+                )
+            )
+            assert round_record.review_result is not None
+            cases = (
+                (
+                    replace(round_record, status=RoundStatus.INVALID),
+                    "status does not match authoritative history",
+                ),
+                (
+                    replace(round_record, review_result=None),
+                    "must record review.json",
+                ),
+                (
+                    replace(
+                        round_record,
+                        review_result=replace(
+                            round_record.review_result,
+                            path="different-review.json",
+                        ),
+                    ),
+                    "review result path must be review.json",
+                ),
+            )
+            for candidate, message in cases:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(runs.RunStateError, message):
+                        runs.validate_applied_review_round(
+                            round_directory=round_directory,
+                            round_record=candidate,
+                            round_number=1,
+                        )
+
+    def test_applied_review_must_match_its_authoritative_round_record(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "run ID",
+                lambda review: review.update(
+                    run_id="87654321-4321-6789-a234-678912345678"
+                ),
+            ),
+            ("round number", lambda review: review.update(round=2)),
+            ("request ID", lambda review: review.update(
+                request_id="77777777-7777-4777-8777-777777777777"
+            )),
+            ("result ID", lambda review: review.update(
+                result_id="66666666-6666-4666-8666-666666666666"
+            )),
+            ("base OID", lambda review: review.update(base_oid="c" * 40)),
+            ("head OID", lambda review: review.update(head_oid="c" * 40)),
+            (
+                "verdict",
+                lambda review: review.update(verdict="needs_human"),
+            ),
+        )
+        for label, mutate in cases:
+            with self.subTest(field=label):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    run_directory = Path(temporary_directory) / "run"
+                    record, review = _write_history_round(run_directory, 1)
+                    mutate(review)
+                    review_bytes = (
+                        f"{json.dumps(review, indent=2)}\n".encode("utf-8")
+                    )
+                    record["artifacts"]["review_result"]["sha256"] = (
+                        hashlib.sha256(review_bytes).hexdigest()
+                    )
+                    round_directory = run_directory / "rounds/001"
+                    (round_directory / "review.json").write_bytes(review_bytes)
+                    (round_directory / "round.json").write_text(
+                        f"{json.dumps(record, indent=2)}\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        f"review {label} does not match authoritative history",
+                    ):
+                        runs.latest_applied_review_before(
+                            run_directory=run_directory,
+                            run_id=str(record["run_id"]),
+                            current_round=2,
+                            base_oid=str(record["base_oid"]),
+                            object_format="sha1",
+                        )
+
+    def test_result_lookup_finds_one_recorded_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            _, first_review = _write_history_round(run_directory, 1)
+            second_record, _ = _write_history_round(
+                run_directory,
+                2,
+                status="invalid",
+            )
+
+            matched = runs.find_recorded_review_round(
+                run_directory=run_directory,
+                run_id=str(first_review["run_id"]),
+                current_round=2,
+                base_oid=str(first_review["base_oid"]),
+                object_format="sha1",
+                result_id=str(first_review["result_id"]),
+            )
+
+            self.assertIsNotNone(matched)
+            assert matched is not None
+            self.assertEqual(matched[1].round_number, 1)
+
+            second_record["result_id"] = first_review["result_id"]
+            (run_directory / "rounds/002/round.json").write_text(
+                f"{json.dumps(second_record, indent=2)}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "appears in multiple authoritative rounds",
+            ):
+                runs.find_recorded_review_round(
+                    run_directory=run_directory,
+                    run_id=str(first_review["run_id"]),
+                    current_round=2,
+                    base_oid=str(first_review["base_oid"]),
+                    object_format="sha1",
+                    result_id=str(first_review["result_id"]),
+                )
 
 
 class ApprovalArtifactGuardTests(unittest.TestCase):

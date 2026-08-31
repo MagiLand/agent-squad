@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
@@ -19,6 +20,72 @@ from agent_squad.initialization import (  # noqa: E402
 
 
 class SubmissionHelperTests(unittest.TestCase):
+    def test_failure_normalization_preserves_interruptions(self) -> None:
+        ordinary = OSError("disk full")
+        with self.assertRaisesRegex(
+            submissions.SubmissionError,
+            "could not persist",
+        ) as raised:
+            submissions._raise_submission_failure(
+                ordinary,
+                "could not persist",
+            )
+        self.assertIs(raised.exception.__cause__, ordinary)
+
+        interruption = KeyboardInterrupt("stop")
+        with self.assertRaises(KeyboardInterrupt) as interrupted:
+            submissions._raise_submission_failure(
+                interruption,
+                "rollback context",
+            )
+        self.assertIs(interrupted.exception, interruption)
+        self.assertIn(
+            "rollback context",
+            interrupted.exception.__notes__,
+        )
+
+    def test_followup_uses_the_latest_applied_historical_review(self) -> None:
+        authority = SimpleNamespace(
+            round_directory=Path("/run/rounds/001"),
+            round_record=SimpleNamespace(
+                round_number=1,
+                verdict=submissions.ReviewVerdict.CHANGES_REQUESTED,
+            ),
+            review=SimpleNamespace(head_oid="a" * 40),
+            review_bytes=b"review\n",
+        )
+        active = SimpleNamespace(
+            current_round=2,
+            current_head_oid="c" * 40,
+            active_round=SimpleNamespace(
+                request_id="current-request",
+                result_id="current-result",
+                status=submissions.RoundStatus.INVALID,
+            ),
+            run_id="12345678-1234-5678-9234-567812345678",
+            base_oid="b" * 40,
+            git_object_format="sha1",
+        )
+        with mock.patch.object(
+            submissions.runs,
+            "latest_applied_review_before",
+            return_value=authority,
+        ) as latest:
+            result = submissions._load_applied_changes_review(
+                Path("/run"),
+                active,
+            )
+
+        self.assertEqual(result.round_directory, authority.round_directory)
+        self.assertIs(result.review, authority.review)
+        latest.assert_called_once_with(
+            run_directory=Path("/run"),
+            run_id=active.run_id,
+            current_round=3,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+        )
+
     def test_generated_path_matching_uses_path_components(self) -> None:
         configured = ("build/", "coverage/report/")
 
