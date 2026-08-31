@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -106,6 +107,56 @@ class LocalStateErrorTests(unittest.TestCase):
                     stderr.getvalue(),
                 )
                 self.assertNotIn("Traceback", stderr.getvalue())
+
+
+class ApplyReviewOutputTests(unittest.TestCase):
+    def test_output_uses_the_typed_verdict_for_head_authority(self) -> None:
+        base = {
+            "run_id": "12345678-1234-5678-9234-567812345678",
+            "round_number": 1,
+            "result_id": "87654321-4321-6789-a234-678912345678",
+            "head_oid": "a" * 40,
+            "bundle_archive": Path("/archive"),
+            "replayed": False,
+            "next_action": "next",
+            "cleanup_warnings": (),
+        }
+        cases = (
+            (
+                cli.ReviewVerdict.CHANGES_REQUESTED,
+                Path("/unexpected-approval"),
+                "Reviewed head:",
+                "Approval authority:",
+            ),
+            (
+                cli.ReviewVerdict.APPROVED,
+                Path("/approval.json"),
+                "Approval authority: /approval.json",
+                "Reviewed head:",
+            ),
+        )
+        for verdict, approval_path, expected, absent in cases:
+            with self.subTest(verdict=verdict):
+                stdout = StringIO()
+                with (
+                    mock.patch.object(
+                        cli,
+                        "apply_review",
+                        return_value=SimpleNamespace(
+                            **base,
+                            verdict=verdict,
+                            approval_path=approval_path,
+                        ),
+                    ),
+                    redirect_stdout(stdout),
+                ):
+                    result = cli._run_apply_review(
+                        SimpleNamespace(result_id=None)
+                    )
+
+                self.assertEqual(result, 0)
+                self.assertIn(expected, stdout.getvalue())
+                self.assertNotIn(absent, stdout.getvalue())
 
 
 if __name__ == "__main__":

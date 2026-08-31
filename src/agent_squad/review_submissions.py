@@ -14,17 +14,18 @@ from .artifacts import (
     BundleArtifact,
     DeveloperResolution,
     ReviewRequest,
+    ReviewResponse,
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
     deterministic_reviewer_name,
+    validate_review_response,
 )
 from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
     AgentSquadError,
     GitWorktree,
     REVIEW_DIRECTORY_NAME,
-    SCHEMA_VERSION,
     discover_git_worktree,
     matches_allowed_generated_path,
     run_git,
@@ -661,22 +662,28 @@ def _validate_bundle_inputs(
             request.previous_response_path
         )
         expected_paths.add(previous_response_path)
-        response, _ = _load_json_file(
+        response_value, _ = _load_json_file(
             bundle_root.joinpath(*previous_response_path.parts),
             "previous response",
         )
-        response_data = _VALIDATOR.require_object(
-            response,
-            "previous response",
-        )
-        schema_version = _VALIDATOR.require_int(
-            response_data.get("schema_version"),
-            "previous response.schema_version",
-        )
-        if schema_version != SCHEMA_VERSION:
+        if previous_review is None:
             raise ReviewSubmissionError(
-                f"previous response.schema_version must be {SCHEMA_VERSION}"
+                "a previous response requires a previous review"
             )
+        try:
+            response = ReviewResponse.from_dict(
+                response_value,
+                object_format=request.object_format,
+            )
+            validate_review_response(
+                response,
+                previous_review,
+                request.mode,
+            )
+        except ArtifactValidationError as error:
+            raise ReviewSubmissionError(
+                f"previous response failed validation: {error}"
+            ) from error
 
     resolution_times: list[datetime] = []
     resolution_ids: set[str] = set()

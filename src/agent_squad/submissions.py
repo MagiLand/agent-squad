@@ -1,4 +1,4 @@
-"""Durable first-round review submission for an exact Git revision."""
+"""Durable review submission for an exact Git revision."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import tempfile
+from typing import NoReturn
 import uuid
 
 from . import runs
@@ -20,11 +21,19 @@ from .artifacts import (
     BundleArtifact,
     HandoffRecord,
     HandoffStatus,
+    PREVIOUS_RESPONSE_BUNDLE_PATH,
+    PREVIOUS_REVIEW_BUNDLE_PATH,
     ReviewRequest,
+    ReviewResponse,
+    ReviewResult,
     ReviewRoundRecord,
+    ReviewVerdict,
+    ROUND_RESPONSE_FILE_NAME,
+    ResponseDisposition,
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    validate_review_response,
 )
 from .herdr import (
     HerdrClient,
@@ -43,8 +52,10 @@ from .initialization import (
     run_git,
 )
 from .storage import (
+    InvalidJsonError,
     append_event,
     atomic_write,
+    decode_json,
     encode_json,
     exclusive_file_lock,
     utc_timestamp,
@@ -63,6 +74,18 @@ class SubmissionError(AgentSquadError):
     """Raised when a review request cannot be prepared safely."""
 
 
+def _raise_submission_failure(
+    error: BaseException,
+    message: str,
+) -> NoReturn:
+    """Preserve interruptions while normalizing ordinary failures."""
+
+    if isinstance(error, Exception):
+        raise SubmissionError(message) from error
+    error.add_note(message)
+    raise error
+
+
 _VALIDATOR = JsonValidator(SubmissionError)
 
 
@@ -73,6 +96,14 @@ class ImplementationReport:
     source_path: Path
     content: bytes
     sha256: str
+
+
+@dataclass(frozen=True)
+class ImplementationResponse:
+    """Validated response content staged for a corrected submission."""
+
+    source_path: Path
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -108,9 +139,10 @@ def submit_candidate(
     *,
     report_path: Path,
     mode: SubmissionMode | str,
+    response_path: Path | None = None,
     herdr_client: HerdrClient | None = None,
 ) -> SubmitResult:
-    """Persist a first review round, then attempt its Herdr notification."""
+    """Persist one review round, then attempt its Herdr notification."""
 
     repository = load_initialized_repository(start)
     selected_mode = _submission_mode(mode)
@@ -121,6 +153,7 @@ def submit_candidate(
                 repository,
                 report_path=report_path,
                 mode=selected_mode,
+                response_path=response_path,
             )
             client = herdr_client or HerdrClient(repository.worktree.root)
             installation: HerdrInstallation | None = None
@@ -175,6 +208,7 @@ def _prepare_submission_locked(
     *,
     report_path: Path,
     mode: SubmissionMode,
+    response_path: Path | None,
 ) -> _PreparedSubmission:
     status = runs.inspect_status_locked(
         repository.worktree.invocation_directory
@@ -189,25 +223,33 @@ def _prepare_submission_locked(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "submit is allowed only while implementing"
         )
-    if (
-        active.current_round != 0
-        or active.current_head_oid is not None
+    is_first_round = active.current_round == 0
+    if is_first_round and (
+        active.current_head_oid is not None
         or active.active_round is not None
         or active.handoff is not None
     ):
         raise SubmissionError(
-            "the first submission requires an unused run with no existing "
-            "round"
+            "first-round run state is internally inconsistent"
         )
     _validate_branch_identity(active.repository, repository.worktree)
 
-    report = _capture_report(
-        report_path,
-        repository.worktree.invocation_directory,
-    )
+    artifact_candidates = [
+        _submission_artifact_candidate(
+            report_path,
+            repository.worktree.invocation_directory,
+        )
+    ]
+    if response_path is not None:
+        artifact_candidates.append(
+            _submission_artifact_candidate(
+                response_path,
+                repository.worktree.invocation_directory,
+            )
+        )
     _validate_implementation_cleanliness(
         repository,
-        report_source=report.source_path,
+        artifact_sources=tuple(artifact_candidates),
     )
     object_format = _current_object_format(repository.worktree.root)
     if object_format != active.git_object_format:
@@ -220,16 +262,6 @@ def _prepare_submission_locked(
         active.base_oid,
         head_oid,
     )
-    _validate_first_submission_mode(
-        mode,
-        base_oid=active.base_oid,
-        head_oid=head_oid,
-    )
-    warnings = _sensitive_change_warnings(
-        repository.worktree.root,
-        active.base_oid,
-        head_oid,
-    )
 
     run_directory = runs.safe_run_directory(
         repository.control_root,
@@ -238,10 +270,90 @@ def _prepare_submission_locked(
     state_path = repository.control_root / runs.STATE_FILE_NAME
     run_record_path = run_directory / runs.RUN_RECORD_FILE_NAME
     state = runs.load_json_object(state_path, "authoritative state")
+    original_state = state_path.read_bytes()
     run_record = runs.load_json_object(run_record_path, "active run record")
     original_run_record = run_record_path.read_bytes()
 
-    round_number = 1
+    previous: runs.AppliedReviewAuthority | None = None
+    implementation_response: ImplementationResponse | None = None
+    additional_bundle_contents: tuple[
+        tuple[BundleArtifact, bytes], ...
+    ] = ()
+    if is_first_round:
+        _validate_first_submission_mode(
+            mode,
+            base_oid=active.base_oid,
+            head_oid=head_oid,
+        )
+        round_number = 1
+    else:
+        previous = _load_applied_changes_review(
+            run_directory,
+            active,
+        )
+        _validate_followup_submission_mode(
+            mode,
+            head_oid=head_oid,
+            previous_reviewed_head_oid=previous.review.head_oid,
+        )
+        round_number = active.current_round + 1
+
+    report = _capture_report(
+        report_path,
+        repository.worktree.invocation_directory,
+    )
+    if previous is None:
+        previous_review_path = None
+        previous_response_path = None
+        if response_path is not None:
+            raise SubmissionError(
+                "the first review round does not accept --response"
+            )
+    else:
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
+        if response_path is None:
+            raise SubmissionError(
+                "a submission after changes_requested requires --response "
+                "<response.json>"
+            )
+        implementation_response = _capture_response(
+            response_path,
+            repository.worktree.invocation_directory,
+            object_format=object_format,
+            previous_review=previous.review,
+            mode=mode,
+        )
+        additional_bundle_contents = (
+            (
+                BundleArtifact(
+                    path=previous_review_path,
+                    sha256=hashlib.sha256(
+                        previous.review_bytes
+                    ).hexdigest(),
+                ),
+                previous.review_bytes,
+            ),
+            (
+                BundleArtifact(
+                    path=previous_response_path,
+                    sha256=hashlib.sha256(
+                        implementation_response.content
+                    ).hexdigest(),
+                ),
+                implementation_response.content,
+            ),
+        )
+
+    artifact_sources = [report.source_path]
+    if implementation_response is not None:
+        artifact_sources.append(implementation_response.source_path)
+    warnings = _sensitive_change_warnings(
+        repository.worktree.root,
+        active.base_oid,
+        head_oid,
+    )
+
     request_id = str(uuid.uuid4())
     timestamp = utc_timestamp()
     try:
@@ -279,8 +391,8 @@ def _prepare_submission_locked(
             sha256=report.sha256,
         ),
         context_files=context_files,
-        previous_review_path=None,
-        previous_response_path=None,
+        previous_review_path=previous_review_path,
+        previous_response_path=previous_response_path,
         resolution_paths=(),
         review_output_path="output/review.json",
         review_markdown_path="output/review.md",
@@ -314,6 +426,9 @@ def _prepare_submission_locked(
         reviewer_start_args=active.reviewer_start_args,
         request_digest=request_digest,
         warnings=warnings,
+        additional_bundle_inputs=tuple(
+            artifact for artifact, _ in additional_bundle_contents
+        ),
     )
 
     rounds_root = run_directory / ROUNDS_DIRECTORY_NAME
@@ -325,6 +440,20 @@ def _prepare_submission_locked(
     bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     round_directory_committed = False
     run_record_written = False
+    response_authority_path = (
+        previous.round_directory / ROUND_RESPONSE_FILE_NAME
+        if previous is not None
+        else None
+    )
+    original_response: bytes | None = None
+    response_existed = False
+    response_written = False
+    if response_authority_path is not None and os.path.lexists(
+        response_authority_path
+    ):
+        response_existed = True
+        original_response = _read_file(response_authority_path)
+    next_state_bytes: bytes | None = None
     commit_point_reached = False
     try:
         rounds_root_created = _ensure_rounds_root(rounds_root)
@@ -370,6 +499,7 @@ def _prepare_submission_locked(
             request=request,
             request_bytes=request_bytes,
             report=report,
+            additional_inputs=additional_bundle_contents,
         )
         _verify_review_worktree(
             review_worktree,
@@ -377,11 +507,12 @@ def _prepare_submission_locked(
             request_bytes=request_bytes,
             run_directory=run_directory,
             report=report,
+            additional_inputs=additional_bundle_contents,
         )
         _validate_branch_identity(active.repository, repository.worktree)
         _validate_implementation_cleanliness(
             repository,
-            report_source=report.source_path,
+            artifact_sources=tuple(artifact_sources),
         )
         current_head_oid = _resolve_head(
             repository.worktree.root,
@@ -414,10 +545,21 @@ def _prepare_submission_locked(
             active_round=active_round.to_dict(),
             handoff=pending_handoff.to_dict(),
         )
+        next_state_bytes = encode_json(next_state)
 
         staging_directory.replace(round_directory)
         staging_directory = None
         round_directory_committed = True
+        if (
+            response_authority_path is not None
+            and implementation_response is not None
+        ):
+            atomic_write(
+                response_authority_path,
+                implementation_response.content,
+                mode=0o400,
+            )
+            response_written = True
         atomic_write(
             run_record_path,
             encode_json(next_run_record),
@@ -426,7 +568,7 @@ def _prepare_submission_locked(
         run_record_written = True
         atomic_write(
             state_path,
-            encode_json(next_state),
+            next_state_bytes,
             mode=0o600,
         )
         commit_point_reached = True
@@ -444,15 +586,65 @@ def _prepare_submission_locked(
                 "reviewer_name": reviewer_name,
             },
         )
-    except Exception as error:
-        if commit_point_reached:
+    except BaseException as error:
+        if not commit_point_reached:
+            try:
+                current_state = state_path.read_bytes()
+            except OSError as inspection_error:
+                message = (
+                    "could not determine whether the review-request state "
+                    f"committed after {error}: {inspection_error}; staged "
+                    "artifacts were left in place"
+                )
+                _raise_submission_failure(error, message)
+            if (
+                next_state_bytes is not None
+                and current_state == next_state_bytes
+            ):
+                message = (
+                    "the review request is durable, but state persistence "
+                    f"reported an error; retry the command: {error}"
+                )
+                _raise_submission_failure(error, message)
+            if current_state != original_state:
+                message = (
+                    "authoritative state changed unexpectedly after a "
+                    f"review-request failure ({error}); staged artifacts "
+                    "were left in place"
+                )
+                _raise_submission_failure(error, message)
+        else:
             if isinstance(error, SubmissionError):
                 raise
-            raise SubmissionError(
+            message = (
                 "the review request is durable, but its persisted event "
                 f"could not be recorded: {error}"
-            ) from error
+            )
+            _raise_submission_failure(error, message)
         cleanup_errors: list[str] = []
+        if response_written and response_authority_path is not None:
+            try:
+                current_response = _read_file(response_authority_path)
+                if (
+                    implementation_response is None
+                    or current_response != implementation_response.content
+                ):
+                    raise OSError("content changed during rollback")
+                if response_existed:
+                    if original_response is None:
+                        raise OSError("original response was not captured")
+                    atomic_write(
+                        response_authority_path,
+                        original_response,
+                        mode=0o400,
+                    )
+                else:
+                    response_authority_path.unlink()
+            except (OSError, SubmissionError) as cleanup_error:
+                cleanup_errors.append(
+                    "could not restore the previous-round response: "
+                    f"{cleanup_error}"
+                )
         if run_record_written:
             try:
                 atomic_write(
@@ -500,10 +692,11 @@ def _prepare_submission_locked(
             else ""
         )
         if isinstance(error, AgentSquadError):
-            raise SubmissionError(f"{error}.{cleanup_note}") from error
-        raise SubmissionError(
+            _raise_submission_failure(error, f"{error}.{cleanup_note}")
+        message = (
             f"could not prepare the review request: {error}.{cleanup_note}"
-        ) from error
+        )
+        _raise_submission_failure(error, message)
 
     return _PreparedSubmission(
         repository=repository,
@@ -623,6 +816,16 @@ def _validate_branch_identity(
         )
 
 
+def _submission_artifact_candidate(
+    path: Path,
+    invocation_directory: Path,
+) -> Path:
+    """Resolve an artifact name for the pre-ingest clean-tree scan."""
+
+    candidate = path if path.is_absolute() else invocation_directory / path
+    return candidate.resolve(strict=False)
+
+
 def _capture_report(
     path: Path,
     invocation_directory: Path,
@@ -662,10 +865,121 @@ def _capture_report(
     )
 
 
+def _load_applied_changes_review(
+    run_directory: Path,
+    active: runs.ActiveRunStatus,
+) -> runs.AppliedReviewAuthority:
+    active_round = active.active_round
+    if (
+        active.current_round < 1
+        or active.current_head_oid is None
+        or active_round is None
+    ):
+        raise SubmissionError(
+            "a follow-up submission requires one applied prior review"
+        )
+    try:
+        authority = runs.latest_applied_review_before(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round + 1,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+        )
+    except runs.RunStateError as error:
+        raise SubmissionError(str(error)) from error
+    round_record = authority.round_record
+    if round_record.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+        raise SubmissionError(
+            "a follow-up submission requires an applied changes_requested "
+            "review"
+        )
+    if round_record.round_number == active.current_round:
+        comparisons = (
+            (round_record.request_id, active_round.request_id, "request ID"),
+            (round_record.result_id, active_round.result_id, "result ID"),
+            (round_record.head_oid, active.current_head_oid, "head OID"),
+            (active_round.status, RoundStatus.APPLIED, "status"),
+        )
+        for actual, expected, label in comparisons:
+            if actual != expected:
+                raise SubmissionError(
+                    f"previous applied round {label} does not match "
+                    "authoritative state"
+                )
+    return authority
+
+
+def _capture_response(
+    path: Path,
+    invocation_directory: Path,
+    *,
+    object_format: str,
+    previous_review: ReviewResult,
+    mode: SubmissionMode,
+) -> ImplementationResponse:
+    candidate = path if path.is_absolute() else invocation_directory / path
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_file():
+            raise SubmissionError(
+                f"implementation response must be a regular file: {resolved}"
+            )
+        with resolved.open("rb") as response_file:
+            if not stat.S_ISREG(os.fstat(response_file.fileno()).st_mode):
+                raise SubmissionError(
+                    "implementation response must be a regular file: "
+                    f"{resolved}"
+                )
+            content = response_file.read()
+    except SubmissionError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise SubmissionError(
+            f"cannot read implementation response {candidate}: {error}"
+        ) from error
+    try:
+        value = decode_json(content.decode("utf-8"))
+        response = ReviewResponse.from_dict(
+            value,
+            object_format=object_format,
+        )
+        validate_review_response(response, previous_review, mode)
+    except (
+        UnicodeDecodeError,
+        InvalidJsonError,
+        ArtifactValidationError,
+    ) as error:
+        raise SubmissionError(
+            f"implementation response failed validation: {error}"
+        ) from error
+    if (
+        response.supersedes_response_id is not None
+        or response.resolution_ids
+    ):
+        raise SubmissionError(
+            "response replacement after Developer resolution is not "
+            "supported by this command version"
+        )
+    if any(
+        item.disposition is ResponseDisposition.NEEDS_HUMAN
+        for item in response.responses
+    ):
+        raise SubmissionError(
+            "implementation response requires Developer authority; use "
+            "agent-squad escalate --response instead of creating a review "
+            "round"
+        )
+    return ImplementationResponse(
+        source_path=resolved,
+        content=content,
+    )
+
+
 def _validate_implementation_cleanliness(
     repository: InitializedRepository,
     *,
-    report_source: Path,
+    artifact_sources: tuple[Path, ...],
 ) -> None:
     root = repository.worktree.root
     ignored = run_git(
@@ -713,12 +1027,16 @@ def _validate_implementation_cleanliness(
     if untracked.returncode != 0:
         detail = untracked.stderr.strip() or "unknown Git error"
         raise SubmissionError(f"could not inspect untracked files: {detail}")
-    report_relative = _relative_to_repository(report_source, root)
+    artifact_paths = {
+        relative
+        for source in artifact_sources
+        if (relative := _relative_to_repository(source, root)) is not None
+    }
     unexpected = [
         entry
         for entry in untracked.stdout.split("\x00")
         if entry
-        and entry != report_relative
+        and entry not in artifact_paths
         and not is_agent_squad_runtime_path(entry)
         and not matches_allowed_generated_path(
             entry,
@@ -810,6 +1128,26 @@ def _validate_first_submission_mode(
         raise SubmissionError(
             "the first review round requires a committed candidate whose "
             "HEAD differs from the fixed base"
+        )
+
+
+def _validate_followup_submission_mode(
+    mode: SubmissionMode,
+    *,
+    head_oid: str,
+    previous_reviewed_head_oid: str,
+) -> None:
+    if mode is SubmissionMode.NEW_REVISION:
+        if head_oid == previous_reviewed_head_oid:
+            raise SubmissionError(
+                "a new_revision submission after changes_requested requires "
+                "a new committed HEAD"
+            )
+        return
+    if head_oid != previous_reviewed_head_oid:
+        raise SubmissionError(
+            "a reconsideration submission must keep the exact previously "
+            "reviewed HEAD"
         )
 
 
@@ -977,6 +1315,7 @@ def _build_review_bundle(
     request: ReviewRequest,
     request_bytes: bytes,
     report: ImplementationReport,
+    additional_inputs: tuple[tuple[BundleArtifact, bytes], ...],
 ) -> None:
     input_root = bundle_root / "input"
     output_root = bundle_root / "output"
@@ -1003,6 +1342,11 @@ def _build_review_bundle(
             directory /= part
             directory.mkdir(mode=0o700, exist_ok=True)
         atomic_write(destination, _read_file(source), mode=0o400)
+    for artifact, content in additional_inputs:
+        relative = PurePosixPath(artifact.path)
+        destination = bundle_root.joinpath(*relative.parts)
+        destination.parent.mkdir(mode=0o700, exist_ok=True)
+        atomic_write(destination, content, mode=0o400)
 
     authoritative_request = staging_directory / REQUEST_FILE_NAME
     if authoritative_request.read_bytes() != request_bytes:
@@ -1018,6 +1362,7 @@ def _verify_review_worktree(
     request_bytes: bytes,
     run_directory: Path,
     report: ImplementationReport,
+    additional_inputs: tuple[tuple[BundleArtifact, bytes], ...],
 ) -> None:
     if not review_worktree.is_dir() or review_worktree.is_symlink():
         raise SubmissionError(
@@ -1081,6 +1426,7 @@ def _verify_review_worktree(
             )
             for artifact in request.context_files
         ),
+        *additional_inputs,
     )
     for artifact, content in expected:
         path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -19,15 +20,16 @@ from tests.integration.test_review_submissions import (
 
 add_src_to_path()
 
-from agent_squad import review_applications, runs  # noqa: E402
+from agent_squad import review_applications, runs, submissions  # noqa: E402
 
 
 def _marker_confirmed_review(
     root: Path,
     *,
     verdict: str = "approved",
+    review_limit: int | None = None,
 ):
-    prepared = _prepare_round(root)
+    prepared = _prepare_round(root, review_limit=review_limit)
     return prepared, _submit_with_lost_notification(
         prepared,
         verdict=verdict,
@@ -50,6 +52,77 @@ def _submit_with_lost_notification(prepared, *, verdict: str = "approved"):
             f"{submitted.stderr}"
         )
     return review
+
+
+def _write_fixed_response(
+    path: Path,
+    prepared,
+    review: dict[str, object],
+) -> dict[str, object]:
+    response = {
+        "schema_version": 1,
+        "created_at": "2026-08-26T12:30:00Z",
+        "response_id": "44444444-4444-4444-8444-444444444444",
+        "supersedes_response_id": None,
+        "resolution_ids": [],
+        "run_id": prepared.request["run_id"],
+        "review_round": prepared.request["round"],
+        "review_result_id": review["result_id"],
+        "reviewed_head_oid": review["head_oid"],
+        "responses": [
+            {
+                "finding_id": "REV-001",
+                "disposition": "fixed",
+                "rationale": "The placeholder now contains the full value.",
+                "changed_files": ["feature.txt"],
+                "evidence": [],
+                "verification": "python -m unittest discover -s tests",
+            }
+        ],
+    }
+    path.write_text(
+        f"{json.dumps(response, indent=2)}\n",
+        encoding="utf-8",
+    )
+    return response
+
+
+def _write_rejected_response(
+    path: Path,
+    prepared,
+    review: dict[str, object],
+) -> dict[str, object]:
+    response = {
+        "schema_version": 1,
+        "created_at": "2026-08-26T12:30:00Z",
+        "response_id": "55555555-5555-4555-8555-555555555555",
+        "supersedes_response_id": None,
+        "resolution_ids": [],
+        "run_id": prepared.request["run_id"],
+        "review_round": prepared.request["round"],
+        "review_result_id": review["result_id"],
+        "reviewed_head_oid": review["head_oid"],
+        "responses": [
+            {
+                "finding_id": "REV-001",
+                "disposition": "rejected",
+                "rationale": (
+                    "The reviewed revision already contains the complete "
+                    "value."
+                ),
+                "changed_files": [],
+                "evidence": [
+                    "feature.txt:1 contains the complete candidate value"
+                ],
+                "verification": "",
+            }
+        ],
+    }
+    path.write_text(
+        f"{json.dumps(response, indent=2)}\n",
+        encoding="utf-8",
+    )
+    return response
 
 
 class ApprovedReviewLifecycleTests(unittest.TestCase):
@@ -642,7 +715,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     linked.unlink()
                     archive_root.chmod(0o500)
 
-    def test_nonapproved_result_remains_ready_for_later_increment(
+    def test_changes_requested_is_applied_once_and_returns_to_implementation(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -651,8 +724,193 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 root,
                 verdict="changes_requested",
             )
-            state_path = prepared.repository / ".agent-squad/state.json"
-            state_before = state_path.read_bytes()
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertIn("Verdict: changes_requested", applied.stdout)
+            self.assertIn(
+                "Next action: agent-squad submit --report <report.md> "
+                "--response <response.json> --mode "
+                "<new_revision|reconsideration> after addressing every "
+                "blocking finding",
+                applied.stdout,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_id = str(state["active_run_id"])
+            round_directory = control_root / "runs" / run_id / "rounds/001"
+            round_path = round_directory / "round.json"
+            round_record = json.loads(round_path.read_text(encoding="utf-8"))
+            events_path = control_root / "runs" / run_id / "events.jsonl"
+
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["approved_head_oid"], None)
+            self.assertEqual(state["current_head_oid"], review["head_oid"])
+            self.assertEqual(
+                state["review_budget"]["completed_change_reviews"],
+                1,
+            )
+            self.assertEqual(state["active_round"]["status"], "applied")
+            self.assertEqual(
+                state["active_round"]["result_id"],
+                review["result_id"],
+            )
+            self.assertEqual(round_record["status"], "applied")
+            self.assertEqual(round_record["verdict"], "changes_requested")
+            self.assertIsNone(round_record["artifacts"]["approval"])
+            self.assertTrue((round_directory / "review.json").is_file())
+            self.assertTrue((round_directory / "bundle").is_dir())
+
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn(
+                "Next action: agent-squad submit --report <report.md> "
+                "--response <response.json> --mode "
+                "<new_revision|reconsideration> after addressing every "
+                "blocking finding",
+                status.stdout,
+            )
+
+            state_before_replay = state_path.read_bytes()
+            round_before_replay = round_path.read_bytes()
+            events_before_replay = events_path.read_bytes()
+            replay = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertIn("already applied", replay.stdout)
+            self.assertEqual(state_path.read_bytes(), state_before_replay)
+            self.assertEqual(round_path.read_bytes(), round_before_replay)
+            self.assertEqual(events_path.read_bytes(), events_before_replay)
+
+    def test_changes_requested_status_accepts_retained_clean_worktree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            run(
+                [
+                    "git",
+                    "worktree",
+                    "lock",
+                    str(prepared.review_worktree),
+                ],
+                cwd=prepared.repository,
+            )
+            try:
+                applied = run_cli(
+                    prepared.repository,
+                    "apply-review",
+                    "--result-id",
+                    str(review["result_id"]),
+                    data_home=prepared.data_home,
+                    env_overrides=prepared.environment,
+                )
+
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+                self.assertIn(
+                    "could not remove review worktree",
+                    applied.stderr,
+                )
+                self.assertTrue(prepared.review_worktree.is_dir())
+                self.assertFalse(
+                    (
+                        prepared.review_worktree / ".agent-squad-review"
+                    ).exists()
+                )
+
+                status = run_cli(
+                    prepared.repository,
+                    "status",
+                    data_home=prepared.data_home,
+                    env_overrides=prepared.environment,
+                )
+
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertIn("Phase: implementing", status.stdout)
+                self.assertIn(
+                    f"Review worktree: {prepared.review_worktree}",
+                    status.stdout,
+                )
+                self.assertNotIn(
+                    "Review worktree available:",
+                    status.stdout,
+                )
+                self.assertIn(
+                    "Next action: agent-squad submit --report <report.md> "
+                    "--response <response.json>",
+                    status.stdout,
+                )
+            finally:
+                run(
+                    [
+                        "git",
+                        "worktree",
+                        "unlock",
+                        str(prepared.review_worktree),
+                    ],
+                    cwd=prepared.repository,
+                    check=False,
+                )
+                run(
+                    [
+                        "git",
+                        "worktree",
+                        "remove",
+                        str(prepared.review_worktree),
+                    ],
+                    cwd=prepared.repository,
+                    check=False,
+                )
+
+    def test_budget_exhaustion_refuses_before_authoritative_writes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+                review_limit=1,
+            )
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            round_directory = run_directory / "rounds/001"
+            events_path = run_directory / "events.jsonl"
+            original_state = state_path.read_bytes()
+            original_round = {
+                path.relative_to(round_directory).as_posix()
+                for path in round_directory.rglob("*")
+            }
+            original_events = events_path.read_bytes()
 
             applied = run_cli(
                 prepared.repository,
@@ -664,11 +922,1075 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             )
 
             self.assertEqual(applied.returncode, 1)
+            self.assertIn("review budget exhaustion", applied.stderr)
+            self.assertIn("no state was changed", applied.stderr)
+            self.assertEqual(state_path.read_bytes(), original_state)
+            self.assertEqual(events_path.read_bytes(), original_events)
+            self.assertEqual(
+                {
+                    path.relative_to(round_directory).as_posix()
+                    for path in round_directory.rglob("*")
+                },
+                original_round,
+            )
+            for name in (
+                "bundle",
+                "review.json",
+                "review.md",
+                "review-marker.json",
+            ):
+                self.assertFalse((round_directory / name).exists())
+
+    def test_corrected_revision_archives_response_and_starts_fresh_round(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertFalse(prepared.review_worktree.exists())
+
+            (prepared.repository / "feature.txt").write_text(
+                "complete candidate\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "feature.txt"], cwd=prepared.repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "fix: complete candidate",
+                ],
+                cwd=prepared.repository,
+            )
+            corrected_head = run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=prepared.repository,
+            ).stdout.strip()
+            report = root / "corrected-report.md"
+            report.write_text(
+                "# Implementation Report\n\nCompleted the candidate value.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "response.json"
+            _write_fixed_response(response_path, prepared, review)
+
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            control_root = prepared.repository / ".agent-squad"
+            state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            run_id = str(state["active_run_id"])
+            run_directory = control_root / "runs" / run_id
+            first_round = run_directory / "rounds/001"
+            second_round = run_directory / "rounds/002"
+            second_request = json.loads(
+                (second_round / "request.json").read_text(encoding="utf-8")
+            )
+            second_worktree = Path(state["active_round"]["review_worktree"])
+            second_bundle = second_worktree / ".agent-squad-review"
+
+            self.assertEqual(state["phase"], "reviewing")
+            self.assertEqual(state["current_round"], 2)
+            self.assertEqual(state["current_head_oid"], corrected_head)
+            self.assertEqual(
+                second_request["base_oid"],
+                prepared.request["base_oid"],
+            )
+            self.assertEqual(second_request["head_oid"], corrected_head)
+            self.assertNotEqual(
+                second_request["head_oid"],
+                review["head_oid"],
+            )
+            self.assertEqual(
+                second_request["previous_review_path"],
+                "input/previous-review.json",
+            )
+            self.assertEqual(
+                second_request["previous_response_path"],
+                "input/previous-response.json",
+            )
+            self.assertNotEqual(
+                second_request["reviewer_name"],
+                prepared.request["reviewer_name"],
+            )
+            self.assertNotEqual(second_worktree, prepared.review_worktree)
+            self.assertEqual(
+                run(["git", "rev-parse", "HEAD"], cwd=second_worktree)
+                .stdout.strip(),
+                corrected_head,
+            )
+            self.assertEqual(
+                run(
+                    ["git", "symbolic-ref", "--quiet", "HEAD"],
+                    cwd=second_worktree,
+                    check=False,
+                ).returncode,
+                1,
+            )
+            self.assertEqual(
+                (first_round / "response.json").read_bytes(),
+                response_path.read_bytes(),
+            )
+            self.assertEqual(
+                (second_bundle / "input/previous-review.json").read_bytes(),
+                (first_round / "review.json").read_bytes(),
+            )
+            self.assertEqual(
+                (second_bundle / "input/previous-response.json").read_bytes(),
+                response_path.read_bytes(),
+            )
+
+            state_path = control_root / "state.json"
+            events_path = run_directory / "events.jsonl"
+            replay_snapshot = (
+                state_path.read_bytes(),
+                (second_round / "round.json").read_bytes(),
+                events_path.read_bytes(),
+            )
+            historical_replay = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(
+                historical_replay.returncode,
+                0,
+                historical_replay.stderr,
+            )
+            self.assertIn("already applied", historical_replay.stdout)
+            self.assertIn("Round: 1", historical_replay.stdout)
             self.assertIn(
-                "not supported by this command version",
-                applied.stderr,
+                "Next action: wait for the Reviewer result",
+                historical_replay.stdout,
+            )
+            self.assertEqual(
+                (
+                    state_path.read_bytes(),
+                    (second_round / "round.json").read_bytes(),
+                    events_path.read_bytes(),
+                ),
+                replay_snapshot,
+            )
+
+            canonical_response = first_round / "response.json"
+            canonical_bytes = canonical_response.read_bytes()
+            canonical_response.chmod(0o600)
+            canonical_response.write_bytes(canonical_bytes + b"\n")
+            try:
+                with self.assertRaisesRegex(
+                    runs.RunStateError,
+                    "previous response does not match the active round",
+                ):
+                    runs.inspect_status(prepared.repository)
+            finally:
+                canonical_response.write_bytes(canonical_bytes)
+                canonical_response.chmod(0o400)
+
+            second_prepared = replace(
+                prepared,
+                review_worktree=second_worktree,
+                bundle=second_bundle,
+                request=second_request,
+            )
+            approval_review = _submit_with_lost_notification(
+                second_prepared,
+                verdict="approved",
+            )
+            approved = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(approval_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            self.assertIn("Verdict: approved", approved.stdout)
+            approved_state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            approved_round = json.loads(
+                (second_round / "round.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(approved_state["phase"], "approved")
+            self.assertEqual(
+                approved_state["approved_head_oid"],
+                corrected_head,
+            )
+            self.assertEqual(
+                approved_state["review_budget"][
+                    "completed_change_reviews"
+                ],
+                1,
+            )
+            self.assertEqual(approved_round["status"], "applied")
+            self.assertEqual(approved_round["verdict"], "approved")
+            self.assertEqual(
+                approved_round["result_id"],
+                approval_review["result_id"],
+            )
+            self.assertTrue((second_round / "approval.json").is_file())
+            self.assertEqual(
+                (
+                    second_round
+                    / "bundle/input/previous-response.json"
+                ).read_bytes(),
+                response_path.read_bytes(),
+            )
+
+    def test_historical_approved_replay_validates_approval_authority(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = root / "run"
+            round_directory = run_directory / "rounds/001"
+            round_directory.mkdir(parents=True)
+            approval_content = b'{"approved":true}\n'
+            approval_path = round_directory / "approval.json"
+            approval_path.write_bytes(approval_content)
+            approval_artifact = review_applications.BundleArtifact(
+                path="approval.json",
+                sha256=hashlib.sha256(approval_content).hexdigest(),
+            )
+            round_record = SimpleNamespace(
+                status=runs.RoundStatus.APPLIED,
+                round_number=1,
+                approval=approval_artifact,
+                bundle_archive=(),
+            )
+            authority = SimpleNamespace(
+                review=SimpleNamespace(
+                    verdict=runs.ReviewVerdict.APPROVED,
+                    head_oid="a" * 40,
+                )
+            )
+            repository = SimpleNamespace(control_root=root / "control")
+            active = SimpleNamespace(
+                run_id="12345678-1234-5678-9234-567812345678",
+                current_round=2,
+                base_oid="b" * 40,
+                git_object_format="sha1",
+            )
+            result_id = "87654321-4321-6789-a234-678912345678"
+
+            with (
+                mock.patch.object(
+                    runs,
+                    "safe_run_directory",
+                    return_value=run_directory,
+                ),
+                mock.patch.object(
+                    runs,
+                    "find_recorded_review_round",
+                    return_value=(round_directory, round_record),
+                ),
+                mock.patch.object(
+                    runs,
+                    "validate_applied_review_round",
+                    return_value=authority,
+                ),
+                mock.patch.object(review_applications, "_verify_bundle_tree"),
+            ):
+                replay = review_applications._historical_result_replay(
+                    repository,
+                    active,
+                    result_id=result_id,
+                    next_action="wait for the Reviewer result",
+                )
+
+            self.assertIsNotNone(replay)
+            assert replay is not None
+            self.assertTrue(replay.replayed)
+            self.assertEqual(replay.approval_path, approval_path)
+
+            missing_approval = SimpleNamespace(
+                status=runs.RoundStatus.APPLIED,
+                round_number=1,
+                approval=None,
+                bundle_archive=(),
+            )
+            with (
+                mock.patch.object(
+                    runs,
+                    "safe_run_directory",
+                    return_value=run_directory,
+                ),
+                mock.patch.object(
+                    runs,
+                    "find_recorded_review_round",
+                    return_value=(round_directory, missing_approval),
+                ),
+                mock.patch.object(
+                    runs,
+                    "validate_applied_review_round",
+                    return_value=authority,
+                ),
+                mock.patch.object(review_applications, "_verify_bundle_tree"),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "missing approval authority",
+                ),
+            ):
+                review_applications._historical_result_replay(
+                    repository,
+                    active,
+                    result_id=result_id,
+                    next_action="wait for the Reviewer result",
+                )
+
+    def test_correction_round_request_history_is_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            (prepared.repository / "feature.txt").write_text(
+                "complete candidate\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "feature.txt"], cwd=prepared.repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "fix: complete candidate",
+                ],
+                cwd=prepared.repository,
+            )
+            report = root / "corrected-report.md"
+            report.write_text(
+                "# Implementation Report\n\nCompleted the candidate value.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "response.json"
+            _write_fixed_response(response_path, prepared, review)
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+            control_root = prepared.repository / ".agent-squad"
+            state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            run_directory = control_root / "runs" / str(state["active_run_id"])
+            first_round = run_directory / "rounds/001"
+            second_round = run_directory / "rounds/002"
+            first_round_path = first_round / "round.json"
+            first_review_path = first_round / "review.json"
+            second_round_path = second_round / "round.json"
+
+            def assert_rejected(
+                replacements: tuple[tuple[Path, bytes], ...],
+                message: str,
+            ) -> None:
+                originals = tuple(
+                    (
+                        path,
+                        path.read_bytes(),
+                        stat.S_IMODE(path.stat().st_mode),
+                    )
+                    for path, _ in replacements
+                )
+                try:
+                    for path, content in replacements:
+                        path.chmod(0o600)
+                        path.write_bytes(content)
+                    with self.assertRaisesRegex(runs.RunStateError, message):
+                        runs.inspect_status(prepared.repository)
+                finally:
+                    for path, content, mode in originals:
+                        path.write_bytes(content)
+                        path.chmod(mode)
+
+            second_record = json.loads(
+                second_round_path.read_text(encoding="utf-8")
+            )
+            wrong_manifest = copy.deepcopy(second_record)
+            previous_review_artifact = next(
+                artifact
+                for artifact in wrong_manifest["artifacts"]["bundle_inputs"]
+                if artifact["path"] == "input/previous-review.json"
+            )
+            previous_review_artifact["path"] = "input/unexpected-review.json"
+            assert_rejected(
+                ((second_round_path, review_applications.encode_json(
+                    wrong_manifest
+                )),),
+                "prior-artifact manifest does not match the request",
+            )
+
+            first_record = json.loads(
+                first_round_path.read_text(encoding="utf-8")
+            )
+            first_review = json.loads(
+                first_review_path.read_text(encoding="utf-8")
+            )
+            first_review["verdict"] = "approved"
+            first_review["findings"] = []
+            first_review_bytes = review_applications.encode_json(first_review)
+            first_record["verdict"] = "approved"
+            first_record["artifacts"]["review_result"]["sha256"] = (
+                hashlib.sha256(first_review_bytes).hexdigest()
+            )
+            first_record["artifacts"]["approval"] = {
+                "path": "approval.json",
+                "sha256": "d" * 64,
+            }
+            assert_rejected(
+                (
+                    (
+                        first_round_path,
+                        review_applications.encode_json(first_record),
+                    ),
+                    (first_review_path, first_review_bytes),
+                ),
+                "must follow the most recent applied changes_requested result",
+            )
+
+            wrong_previous_review = copy.deepcopy(second_record)
+            previous_review_artifact = next(
+                artifact
+                for artifact in wrong_previous_review["artifacts"][
+                    "bundle_inputs"
+                ]
+                if artifact["path"] == "input/previous-review.json"
+            )
+            previous_review_artifact["sha256"] = "e" * 64
+            assert_rejected(
+                ((second_round_path, review_applications.encode_json(
+                    wrong_previous_review
+                )),),
+                "previous review bundle input does not match the most recent",
+            )
+
+            self.assertEqual(
+                runs.inspect_status(prepared.repository).active_run.phase,
+                runs.RunPhase.REVIEWING,
+            )
+
+    def test_same_head_reconsideration_can_reach_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            report = root / "reconsideration-report.md"
+            report.write_text(
+                "# Implementation Report\n\nNo code change is required.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "reconsideration-response.json"
+            _write_rejected_response(response_path, prepared, review)
+
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            control_root = prepared.repository / ".agent-squad"
+            state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            second_round = run_directory / "rounds/002"
+            second_request = json.loads(
+                (second_round / "request.json").read_text(encoding="utf-8")
+            )
+            second_worktree = Path(state["active_round"]["review_worktree"])
+            self.assertEqual(state["current_round"], 2)
+            self.assertEqual(state["current_head_oid"], review["head_oid"])
+            self.assertEqual(second_request["mode"], "reconsideration")
+            self.assertEqual(second_request["head_oid"], review["head_oid"])
+            stored_response = json.loads(
+                (run_directory / "rounds/001/response.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                stored_response["responses"][0]["verification"],
+                "",
+            )
+
+            second_prepared = replace(
+                prepared,
+                review_worktree=second_worktree,
+                bundle=second_worktree / ".agent-squad-review",
+                request=second_request,
+            )
+            approval_review = _submit_with_lost_notification(
+                second_prepared,
+                verdict="approved",
+            )
+            approved = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(approval_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(approved.returncode, 0, approved.stderr)
+            approved_state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(approved_state["phase"], "approved")
+            self.assertEqual(
+                approved_state["approved_head_oid"],
+                review["head_oid"],
+            )
+
+    def test_invalid_correction_stays_correctable_before_round_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state_before = state_path.read_bytes()
+            state = json.loads(state_before)
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            canonical_response = run_directory / "rounds/001/response.json"
+            second_round = run_directory / "rounds/002"
+            report = root / "corrected-report.md"
+            report.write_text(
+                "# Implementation Report\n\nCompleted the correction.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "response.json"
+            response = _write_fixed_response(
+                response_path,
+                prepared,
+                review,
+            )
+
+            uncommitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(uncommitted.returncode, 1)
+            self.assertIn("requires a new committed HEAD", uncommitted.stderr)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(canonical_response.exists())
+            self.assertFalse(second_round.exists())
+
+            (prepared.repository / "feature.txt").write_text(
+                "complete candidate\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "feature.txt"], cwd=prepared.repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "fix: complete candidate",
+                ],
+                cwd=prepared.repository,
+            )
+            wrong_mode = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(wrong_mode.returncode, 1)
+            self.assertIn(
+                "reconsideration submission must keep the exact previously "
+                "reviewed HEAD",
+                wrong_mode.stderr,
             )
             self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(canonical_response.exists())
+            self.assertFalse(second_round.exists())
+
+            dirty_path = prepared.repository / "unexpected-untracked.txt"
+            dirty_path.write_text(
+                "not part of the candidate\n",
+                encoding="utf-8",
+            )
+            response["responses"] = []
+            response_path.write_text(
+                f"{json.dumps(response, indent=2)}\n",
+                encoding="utf-8",
+            )
+            dirty_and_invalid = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            dirty_path.unlink()
+
+            self.assertEqual(dirty_and_invalid.returncode, 1)
+            self.assertIn(
+                "implementation worktree has unexpected untracked files",
+                dirty_and_invalid.stderr,
+            )
+            self.assertNotIn(
+                "missing blocking finding IDs",
+                dirty_and_invalid.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(canonical_response.exists())
+            self.assertFalse(second_round.exists())
+
+            response_guards = (
+                (
+                    "superseding response",
+                    lambda value: value.update(
+                        supersedes_response_id=(
+                            "66666666-6666-4666-8666-666666666666"
+                        )
+                    ),
+                    "response replacement after Developer resolution",
+                ),
+                (
+                    "resolution-linked response",
+                    lambda value: value.update(
+                        resolution_ids=[
+                            "77777777-7777-4777-8777-777777777777"
+                        ]
+                    ),
+                    "response replacement after Developer resolution",
+                ),
+                (
+                    "needs-human response",
+                    lambda value: value["responses"][0].update(
+                        disposition="needs_human",
+                        changed_files=[],
+                        evidence=[],
+                        verification="",
+                    ),
+                    "requires Developer authority",
+                ),
+            )
+            for case, mutate, message in response_guards:
+                with self.subTest(case=case):
+                    guarded_response = _write_fixed_response(
+                        response_path,
+                        prepared,
+                        review,
+                    )
+                    mutate(guarded_response)
+                    response_path.write_text(
+                        f"{json.dumps(guarded_response, indent=2)}\n",
+                        encoding="utf-8",
+                    )
+                    guarded = run_cli(
+                        prepared.repository,
+                        "submit",
+                        "--report",
+                        str(report),
+                        "--response",
+                        str(response_path),
+                        "--mode",
+                        "new_revision",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(guarded.returncode, 1)
+                    self.assertIn(message, guarded.stderr)
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    self.assertFalse(canonical_response.exists())
+                    self.assertFalse(second_round.exists())
+
+            missing_response = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(missing_response.returncode, 1)
+            self.assertIn(
+                "requires --response <response.json>",
+                missing_response.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(canonical_response.exists())
+            self.assertFalse(second_round.exists())
+
+            response["responses"] = []
+            response_path.write_text(
+                f"{json.dumps(response, indent=2)}\n",
+                encoding="utf-8",
+            )
+
+            incomplete = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(incomplete.returncode, 1)
+            self.assertIn(
+                "missing blocking finding IDs: REV-001",
+                incomplete.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertFalse(canonical_response.exists())
+            self.assertFalse(second_round.exists())
+
+            _write_fixed_response(response_path, prepared, review)
+            corrected = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(corrected.returncode, 0, corrected.stderr)
+            self.assertTrue(canonical_response.is_file())
+            self.assertTrue(second_round.is_dir())
+
+    def test_precommit_failure_rolls_back_the_staged_response(self) -> None:
+        for fail_response_restore in (False, True):
+            with self.subTest(fail_response_restore=fail_response_restore):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_review(
+                        root,
+                        verdict="changes_requested",
+                    )
+                    review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    (prepared.repository / "feature.txt").write_text(
+                        "complete candidate\n",
+                        encoding="utf-8",
+                    )
+                    run(
+                        ["git", "add", "feature.txt"],
+                        cwd=prepared.repository,
+                    )
+                    run(
+                        [
+                            "git",
+                            "-c",
+                            "commit.gpgSign=false",
+                            "commit",
+                            "--no-verify",
+                            "-m",
+                            "fix: complete candidate",
+                        ],
+                        cwd=prepared.repository,
+                    )
+                    report = root / "corrected-report.md"
+                    report.write_text(
+                        "# Implementation Report\n\nCorrected.\n",
+                        encoding="utf-8",
+                    )
+                    response_path = root / "response.json"
+                    _write_fixed_response(response_path, prepared, review)
+                    control_root = prepared.repository / ".agent-squad"
+                    state_path = control_root / "state.json"
+                    original_state = state_path.read_bytes()
+                    state = json.loads(original_state)
+                    run_directory = (
+                        control_root
+                        / "runs"
+                        / str(state["active_run_id"])
+                    )
+                    run_path = run_directory / "run.json"
+                    canonical_response = (
+                        run_directory / "rounds/001/response.json"
+                    )
+                    second_round = run_directory / "rounds/002"
+                    real_atomic_write = submissions.atomic_write
+                    real_read_file = submissions._read_file
+
+                    def fail_run_record(path, content, *, mode):
+                        if path.resolve() == run_path.resolve() and (
+                            b'"phase": "reviewing"' in content
+                        ):
+                            raise OSError("injected run-record failure")
+                        real_atomic_write(path, content, mode=mode)
+
+                    def read_for_rollback(path: Path) -> bytes:
+                        if fail_response_restore and (
+                            path.resolve() == canonical_response.resolve()
+                        ):
+                            raise submissions.SubmissionError(
+                                "injected response read failure"
+                            )
+                        return real_read_file(path)
+
+                    expected = (
+                        "could not restore the previous-round response"
+                        if fail_response_restore
+                        else "injected run-record failure"
+                    )
+                    with (
+                        mock.patch.object(
+                            submissions,
+                            "atomic_write",
+                            side_effect=fail_run_record,
+                        ),
+                        mock.patch.object(
+                            submissions,
+                            "_read_file",
+                            side_effect=read_for_rollback,
+                        ),
+                        self.assertRaisesRegex(
+                            submissions.SubmissionError,
+                            expected,
+                        ),
+                    ):
+                        submissions.submit_candidate(
+                            prepared.repository,
+                            report_path=report,
+                            response_path=response_path,
+                            mode="new_revision",
+                            herdr_client=mock.Mock(),
+                        )
+
+                    self.assertEqual(state_path.read_bytes(), original_state)
+                    self.assertFalse(second_round.exists())
+                    self.assertEqual(
+                        canonical_response.exists(),
+                        fail_response_restore,
+                    )
+
+    def test_state_commit_error_preserves_response_and_new_round(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            (prepared.repository / "feature.txt").write_text(
+                "complete candidate\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "feature.txt"], cwd=prepared.repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "fix: complete candidate",
+                ],
+                cwd=prepared.repository,
+            )
+            report = root / "corrected-report.md"
+            report.write_text(
+                "# Implementation Report\n\nCompleted the correction.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "response.json"
+            _write_fixed_response(response_path, prepared, review)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            original_atomic_write = submissions.atomic_write
+
+            def fail_after_state_commit(
+                path: Path,
+                content: bytes,
+                *,
+                mode: int,
+            ) -> None:
+                original_atomic_write(path, content, mode=mode)
+                if path.name != "state.json":
+                    return
+                written = json.loads(content)
+                if written.get("phase") == "reviewing" and (
+                    written.get("current_round") == 2
+                ) and written.get("handoff", {}).get("status") == "pending":
+                    raise OSError("injected post-replace state failure")
+
+            client = mock.Mock()
+            with (
+                mock.patch.object(
+                    submissions,
+                    "atomic_write",
+                    side_effect=fail_after_state_commit,
+                ),
+                self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "review request is durable",
+                ),
+            ):
+                submissions.submit_candidate(
+                    prepared.repository,
+                    report_path=report,
+                    response_path=response_path,
+                    mode="new_revision",
+                    herdr_client=client,
+                )
+
+            client.discover.assert_not_called()
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            self.assertEqual(state["phase"], "reviewing")
+            self.assertEqual(state["current_round"], 2)
+            self.assertEqual(state["handoff"]["status"], "pending")
+            self.assertEqual(
+                (run_directory / "rounds/001/response.json").read_bytes(),
+                response_path.read_bytes(),
+            )
+            self.assertTrue((run_directory / "rounds/002").is_dir())
+            status = runs.inspect_status(prepared.repository)
+            self.assertEqual(status.active_run.phase, runs.RunPhase.REVIEWING)
 
     def test_archive_precedes_state_and_failed_commit_is_retryable(
         self,
