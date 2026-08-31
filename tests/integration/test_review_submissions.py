@@ -1121,7 +1121,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             (
                 "unexpected bundle location",
                 "review bundle contains files outside documented input, "
-                "output, and marker locations: scratch.txt",
+                "output, marker, and retired-result locations: scratch.txt",
             ),
             (
                 "unexpected worktree file",

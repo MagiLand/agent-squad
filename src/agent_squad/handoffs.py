@@ -37,7 +37,13 @@ from .initialization import (
     SCHEMA_VERSION,
     load_initialized_repository,
 )
-from .review_submissions import MARKER_PATH, SUBMISSION_LOCK_PATH
+from .review_submissions import (
+    MARKER_PATH,
+    RETIRED_RESULTS_PATH,
+    SUBMISSION_LOCK_PATH,
+    ReviewSubmissionError,
+    record_retired_review_identity,
+)
 from .storage import (
     InvalidJsonError,
     append_event,
@@ -81,6 +87,15 @@ class RetryHandoffResult:
     action: HandoffRecoveryAction | None
     result_id: str | None
     diagnostic_id: str | None
+
+
+@dataclass(frozen=True)
+class _MarkerRecoveryDisposition:
+    """Whether a marker blocks correction and which identity it retires."""
+
+    blocks_resubmission: bool
+    result_id: str | None
+    review_sha256: str | None
 
 
 def review_request_handoff_record(
@@ -354,6 +369,7 @@ def _preserve_invalid_review_evidence(
             PurePosixPath("output") / REVIEW_MARKDOWN_FILE_NAME,
         ),
         (MARKER_PATH.name, MARKER_PATH),
+        (RETIRED_RESULTS_PATH.name, RETIRED_RESULTS_PATH),
     )
     try:
         with exclusive_file_lock(lock_path):
@@ -376,11 +392,26 @@ def _preserve_invalid_review_evidence(
                 captured=captured,
             )
             marker_bytes = captured.get(MARKER_PATH.name)
-            if marker_bytes is not None and _marker_blocks_resubmission(
-                marker_bytes=marker_bytes,
-                review_bytes=captured.get(REVIEW_RESULT_FILE_NAME),
-                request=request,
-            ):
+            disposition = (
+                _classify_marker_for_recovery(
+                    marker_bytes=marker_bytes,
+                    review_bytes=captured.get(REVIEW_RESULT_FILE_NAME),
+                    request=request,
+                )
+                if marker_bytes is not None
+                else None
+            )
+            if disposition is not None and disposition.blocks_resubmission:
+                if (
+                    disposition.result_id is not None
+                    and disposition.review_sha256 is not None
+                ):
+                    record_retired_review_identity(
+                        bundle_root,
+                        request=request,
+                        result_id=disposition.result_id,
+                        review_sha256=disposition.review_sha256,
+                    )
                 _remove_captured_marker(
                     bundle_root.joinpath(*MARKER_PATH.parts),
                     expected=marker_bytes,
@@ -390,6 +421,11 @@ def _preserve_invalid_review_evidence(
     except runs.RunStateError as error:
         raise HandoffRecoveryError(
             "could not preserve invalid marker-confirmed review evidence: "
+            f"{error}"
+        ) from error
+    except ReviewSubmissionError as error:
+        raise HandoffRecoveryError(
+            "could not retire invalid marker-confirmed review identity: "
             f"{error}"
         ) from error
     except OSError as error:
@@ -684,42 +720,82 @@ def _verify_invalid_review_diagnostic(
         )
 
 
-def _marker_blocks_resubmission(
+def _classify_marker_for_recovery(
     *,
     marker_bytes: bytes,
     review_bytes: bytes | None,
     request: ReviewRequest,
-) -> bool:
-    """Return whether immutable marker state prevents a corrected result."""
+) -> _MarkerRecoveryDisposition:
+    """Classify marker replacement and retain the best known identity."""
 
-    if review_bytes is None:
-        return True
+    marker: ReviewerLocalMarker | None = None
     try:
         marker = ReviewerLocalMarker.from_dict(
             decode_json(marker_bytes.decode("utf-8"))
-        )
-        review = ReviewResult.from_dict(
-            decode_json(review_bytes.decode("utf-8")),
-            object_format=request.object_format,
         )
     except (
         UnicodeDecodeError,
         InvalidJsonError,
         ArtifactValidationError,
     ):
-        return True
-    comparisons = (
-        (marker.request_id, request.request_id),
-        (marker.result_id, review.result_id),
-        (marker.review_json_path, request.review_output_path),
-        (marker.review_sha256, hashlib.sha256(review_bytes).hexdigest()),
-        (review.request_id, request.request_id),
-        (review.run_id, request.run_id),
-        (review.round_number, request.round_number),
-        (review.base_oid, request.base_oid),
-        (review.head_oid, request.head_oid),
+        pass
+
+    review: ReviewResult | None = None
+    review_digest: str | None = None
+    if review_bytes is not None:
+        review_digest = hashlib.sha256(review_bytes).hexdigest()
+        try:
+            review = ReviewResult.from_dict(
+                decode_json(review_bytes.decode("utf-8")),
+                object_format=request.object_format,
+            )
+        except (
+            UnicodeDecodeError,
+            InvalidJsonError,
+            ArtifactValidationError,
+        ):
+            pass
+
+    review_matches_request = review is not None and all(
+        actual == expected
+        for actual, expected in (
+            (review.request_id, request.request_id),
+            (review.run_id, request.run_id),
+            (review.round_number, request.round_number),
+            (review.base_oid, request.base_oid),
+            (review.head_oid, request.head_oid),
+        )
     )
-    return any(actual != expected for actual, expected in comparisons)
+    if marker is not None and review is not None:
+        marker_matches = all(
+            actual == expected
+            for actual, expected in (
+                (marker.request_id, request.request_id),
+                (marker.result_id, review.result_id),
+                (marker.review_json_path, request.review_output_path),
+                (marker.review_sha256, review_digest),
+            )
+        )
+        if marker_matches and review_matches_request:
+            return _MarkerRecoveryDisposition(False, None, None)
+
+    if marker is not None:
+        return _MarkerRecoveryDisposition(
+            True,
+            marker.result_id,
+            marker.review_sha256,
+        )
+    if (
+        review_matches_request
+        and review is not None
+        and review_digest is not None
+    ):
+        return _MarkerRecoveryDisposition(
+            True,
+            review.result_id,
+            review_digest,
+        )
+    return _MarkerRecoveryDisposition(True, None, None)
 
 
 def _remove_captured_marker(path: Path, *, expected: bytes) -> None:

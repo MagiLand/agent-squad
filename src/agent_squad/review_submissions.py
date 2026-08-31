@@ -26,6 +26,7 @@ from .initialization import (
     AgentSquadError,
     GitWorktree,
     REVIEW_DIRECTORY_NAME,
+    SCHEMA_VERSION,
     discover_git_worktree,
     matches_allowed_generated_path,
     run_git,
@@ -45,6 +46,7 @@ from .validation import JsonValidator
 
 REQUEST_PATH = PurePosixPath("input/request.json")
 MARKER_PATH = PurePosixPath("local-state.json")
+RETIRED_RESULTS_PATH = PurePosixPath("retired-results.json")
 SUBMISSION_LOCK_PATH = PurePosixPath("output/.review-submit.lock")
 
 
@@ -95,6 +97,148 @@ class ReviewBundleFile:
     content: bytes
 
 
+@dataclass(frozen=True)
+class _RetiredReviewIdentity:
+    """One marker-confirmed identity reserved after marker retirement."""
+
+    retired_at: str
+    result_id: str
+    review_sha256: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "_RetiredReviewIdentity":
+        data = _VALIDATOR.require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={"retired_at", "result_id", "review_sha256"},
+            path=label,
+        )
+        return cls(
+            retired_at=_VALIDATOR.require_timestamp(
+                data["retired_at"],
+                f"{label}.retired_at",
+            ),
+            result_id=_VALIDATOR.require_uuid(
+                data["result_id"],
+                f"{label}.result_id",
+            ),
+            review_sha256=_VALIDATOR.require_digest(
+                data["review_sha256"],
+                f"{label}.review_sha256",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "retired_at": self.retired_at,
+            "result_id": self.result_id,
+            "review_sha256": self.review_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class _RetiredReviewLedger:
+    """Reviewer-local history that prevents contradictory result reuse."""
+
+    created_at: str
+    run_id: str
+    round_number: int
+    request_id: str
+    results: tuple[_RetiredReviewIdentity, ...]
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        request: ReviewRequest,
+    ) -> "_RetiredReviewLedger":
+        label = "retired review identity ledger"
+        data = _VALIDATOR.require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "run_id",
+                "round",
+                "request_id",
+                "results",
+            },
+            path=label,
+        )
+        if _VALIDATOR.require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        ) != SCHEMA_VERSION:
+            raise ReviewSubmissionError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        round_number = _VALIDATOR.require_int(
+            data["round"],
+            f"{label}.round",
+        )
+        results_value = data["results"]
+        if not isinstance(results_value, list) or not results_value:
+            raise ReviewSubmissionError(
+                f"{label}.results must be a non-empty JSON array"
+            )
+        results = tuple(
+            _RetiredReviewIdentity.from_dict(
+                item,
+                label=f"{label}.results[{index}]",
+            )
+            for index, item in enumerate(results_value)
+        )
+        result_ids = [item.result_id for item in results]
+        if len(result_ids) != len(set(result_ids)):
+            raise ReviewSubmissionError(
+                f"{label}.results contains duplicate result IDs"
+            )
+        ledger = cls(
+            created_at=_VALIDATOR.require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            run_id=_VALIDATOR.require_uuid(
+                data["run_id"],
+                f"{label}.run_id",
+            ),
+            round_number=round_number,
+            request_id=_VALIDATOR.require_uuid(
+                data["request_id"],
+                f"{label}.request_id",
+            ),
+            results=results,
+        )
+        comparisons = (
+            (ledger.run_id, request.run_id, "run ID"),
+            (ledger.round_number, request.round_number, "round"),
+            (ledger.request_id, request.request_id, "request ID"),
+        )
+        for actual, expected, identity_label in comparisons:
+            if actual != expected:
+                raise ReviewSubmissionError(
+                    f"{label} {identity_label} does not match the request"
+                )
+        return ledger
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "run_id": self.run_id,
+            "round": self.round_number,
+            "request_id": self.request_id,
+            "results": [item.to_dict() for item in self.results],
+        }
+
+
 def submit_review_result(
     start: Path,
     *,
@@ -128,6 +272,15 @@ def submit_review_result(
             _assert_fresh_result_id(previous_review, review)
 
             review_digest = hashlib.sha256(review_bytes).hexdigest()
+            retired_ledger = _load_retired_review_ledger(
+                bundle_root,
+                request=request,
+            )
+            _assert_retired_result_reuse(
+                retired_ledger,
+                result_id=review.result_id,
+                review_digest=review_digest,
+            )
             marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
             marker, marker_created = _write_or_validate_marker(
                 marker_path,
@@ -213,6 +366,16 @@ def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
             )
             _assert_result_identity(request, review)
             _assert_fresh_result_id(previous_review, review)
+            review_digest = hashlib.sha256(review_bytes).hexdigest()
+            retired_ledger = _load_retired_review_ledger(
+                bundle_root,
+                request=request,
+            )
+            _assert_retired_result_reuse(
+                retired_ledger,
+                result_id=review.result_id,
+                review_digest=review_digest,
+            )
 
             marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
             marker_value, marker_bytes = _load_json_file(
@@ -235,7 +398,7 @@ def load_marker_confirmed_review(start: Path) -> MarkerConfirmedReview:
                 ),
                 (
                     marker.review_sha256,
-                    hashlib.sha256(review_bytes).hexdigest(),
+                    review_digest,
                     "review digest",
                 ),
             )
@@ -834,6 +997,108 @@ def _assert_fresh_result_id(
         )
 
 
+def record_retired_review_identity(
+    bundle_root: Path,
+    *,
+    request: ReviewRequest,
+    result_id: str,
+    review_sha256: str,
+) -> None:
+    """Durably reserve one result identity before its marker is removed."""
+
+    _VALIDATOR.require_uuid(result_id, "retired review result ID")
+    _VALIDATOR.require_digest(
+        review_sha256,
+        "retired review result digest",
+    )
+    ledger = _load_retired_review_ledger(
+        bundle_root,
+        request=request,
+    )
+    if ledger is not None:
+        existing = next(
+            (
+                item
+                for item in ledger.results
+                if item.result_id == result_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.review_sha256 != review_sha256:
+                raise ReviewSubmissionError(
+                    "retired review result ID is already bound to a "
+                    "different digest"
+                )
+            return
+
+    retired_at = utc_timestamp()
+    identity = _RetiredReviewIdentity(
+        retired_at=retired_at,
+        result_id=result_id,
+        review_sha256=review_sha256,
+    )
+    if ledger is None:
+        next_ledger = _RetiredReviewLedger(
+            created_at=retired_at,
+            run_id=request.run_id,
+            round_number=request.round_number,
+            request_id=request.request_id,
+            results=(identity,),
+        )
+    else:
+        next_ledger = _RetiredReviewLedger(
+            created_at=ledger.created_at,
+            run_id=ledger.run_id,
+            round_number=ledger.round_number,
+            request_id=ledger.request_id,
+            results=(*ledger.results, identity),
+        )
+    path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    atomic_write(path, encode_json(next_ledger.to_dict()), mode=0o600)
+    persisted = _load_retired_review_ledger(
+        bundle_root,
+        request=request,
+    )
+    if persisted != next_ledger:
+        raise ReviewSubmissionError(
+            "persisted retired review identities differ from validated data"
+        )
+
+
+def _load_retired_review_ledger(
+    bundle_root: Path,
+    *,
+    request: ReviewRequest,
+) -> _RetiredReviewLedger | None:
+    path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    if not os.path.lexists(path):
+        return None
+    value, _ = _load_json_file(path, "retired review identities")
+    return _RetiredReviewLedger.from_dict(value, request=request)
+
+
+def _assert_retired_result_reuse(
+    ledger: _RetiredReviewLedger | None,
+    *,
+    result_id: str,
+    review_digest: str,
+) -> None:
+    """Allow a retired ID only for byte-identical notification retry."""
+
+    if ledger is None:
+        return
+    retired = next(
+        (item for item in ledger.results if item.result_id == result_id),
+        None,
+    )
+    if retired is not None and retired.review_sha256 != review_digest:
+        raise ReviewSubmissionError(
+            "retired review result ID may be reused only with its original "
+            "review digest; corrected review content needs a new result ID"
+        )
+
+
 def _write_or_validate_marker(
     marker_path: Path,
     *,
@@ -910,7 +1175,12 @@ def _review_result_prompt(
 
 
 def _validate_bundle_root_entries(bundle_root: Path) -> None:
-    allowed = {"input", "output", MARKER_PATH.name}
+    allowed = {
+        "input",
+        "output",
+        MARKER_PATH.name,
+        RETIRED_RESULTS_PATH.name,
+    }
     try:
         entries = list(bundle_root.iterdir())
     except OSError as error:
@@ -923,11 +1193,15 @@ def _validate_bundle_root_entries(bundle_root: Path) -> None:
     if unexpected:
         raise ReviewSubmissionError(
             "review bundle contains files outside documented input, output, "
-            f"and marker locations: {', '.join(unexpected)}"
+            "marker, and retired-result locations: "
+            f"{', '.join(unexpected)}"
         )
     marker_path = bundle_root / MARKER_PATH.name
     if os.path.lexists(marker_path):
         _read_regular_file(marker_path, "review marker")
+    retired_path = bundle_root / RETIRED_RESULTS_PATH.name
+    if os.path.lexists(retired_path):
+        _read_regular_file(retired_path, "retired review identities")
 
 
 def _validate_output_tree(output_root: Path) -> None:

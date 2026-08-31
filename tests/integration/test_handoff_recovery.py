@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+from threading import Event
+import time
 import unittest
+from unittest import mock
 
-from tests._support import run_cli
+from tests._support import SRC_ROOT, run_cli
 from tests.integration.test_submissions import (
     _artifacts,
     _commit_candidate,
@@ -15,6 +23,8 @@ from tests.integration.test_review_submissions import (
     _prepare_round,
     _write_review,
 )
+
+from agent_squad import handoffs, runs  # noqa: E402
 
 
 def _actual_herdr_invocations(environment: dict[str, str]) -> list[list[str]]:
@@ -619,7 +629,7 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             ]
             self.assertEqual(events[-1]["diagnostic_id"], diagnostic.name)
 
-    def test_malformed_marker_can_be_replaced_and_applied_same_round(
+    def test_malformed_marker_retires_identity_before_corrected_result(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -662,8 +672,56 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 (diagnostics[0] / "local-state.json").read_bytes(),
                 malformed_marker,
             )
+            retired = json.loads(
+                (prepared.bundle / "retired-results.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                retired["run_id"],
+                original_state["active_run_id"],
+            )
+            self.assertEqual(retired["round"], 1)
+            self.assertEqual(
+                retired["request_id"],
+                original_round["request_id"],
+            )
+            self.assertEqual(
+                retired["results"],
+                [
+                    {
+                        "retired_at": retired["created_at"],
+                        "result_id": original_review["result_id"],
+                        "review_sha256": hashlib.sha256(
+                            (prepared.bundle / "output/review.json")
+                            .read_bytes()
+                        ).hexdigest(),
+                    }
+                ],
+            )
 
-            corrected_review = dict(original_review)
+            corrected_review = _write_review(
+                prepared,
+                verdict="changes_requested",
+            )
+            corrected_review["result_id"] = original_review["result_id"]
+            (prepared.bundle / "output/review.json").write_text(
+                f"{json.dumps(corrected_review, indent=2)}\n",
+                encoding="utf-8",
+            )
+            rejected = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn(
+                "corrected review content needs a new result ID",
+                rejected.stderr,
+            )
+            self.assertFalse(marker.exists())
+
             corrected_review["result_id"] = (
                 "44444444-4444-4444-8444-444444444444"
             )
@@ -706,6 +764,267 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 corrected_review["result_id"],
             )
             _assert_single_round(self, run_directory)
+
+    def test_retired_identity_write_failure_keeps_malformed_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            _write_review(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            marker = prepared.bundle / "local-state.json"
+            malformed_marker = b'{"schema_version":\n'
+            marker.write_bytes(malformed_marker)
+            status = runs.inspect_status(prepared.repository)
+            active = status.active_run
+            self.assertIsNotNone(active)
+            assert active is not None
+            active_round = active.active_round
+            self.assertIsNotNone(active_round)
+            assert active_round is not None
+            self.assertIsInstance(
+                active.unapplied_review,
+                runs.InvalidUnappliedReviewResult,
+            )
+            assert isinstance(
+                active.unapplied_review,
+                runs.InvalidUnappliedReviewResult,
+            )
+            control_root = prepared.repository / ".agent-squad"
+            request = handoffs._load_active_request(
+                control_root,
+                run_id=active.run_id,
+                active_round=active_round,
+            )
+
+            with (
+                mock.patch.object(
+                    handoffs,
+                    "record_retired_review_identity",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(
+                    handoffs.HandoffRecoveryError,
+                    "could not preserve invalid marker-confirmed review",
+                ),
+            ):
+                handoffs._preserve_invalid_review_evidence(
+                    control_root,
+                    active=active,
+                    active_round=active_round,
+                    request=request,
+                    invalid_review=active.unapplied_review,
+                )
+
+            self.assertEqual(marker.read_bytes(), malformed_marker)
+            self.assertFalse(
+                (prepared.bundle / "retired-results.json").exists()
+            )
+            _, run_directory = _artifacts(prepared.repository)
+            diagnostics = list(
+                (
+                    run_directory
+                    / "rounds/001/diagnostics/invalid-results"
+                ).iterdir()
+            )
+            self.assertEqual(len(diagnostics), 1)
+            self.assertTrue(
+                (diagnostics[0] / "validation-error.json").is_file()
+            )
+
+    def test_recovery_serializes_marker_retirement_with_review_submit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            review = _write_review(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            marker = prepared.bundle / "local-state.json"
+            malformed_marker = b'{"schema_version":\n'
+            marker.write_bytes(malformed_marker)
+
+            status = runs.inspect_status(prepared.repository)
+            active = status.active_run
+            self.assertIsNotNone(active)
+            assert active is not None
+            active_round = active.active_round
+            self.assertIsNotNone(active_round)
+            assert active_round is not None
+            self.assertIsInstance(
+                active.unapplied_review,
+                runs.InvalidUnappliedReviewResult,
+            )
+            assert isinstance(
+                active.unapplied_review,
+                runs.InvalidUnappliedReviewResult,
+            )
+            control_root = prepared.repository / ".agent-squad"
+            request = handoffs._load_active_request(
+                control_root,
+                run_id=active.run_id,
+                active_round=active_round,
+            )
+            original_archive = handoffs._archive_invalid_review_evidence
+            archive_ready = Event()
+            release_recovery = Event()
+
+            def paused_archive(*args: object, **kwargs: object) -> str:
+                diagnostic_id = original_archive(*args, **kwargs)
+                archive_ready.set()
+                if not release_recovery.wait(timeout=10):
+                    raise AssertionError("test did not release recovery")
+                return diagnostic_id
+
+            child_code = """
+from contextlib import contextmanager
+from pathlib import Path
+import sys
+from agent_squad import review_submissions
+
+original_lock = review_submissions.exclusive_file_lock
+
+@contextmanager
+def observed_lock(path):
+    Path(sys.argv[2]).write_text("attempting\\n", encoding="utf-8")
+    with original_lock(path):
+        yield
+
+review_submissions.exclusive_file_lock = observed_lock
+result = review_submissions.submit_review_result(Path(sys.argv[1]))
+print(result.marker_created)
+"""
+            environment = os.environ.copy()
+            existing_python_path = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = (
+                str(SRC_ROOT)
+                if not existing_python_path
+                else os.pathsep.join(
+                    (str(SRC_ROOT), existing_python_path)
+                )
+            )
+            environment["XDG_DATA_HOME"] = str(prepared.data_home)
+            environment.update(prepared.environment)
+            lock_attempted = root / "review-submit-lock-attempted"
+            process: subprocess.Popen[str] | None = None
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    with mock.patch.object(
+                        handoffs,
+                        "_archive_invalid_review_evidence",
+                        paused_archive,
+                    ):
+                        future = executor.submit(
+                            handoffs._preserve_invalid_review_evidence,
+                            control_root,
+                            active=active,
+                            active_round=active_round,
+                            request=request,
+                            invalid_review=active.unapplied_review,
+                        )
+                        try:
+                            self.assertTrue(archive_ready.wait(timeout=10))
+                            process = subprocess.Popen(
+                                [
+                                    sys.executable,
+                                    "-c",
+                                    child_code,
+                                    str(prepared.review_worktree),
+                                    str(lock_attempted),
+                                ],
+                                cwd=prepared.review_worktree,
+                                env=environment,
+                                text=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                            )
+                            deadline = time.monotonic() + 10
+                            while (
+                                not lock_attempted.exists()
+                                and process.poll() is None
+                                and time.monotonic() < deadline
+                            ):
+                                time.sleep(0.01)
+                            self.assertTrue(lock_attempted.exists())
+                            self.assertIsNone(process.poll())
+                            self.assertEqual(
+                                marker.read_bytes(),
+                                malformed_marker,
+                            )
+                            self.assertFalse(
+                                (
+                                    prepared.bundle
+                                    / "retired-results.json"
+                                ).exists()
+                            )
+                            _, run_directory = _artifacts(
+                                prepared.repository
+                            )
+                            diagnostics = list(
+                                (
+                                    run_directory
+                                    / "rounds/001/diagnostics/invalid-results"
+                                ).iterdir()
+                            )
+                            self.assertEqual(len(diagnostics), 1)
+                            before_release = {
+                                path.name: path.read_bytes()
+                                for path in diagnostics[0].iterdir()
+                            }
+                        finally:
+                            release_recovery.set()
+
+                        diagnostic_id = future.result(timeout=10)
+                        assert process is not None
+                        stdout, stderr = process.communicate(timeout=10)
+
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertEqual(stdout.strip(), "True")
+                self.assertTrue(marker.exists())
+                self.assertTrue(
+                    (prepared.bundle / "retired-results.json").exists()
+                )
+                self.assertEqual(diagnostics[0].name, diagnostic_id)
+                self.assertEqual(
+                    {
+                        path.name: path.read_bytes()
+                        for path in diagnostics[0].iterdir()
+                    },
+                    before_release,
+                )
+                ready = runs.inspect_status(prepared.repository).active_run
+                self.assertIsNotNone(ready)
+                assert ready is not None
+                self.assertIsInstance(
+                    ready.unapplied_review,
+                    runs.UnappliedReviewResult,
+                )
+                assert isinstance(
+                    ready.unapplied_review,
+                    runs.UnappliedReviewResult,
+                )
+                self.assertEqual(
+                    ready.unapplied_review.result_id,
+                    review["result_id"],
+                )
+                _assert_single_round(self, run_directory)
+            finally:
+                release_recovery.set()
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.communicate()
 
     def test_history_adopts_a_delivered_request_whose_state_is_pending(
         self,
