@@ -40,11 +40,12 @@ from .initialization import (
     AgentSquadError,
     GitWorktree,
     InitializedRepository,
+    REVIEW_DIRECTORY_NAME,
     SCHEMA_VERSION,
     load_initialized_repository,
     run_git,
 )
-from .review_submissions import load_marker_confirmed_review
+from .review_submissions import MARKER_PATH, load_marker_confirmed_review
 from .storage import (
     InvalidJsonError,
     atomic_write,
@@ -65,6 +66,7 @@ RUN_RECORD_FILE_NAME = "run.json"
 TASK_FILE_NAME = "task.md"
 EVENT_LOG_FILE_NAME = "events.jsonl"
 CONTEXT_DIRECTORY_NAME = "context"
+RETRY_HANDOFF_NEXT_ACTION = "agent-squad retry-handoff"
 CORRECTION_SUBMIT_NEXT_ACTION = (
     "agent-squad submit --report <report.md> --response <response.json> "
     "--mode <new_revision|reconsideration> after addressing every "
@@ -1663,7 +1665,7 @@ def _validate_active_review_artifacts(
             "active review worktree is not a normal directory: "
             f"{review_worktree}"
         )
-    bundle_root = review_worktree / ".agent-squad-review"
+    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     for artifact in bundle_inputs:
         path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)
         if path.is_symlink() or not path.is_file():
@@ -2116,18 +2118,18 @@ def _discover_unapplied_review(
         or not review_worktree_available
     ):
         return None
-    marker_path = active_round.review_worktree / (
-        ".agent-squad-review/local-state.json"
+    marker_path = (
+        active_round.review_worktree / REVIEW_DIRECTORY_NAME / MARKER_PATH
     )
     if not os.path.lexists(marker_path):
         output_root = (
-            active_round.review_worktree / ".agent-squad-review/output"
+            active_round.review_worktree / REVIEW_DIRECTORY_NAME / "output"
         )
         output_paths = tuple(
             path
             for path in (
-                output_root / "review.json",
-                output_root / "review.md",
+                output_root / REVIEW_RESULT_FILE_NAME,
+                output_root / REVIEW_MARKDOWN_FILE_NAME,
             )
             if os.path.lexists(path)
         )
@@ -2639,10 +2641,11 @@ def _next_action(
             return CORRECTION_SUBMIT_NEXT_ACTION
         return "continue implementing the captured task"
     if phase is RunPhase.REVIEWING:
-        if isinstance(unapplied_review, IncompleteReviewOutput):
-            return "agent-squad retry-handoff"
-        if isinstance(unapplied_review, InvalidUnappliedReviewResult):
-            return "agent-squad retry-handoff"
+        if isinstance(
+            unapplied_review,
+            (IncompleteReviewOutput, InvalidUnappliedReviewResult),
+        ):
+            return RETRY_HANDOFF_NEXT_ACTION
         if isinstance(unapplied_review, UnappliedReviewResult):
             return (
                 "agent-squad apply-review --result-id "
@@ -2652,7 +2655,7 @@ def _next_action(
             HandoffStatus.FAILED,
             HandoffStatus.PENDING,
         }:
-            return "agent-squad retry-handoff"
+            return RETRY_HANDOFF_NEXT_ACTION
         return "wait for the Reviewer result"
     if phase is RunPhase.APPROVED:
         return "agent-squad complete"

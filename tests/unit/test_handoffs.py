@@ -183,6 +183,93 @@ class RetryHandoffGuardTests(unittest.TestCase):
                 )
 
 
+class InvalidEvidencePreservationTests(unittest.TestCase):
+    def _prepare_evidence(
+        self,
+        root: Path,
+    ) -> tuple[Path, ActiveRoundRecord, SimpleNamespace]:
+        active_round = _active_round(root)
+        bundle = active_round.review_worktree / ".agent-squad-review"
+        (bundle / "output").mkdir(parents=True)
+        (bundle / "output/review.json").write_bytes(b'{"invalid":true}\n')
+        (bundle / "output/review.md").write_bytes(b"# Invalid\n")
+        (bundle / "local-state.json").write_bytes(b'{"marker":true}\n')
+        return (
+            root / ".agent-squad",
+            active_round,
+            SimpleNamespace(run_id=RUN_ID),
+        )
+
+    def test_preserves_evidence_idempotently_with_validation_reason(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            control_root, active_round, active = self._prepare_evidence(root)
+            invalid = runs.InvalidUnappliedReviewResult("digest mismatch")
+
+            first_id = handoffs._preserve_invalid_review_evidence(
+                control_root,
+                active=active,
+                active_round=active_round,
+                invalid_review=invalid,
+            )
+            second_id = handoffs._preserve_invalid_review_evidence(
+                control_root,
+                active=active,
+                active_round=active_round,
+                invalid_review=invalid,
+            )
+
+            self.assertEqual(second_id, first_id)
+            diagnostic_root = (
+                control_root
+                / runs.RUNS_DIRECTORY_NAME
+                / RUN_ID
+                / "rounds/001/diagnostics/invalid-results"
+            )
+            self.assertEqual(
+                [path.name for path in diagnostic_root.iterdir()],
+                [first_id],
+            )
+            diagnostic = diagnostic_root / first_id
+            self.assertEqual(
+                (diagnostic / "review.json").read_bytes(),
+                b'{"invalid":true}\n',
+            )
+            summary = json.loads(
+                (diagnostic / "validation-error.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(summary["reason"], "digest mismatch")
+
+    def test_write_failure_refuses_to_risk_overwriting_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            control_root, active_round, active = self._prepare_evidence(root)
+
+            with (
+                mock.patch.object(
+                    handoffs,
+                    "atomic_write",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertRaisesRegex(
+                    handoffs.HandoffRecoveryError,
+                    "could not preserve invalid marker-confirmed review",
+                ),
+            ):
+                handoffs._preserve_invalid_review_evidence(
+                    control_root,
+                    active=active,
+                    active_round=active_round,
+                    invalid_review=runs.InvalidUnappliedReviewResult(
+                        "digest mismatch"
+                    ),
+                )
+
+
 class HandoffPersistenceTests(unittest.TestCase):
     def _prepare_control_root(self, root: Path) -> tuple[Path, Path]:
         control_root = root / ".agent-squad"
@@ -207,21 +294,31 @@ class HandoffPersistenceTests(unittest.TestCase):
         )
         return control_root, event_path
 
-    def _record(self, control_root: Path) -> None:
+    def _record(
+        self,
+        control_root: Path,
+        *,
+        status: HandoffStatus = HandoffStatus.SENT,
+    ) -> None:
         handoffs.record_review_request_handoff(
             control_root,
             run_id=RUN_ID,
             round_number=1,
             request_id=REQUEST_ID,
             target=REVIEWER_NAME,
-            status=HandoffStatus.SENT,
-            error=None,
+            status=status,
+            error=(
+                "dispatch failed"
+                if status is HandoffStatus.FAILED
+                else None
+            ),
             installation=HerdrInstallation(
                 executable=Path("/fake/herdr"),
                 version="herdr test-0.8.2",
                 protocol=20,
             ),
-            event_name="review_request_recovered",
+            sent_event_name="review_request_recovered",
+            failed_event_name="review_request_recovery_failed",
             error_type=handoffs.HandoffRecoveryError,
             extra_event_fields={"action": "reprompted"},
         )
@@ -251,6 +348,20 @@ class HandoffPersistenceTests(unittest.TestCase):
             event = json.loads(event_path.read_text(encoding="utf-8"))
             self.assertEqual(event["event"], "review_request_recovered")
             self.assertEqual(event["action"], "reprompted")
+
+    def test_selects_the_failed_event_name_from_handoff_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            control_root, event_path = self._prepare_control_root(root)
+
+            self._record(control_root, status=HandoffStatus.FAILED)
+
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                event["event"],
+                "review_request_recovery_failed",
+            )
+            self.assertEqual(event["error"], "dispatch failed")
 
     def test_concurrent_run_or_round_change_is_not_overwritten(self) -> None:
         cases = (

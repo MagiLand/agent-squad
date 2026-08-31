@@ -733,11 +733,8 @@ def _record_handoff(
         status=status,
         error=error,
         installation=installation,
-        event_name=(
-            "review_request_sent"
-            if status is HandoffStatus.SENT
-            else "review_request_failed"
-        ),
+        sent_event_name="review_request_sent",
+        failed_event_name="review_request_failed",
         error_type=SubmissionError,
     )
 

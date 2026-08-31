@@ -507,6 +507,14 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 env_overrides=prepared.environment,
             )
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            review_json = prepared.bundle / "output/review.json"
+            review_markdown = prepared.bundle / "output/review.md"
+            marker = prepared.bundle / "local-state.json"
+            original_evidence = {
+                "review.json": review_json.read_bytes(),
+                "review.md": review_markdown.read_bytes(),
+                "local-state.json": marker.read_bytes(),
+            }
             (prepared.review_worktree / "reviewer-notes.md").write_text(
                 "untracked scratch output\n",
                 encoding="utf-8",
@@ -550,6 +558,49 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             self.assertEqual(recovered_state["active_round"], original_round)
             self.assertEqual(recovered_state["handoff"]["status"], "sent")
             _assert_single_round(self, run_directory)
+            repeated = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+
+            invalid_results = (
+                run_directory
+                / "rounds/001/diagnostics/invalid-results"
+            )
+            diagnostics = list(invalid_results.iterdir())
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
+            self.assertIn(diagnostic.name, recovered.stdout)
+            self.assertIn(diagnostic.name, repeated.stdout)
+            for name, content in original_evidence.items():
+                self.assertEqual((diagnostic / name).read_bytes(), content)
+            validation_error = json.loads(
+                (diagnostic / "validation-error.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                validation_error["diagnostic_id"],
+                diagnostic.name,
+            )
+            self.assertEqual(
+                validation_error["captured_files"],
+                ["local-state.json", "review.json", "review.md"],
+            )
+            self.assertIn(
+                "unexpected non-ignored files",
+                validation_error["reason"],
+            )
+            events = [
+                json.loads(line)
+                for line in (run_directory / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(events[-1]["diagnostic_id"], diagnostic.name)
 
     def test_history_adopts_a_delivered_request_whose_state_is_pending(
         self,

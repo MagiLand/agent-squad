@@ -16,6 +16,7 @@ from .review_submissions import submit_review_result
 from .runs import (
     IncompleteReviewOutput,
     InvalidUnappliedReviewResult,
+    RETRY_HANDOFF_NEXT_ACTION,
     RunPhase,
     inspect_status,
     start_run,
@@ -304,7 +305,7 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                 "Marker-confirmed unapplied result: present but invalid: "
                 f"{unapplied_review.reason}"
             )
-            print("Recovery command: agent-squad retry-handoff")
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
         elif isinstance(unapplied_review, IncompleteReviewOutput):
             print("Marker-confirmed unapplied result: none")
             print("Unmarked review output: present and incomplete")
@@ -314,11 +315,11 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                     str(path) for path in unapplied_review.output_paths
                 )
             )
-            print("Recovery command: agent-squad retry-handoff")
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
         elif unapplied_review is None:
             print("Marker-confirmed unapplied result: none")
             print("Unmarked review output: none")
-            print("Recovery command: agent-squad retry-handoff")
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
         else:
             print("Marker-confirmed unapplied result: ready")
             print(f"Result ID: {unapplied_review.result_id}")
@@ -357,17 +358,13 @@ def _run_submit(arguments: argparse.Namespace) -> int:
     print(f"Reviewer: {result.reviewer_name}")
     print(f"Request handoff: {result.handoff_status.value}")
     if result.handoff_status is HandoffStatus.FAILED:
-        print(
-            "The durable review round was preserved for recovery.",
-            file=sys.stderr,
+        return _report_handoff_failure(
+            preservation_notice=(
+                "The durable review round was preserved for recovery."
+            ),
+            error_prefix="review request handoff failed",
+            error=result.handoff_error,
         )
-        print(
-            "agent-squad: error: review request handoff failed: "
-            f"{result.handoff_error}",
-            file=sys.stderr,
-        )
-        print("Next action: agent-squad retry-handoff")
-        return 1
     print("Next action: wait for the Reviewer result")
     return 0
 
@@ -439,6 +436,8 @@ def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
             "Recovery action: "
             f"{_RECOVERY_ACTION_LABELS[result.action]}"
         )
+    if result.diagnostic_id is not None:
+        print(f"Preserved invalid-result diagnostics: {result.diagnostic_id}")
     if result.result_id is not None:
         next_action = (
             "agent-squad apply-review --result-id "
@@ -448,19 +447,32 @@ def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
         print(f"Next action: {next_action}")
         return 0
     if result.handoff_status is HandoffStatus.FAILED:
-        print(
-            "The durable review round remains available for recovery.",
-            file=sys.stderr,
+        return _report_handoff_failure(
+            preservation_notice=(
+                "The durable review round remains available for recovery."
+            ),
+            error_prefix="review handoff recovery failed",
+            error=result.handoff_error,
         )
-        print(
-            "agent-squad: error: review handoff recovery failed: "
-            f"{result.handoff_error}",
-            file=sys.stderr,
-        )
-        print("Next action: agent-squad retry-handoff")
-        return 1
     print("Next action: wait for the Reviewer result")
     return 0
+
+
+def _report_handoff_failure(
+    *,
+    preservation_notice: str,
+    error_prefix: str,
+    error: str | None,
+) -> int:
+    """Report one recoverable request-handoff failure consistently."""
+
+    print(preservation_notice, file=sys.stderr)
+    print(
+        f"agent-squad: error: {error_prefix}: {error}",
+        file=sys.stderr,
+    )
+    print(f"Next action: {RETRY_HANDOFF_NEXT_ACTION}")
+    return 1
 
 
 def _run_complete(_arguments: argparse.Namespace) -> int:

@@ -6,7 +6,8 @@ from collections.abc import Mapping
 import copy
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+import hashlib
+from pathlib import Path, PurePosixPath
 
 from . import runs
 from .artifacts import (
@@ -14,7 +15,9 @@ from .artifacts import (
     ArtifactValidationError,
     HandoffRecord,
     HandoffStatus,
+    REVIEW_MARKDOWN_FILE_NAME,
     ReviewRequest,
+    REVIEW_RESULT_FILE_NAME,
 )
 from .herdr import (
     HerdrClient,
@@ -25,13 +28,16 @@ from .herdr import (
 from .initialization import (
     AgentSquadError,
     REVIEW_DIRECTORY_NAME,
+    SCHEMA_VERSION,
     load_initialized_repository,
 )
+from .review_submissions import MARKER_PATH
 from .storage import (
     append_event,
     atomic_write,
     encode_json,
     exclusive_file_lock,
+    read_regular_tree,
     utc_timestamp,
 )
 
@@ -61,6 +67,7 @@ class RetryHandoffResult:
     handoff_error: str | None
     action: HandoffRecoveryAction | None
     result_id: str | None
+    diagnostic_id: str | None
 
 
 def review_request_handoff_record(
@@ -99,7 +106,8 @@ def record_review_request_handoff(
     status: HandoffStatus,
     error: str | None,
     installation: HerdrInstallation | None,
-    event_name: str,
+    sent_event_name: str,
+    failed_event_name: str,
     error_type: type[AgentSquadError],
     extra_event_fields: Mapping[str, object] | None = None,
 ) -> None:
@@ -138,6 +146,11 @@ def record_review_request_handoff(
             f"could not record review handoff state: {write_error}"
         ) from write_error
 
+    event_name = (
+        sent_event_name
+        if status is HandoffStatus.SENT
+        else failed_event_name
+    )
     event: dict[str, object] = {
         "timestamp": timestamp,
         "event": event_name,
@@ -206,11 +219,23 @@ def retry_handoff(
                     handoff_error=handoff.last_error,
                     action=HandoffRecoveryAction.RESULT_READY,
                     result_id=active.unapplied_review.result_id,
+                    diagnostic_id=None,
                 )
             if not active.review_worktree_available:
                 raise HandoffRecoveryError(
                     "the expected review worktree is unavailable; refusing "
                     "to create replacement review authority"
+                )
+            diagnostic_id = None
+            if isinstance(
+                active.unapplied_review,
+                runs.InvalidUnappliedReviewResult,
+            ):
+                diagnostic_id = _preserve_invalid_review_evidence(
+                    repository.control_root,
+                    active=active,
+                    active_round=active_round,
+                    invalid_review=active.unapplied_review,
                 )
 
             request = _load_active_request(
@@ -255,39 +280,35 @@ def retry_handoff(
                     )
             except HerdrError as error:
                 detail = format_herdr_error(str(error))
-                _record_handoff(
-                    repository.control_root,
-                    active=active,
-                    active_round=active_round,
-                    status=HandoffStatus.FAILED,
-                    error=detail,
-                    installation=installation,
-                    action=None,
-                )
-                return _recovery_result(
+                result = _recovery_result(
                     active,
                     active_round,
                     status=HandoffStatus.FAILED,
                     error=detail,
                     action=None,
+                    diagnostic_id=diagnostic_id,
                 )
+                _record_handoff(
+                    repository.control_root,
+                    result=result,
+                    installation=installation,
+                )
+                return result
 
-            _record_handoff(
-                repository.control_root,
-                active=active,
-                active_round=active_round,
-                status=HandoffStatus.SENT,
-                error=None,
-                installation=installation,
-                action=action,
-            )
-            return _recovery_result(
+            result = _recovery_result(
                 active,
                 active_round,
                 status=HandoffStatus.SENT,
                 error=None,
                 action=action,
+                diagnostic_id=diagnostic_id,
             )
+            _record_handoff(
+                repository.control_root,
+                result=result,
+                installation=installation,
+            )
+            return result
     except AgentSquadError:
         raise
     except OSError as error:
@@ -297,36 +318,108 @@ def retry_handoff(
         ) from error
 
 
-def _record_handoff(
+def _preserve_invalid_review_evidence(
     control_root: Path,
     *,
     active: runs.ActiveRunStatus,
     active_round: ActiveRoundRecord,
-    status: HandoffStatus,
-    error: str | None,
+    invalid_review: runs.InvalidUnappliedReviewResult,
+) -> str:
+    """Snapshot marker-backed evidence before a Reviewer may replace it."""
+
+    bundle_root = active_round.review_worktree / REVIEW_DIRECTORY_NAME
+    candidates = (
+        (
+            REVIEW_RESULT_FILE_NAME,
+            PurePosixPath("output") / REVIEW_RESULT_FILE_NAME,
+        ),
+        (
+            REVIEW_MARKDOWN_FILE_NAME,
+            PurePosixPath("output") / REVIEW_MARKDOWN_FILE_NAME,
+        ),
+        (MARKER_PATH.name, MARKER_PATH),
+    )
+    try:
+        bundle_files = read_regular_tree(
+            bundle_root,
+            label="invalid marker-confirmed review bundle",
+            error_type=HandoffRecoveryError,
+        )
+        captured = {
+            name: bundle_files[path]
+            for name, path in candidates
+            if path in bundle_files
+        }
+
+        digest = hashlib.sha256()
+        digest.update(invalid_review.reason.encode("utf-8"))
+        for name, content in sorted(captured.items()):
+            digest.update(b"\0")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(content)
+        diagnostic_id = digest.hexdigest()
+        diagnostic_root = (
+            control_root
+            / runs.RUNS_DIRECTORY_NAME
+            / active.run_id
+            / "rounds"
+            / f"{active_round.round_number:03d}"
+            / "diagnostics"
+            / "invalid-results"
+            / diagnostic_id
+        )
+        diagnostic_root.mkdir(parents=True, exist_ok=True)
+        for name, content in captured.items():
+            atomic_write(diagnostic_root / name, content, mode=0o600)
+        atomic_write(
+            diagnostic_root / "validation-error.json",
+            encode_json(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "diagnostic_id": diagnostic_id,
+                    "reason": invalid_review.reason,
+                    "captured_files": sorted(captured),
+                }
+            ),
+            mode=0o600,
+        )
+    except OSError as error:
+        raise HandoffRecoveryError(
+            "could not preserve invalid marker-confirmed review evidence: "
+            f"{error}"
+        ) from error
+    return diagnostic_id
+
+
+def _record_handoff(
+    control_root: Path,
+    *,
+    result: RetryHandoffResult,
     installation: HerdrInstallation | None,
-    action: HandoffRecoveryAction | None,
 ) -> None:
     """Persist one recovery attempt against the unchanged logical request."""
 
+    event_fields: dict[str, object] = {
+        "action": (
+            result.action.value if result.action is not None else None
+        ),
+    }
+    if result.diagnostic_id is not None:
+        event_fields["diagnostic_id"] = result.diagnostic_id
     record_review_request_handoff(
         control_root,
-        run_id=active.run_id,
-        round_number=active_round.round_number,
-        request_id=active_round.request_id,
-        target=active_round.reviewer_name,
-        status=status,
-        error=error,
+        run_id=result.run_id,
+        round_number=result.round_number,
+        request_id=result.request_id,
+        target=result.reviewer_name,
+        status=result.handoff_status,
+        error=result.handoff_error,
         installation=installation,
-        event_name=(
-            "review_request_recovered"
-            if status is HandoffStatus.SENT
-            else "review_request_recovery_failed"
-        ),
+        sent_event_name="review_request_recovered",
+        failed_event_name="review_request_recovery_failed",
         error_type=HandoffRecoveryError,
-        extra_event_fields={
-            "action": action.value if action is not None else None,
-        },
+        extra_event_fields=event_fields,
     )
 
 
@@ -390,6 +483,7 @@ def _recovery_result(
     status: HandoffStatus,
     error: str | None,
     action: HandoffRecoveryAction | None,
+    diagnostic_id: str | None,
 ) -> RetryHandoffResult:
     return RetryHandoffResult(
         run_id=active.run_id,
@@ -400,4 +494,5 @@ def _recovery_result(
         handoff_error=error,
         action=action,
         result_id=None,
+        diagnostic_id=diagnostic_id,
     )
