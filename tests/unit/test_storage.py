@@ -129,6 +129,31 @@ class RegularTreeTests(unittest.TestCase):
                 },
             )
 
+    def test_ignores_a_named_root_entry_without_traversing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            container = Path(temporary_directory)
+            root = container / "tree"
+            root.mkdir()
+            (root / "kept.txt").write_bytes(b"kept\n")
+            ignored = root / "ignored"
+            ignored.mkdir()
+            external = container / "external.txt"
+            external.write_bytes(b"external\n")
+            (ignored / "must-not-follow").symlink_to(external)
+
+            files = read_regular_tree(
+                root,
+                label="fixture tree",
+                error_type=ValueError,
+                ignored_root_entries=frozenset({"ignored"}),
+            )
+
+            self.assertEqual(
+                files,
+                {PurePosixPath("kept.txt"): b"kept\n"},
+            )
+            self.assertTrue((ignored / "must-not-follow").is_symlink())
+
     def test_rejects_missing_non_directory_and_linked_trees(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

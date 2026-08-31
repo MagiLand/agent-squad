@@ -908,7 +908,7 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
     def test_invalid_reviewer_ledger_cannot_veto_authoritative_result(
         self,
     ) -> None:
-        cases = ("malformed", "mismatched")
+        cases = ("malformed", "mismatched", "directory")
         for case in cases:
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory() as temporary_directory:
@@ -966,7 +966,7 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                         reviewer_ledger.write_bytes(
                             b'{"schema_version":\n'
                         )
-                    else:
+                    elif case == "mismatched":
                         mismatched = json.loads(
                             authoritative_before.decode("utf-8")
                         )
@@ -977,7 +977,32 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                             f"{json.dumps(mismatched, indent=2)}\n",
                             encoding="utf-8",
                         )
-                    advisory_before = reviewer_ledger.read_bytes()
+                    else:
+                        reviewer_ledger.unlink()
+                        reviewer_ledger.mkdir()
+                        reviewer_rejected = run_cli(
+                            prepared.review_worktree,
+                            "review-submit",
+                            data_home=prepared.data_home,
+                            env_overrides=prepared.environment,
+                        )
+                        self.assertEqual(reviewer_rejected.returncode, 1)
+                        self.assertIn(
+                            "retired review identities must be a regular "
+                            "non-symlink file",
+                            reviewer_rejected.stderr,
+                        )
+                    advisory_before = (
+                        None
+                        if case == "directory"
+                        else reviewer_ledger.read_bytes()
+                    )
+                    marker_before = marker.read_bytes()
+                    prompts_before = _invocations_of(
+                        prepared.environment,
+                        "agent",
+                        "prompt",
+                    )
 
                     status = run_cli(
                         prepared.repository,
@@ -1010,13 +1035,26 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                         "Recovery action: use marker-confirmed result",
                         rediscovered.stdout,
                     )
-                    self.assertEqual(
-                        reviewer_ledger.read_bytes(),
-                        advisory_before,
-                    )
+                    if case == "directory":
+                        self.assertTrue(reviewer_ledger.is_dir())
+                        self.assertEqual(list(reviewer_ledger.iterdir()), [])
+                    else:
+                        self.assertEqual(
+                            reviewer_ledger.read_bytes(),
+                            advisory_before,
+                        )
+                    self.assertEqual(marker.read_bytes(), marker_before)
                     self.assertEqual(
                         authoritative_ledger.read_bytes(),
                         authoritative_before,
+                    )
+                    self.assertEqual(
+                        _invocations_of(
+                            prepared.environment,
+                            "agent",
+                            "prompt",
+                        ),
+                        prompts_before,
                     )
 
                     applied = run_cli(

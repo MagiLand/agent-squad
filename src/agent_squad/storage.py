@@ -130,14 +130,16 @@ def read_regular_tree(
     *,
     label: str,
     error_type: type[Exception],
+    ignored_root_entries: frozenset[str] = frozenset(),
 ) -> dict[PurePosixPath, bytes]:
-    """Read every regular file in a validated normal tree."""
+    """Read regular files without entering explicitly ignored root entries."""
 
     _, contents = _scan_regular_tree(
         root,
         label=label,
         error_type=error_type,
         capture_contents=True,
+        ignored_root_entries=ignored_root_entries,
     )
     return contents
 
@@ -148,6 +150,7 @@ def _scan_regular_tree(
     label: str,
     error_type: type[Exception],
     capture_contents: bool,
+    ignored_root_entries: frozenset[str] = frozenset(),
 ) -> tuple[RegularTree, dict[PurePosixPath, bytes]]:
     """Walk one regular tree and optionally capture file contents."""
 
@@ -164,6 +167,15 @@ def _scan_regular_tree(
     folded: dict[str, PurePosixPath] = {}
     for directory, names, filenames in os.walk(root, followlinks=False):
         current = Path(directory)
+        if current == root and ignored_root_entries:
+            names[:] = [
+                name for name in names if name not in ignored_root_entries
+            ]
+            filenames = [
+                name
+                for name in filenames
+                if name not in ignored_root_entries
+            ]
         for name in names:
             path = current / name
             try:

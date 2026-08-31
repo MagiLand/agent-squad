@@ -358,7 +358,12 @@ def load_marker_confirmed_review(
             _validate_request_identity(worktree, request)
             _validate_worktree_integrity(worktree, request)
             previous_review = _validate_bundle_inputs(bundle_root, request)
-            _validate_bundle_root_entries(bundle_root)
+            _validate_bundle_root_entries(
+                bundle_root,
+                require_regular_retired_results=(
+                    authoritative_results_root is None
+                ),
+            )
             _validate_output_tree(output_root)
             review, review_bytes, review_path = _load_review_result(
                 bundle_root,
@@ -420,7 +425,16 @@ def load_marker_confirmed_review(
                 bundle_root,
                 label="review bundle",
                 error_type=ReviewSubmissionError,
+                ignored_root_entries=(
+                    frozenset()
+                    if authoritative_results_root is None
+                    else frozenset({RETIRED_RESULTS_PATH.name})
+                ),
             )
+            if authoritative_results_root is not None:
+                advisory_bytes = _read_optional_advisory_ledger(bundle_root)
+                if advisory_bytes is not None:
+                    captured_files[RETIRED_RESULTS_PATH] = advisory_bytes
             bundle_files = tuple(
                 ReviewBundleFile(
                     path=path,
@@ -1231,7 +1245,11 @@ def _review_result_prompt(
     )
 
 
-def _validate_bundle_root_entries(bundle_root: Path) -> None:
+def _validate_bundle_root_entries(
+    bundle_root: Path,
+    *,
+    require_regular_retired_results: bool = True,
+) -> None:
     allowed = {
         "input",
         "output",
@@ -1257,8 +1275,21 @@ def _validate_bundle_root_entries(bundle_root: Path) -> None:
     if os.path.lexists(marker_path):
         _read_regular_file(marker_path, "review marker")
     retired_path = bundle_root / RETIRED_RESULTS_PATH.name
-    if os.path.lexists(retired_path):
+    if (
+        require_regular_retired_results
+        and os.path.lexists(retired_path)
+    ):
         _read_regular_file(retired_path, "retired review identities")
+
+
+def _read_optional_advisory_ledger(bundle_root: Path) -> bytes | None:
+    """Capture a regular advisory ledger without making it authoritative."""
+
+    path = bundle_root.joinpath(*RETIRED_RESULTS_PATH.parts)
+    try:
+        return _read_regular_file(path, "retired review identities")
+    except (OSError, ReviewSubmissionError):
+        return None
 
 
 def _validate_output_tree(output_root: Path) -> None:
