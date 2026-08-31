@@ -7,7 +7,11 @@ import copy
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
+import os
 from pathlib import Path, PurePosixPath
+import shutil
+import stat
+import tempfile
 
 from . import runs
 from .artifacts import (
@@ -18,6 +22,8 @@ from .artifacts import (
     REVIEW_MARKDOWN_FILE_NAME,
     ReviewRequest,
     REVIEW_RESULT_FILE_NAME,
+    ReviewerLocalMarker,
+    ReviewResult,
 )
 from .herdr import (
     HerdrClient,
@@ -31,19 +37,26 @@ from .initialization import (
     SCHEMA_VERSION,
     load_initialized_repository,
 )
-from .review_submissions import MARKER_PATH
+from .review_submissions import MARKER_PATH, SUBMISSION_LOCK_PATH
 from .storage import (
+    InvalidJsonError,
     append_event,
     atomic_write,
+    decode_json,
     encode_json,
     exclusive_file_lock,
+    inspect_regular_tree,
     read_regular_tree,
     utc_timestamp,
 )
+from .validation import JsonValidator
 
 
 class HandoffRecoveryError(AgentSquadError):
     """Raised when the active review handoff cannot be recovered safely."""
+
+
+_DIAGNOSTIC_VALIDATOR = JsonValidator(HandoffRecoveryError)
 
 
 class HandoffRecoveryAction(StrEnum):
@@ -226,6 +239,11 @@ def retry_handoff(
                     "the expected review worktree is unavailable; refusing "
                     "to create replacement review authority"
                 )
+            request = _load_active_request(
+                repository.control_root,
+                run_id=active.run_id,
+                active_round=active_round,
+            )
             diagnostic_id = None
             if isinstance(
                 active.unapplied_review,
@@ -235,14 +253,10 @@ def retry_handoff(
                     repository.control_root,
                     active=active,
                     active_round=active_round,
+                    request=request,
                     invalid_review=active.unapplied_review,
                 )
 
-            request = _load_active_request(
-                repository.control_root,
-                run_id=active.run_id,
-                active_round=active_round,
-            )
             prompt = format_review_request_prompt(
                 request,
                 active_round.review_worktree,
@@ -323,11 +337,13 @@ def _preserve_invalid_review_evidence(
     *,
     active: runs.ActiveRunStatus,
     active_round: ActiveRoundRecord,
+    request: ReviewRequest,
     invalid_review: runs.InvalidUnappliedReviewResult,
 ) -> str:
-    """Snapshot marker-backed evidence before a Reviewer may replace it."""
+    """Snapshot invalid evidence and unblock a corrected submission safely."""
 
     bundle_root = active_round.review_worktree / REVIEW_DIRECTORY_NAME
+    lock_path = bundle_root.joinpath(*SUBMISSION_LOCK_PATH.parts)
     candidates = (
         (
             REVIEW_RESULT_FILE_NAME,
@@ -340,56 +356,386 @@ def _preserve_invalid_review_evidence(
         (MARKER_PATH.name, MARKER_PATH),
     )
     try:
-        bundle_files = read_regular_tree(
-            bundle_root,
-            label="invalid marker-confirmed review bundle",
-            error_type=HandoffRecoveryError,
-        )
-        captured = {
-            name: bundle_files[path]
-            for name, path in candidates
-            if path in bundle_files
-        }
-
-        digest = hashlib.sha256()
-        digest.update(invalid_review.reason.encode("utf-8"))
-        for name, content in sorted(captured.items()):
-            digest.update(b"\0")
-            digest.update(name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(content)
-        diagnostic_id = digest.hexdigest()
-        diagnostic_root = (
-            control_root
-            / runs.RUNS_DIRECTORY_NAME
-            / active.run_id
-            / "rounds"
-            / f"{active_round.round_number:03d}"
-            / "diagnostics"
-            / "invalid-results"
-            / diagnostic_id
-        )
-        diagnostic_root.mkdir(parents=True, exist_ok=True)
-        for name, content in captured.items():
-            atomic_write(diagnostic_root / name, content, mode=0o600)
-        atomic_write(
-            diagnostic_root / "validation-error.json",
-            encode_json(
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "diagnostic_id": diagnostic_id,
-                    "reason": invalid_review.reason,
-                    "captured_files": sorted(captured),
-                }
-            ),
-            mode=0o600,
-        )
+        with exclusive_file_lock(lock_path):
+            bundle_files = read_regular_tree(
+                bundle_root,
+                label="invalid marker-confirmed review bundle",
+                error_type=HandoffRecoveryError,
+            )
+            captured = {
+                name: bundle_files[path]
+                for name, path in candidates
+                if path in bundle_files
+            }
+            diagnostic_id = _archive_invalid_review_evidence(
+                control_root,
+                run_id=active.run_id,
+                round_number=active_round.round_number,
+                request_id=active_round.request_id,
+                reason=invalid_review.reason,
+                captured=captured,
+            )
+            marker_bytes = captured.get(MARKER_PATH.name)
+            if marker_bytes is not None and _marker_blocks_resubmission(
+                marker_bytes=marker_bytes,
+                review_bytes=captured.get(REVIEW_RESULT_FILE_NAME),
+                request=request,
+            ):
+                _remove_captured_marker(
+                    bundle_root.joinpath(*MARKER_PATH.parts),
+                    expected=marker_bytes,
+                )
+    except HandoffRecoveryError:
+        raise
+    except runs.RunStateError as error:
+        raise HandoffRecoveryError(
+            "could not preserve invalid marker-confirmed review evidence: "
+            f"{error}"
+        ) from error
     except OSError as error:
         raise HandoffRecoveryError(
             "could not preserve invalid marker-confirmed review evidence: "
             f"{error}"
         ) from error
     return diagnostic_id
+
+
+def _archive_invalid_review_evidence(
+    control_root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+    request_id: str,
+    reason: str,
+    captured: Mapping[str, bytes],
+) -> str:
+    """Commit one content-addressed diagnostic through a staged directory."""
+
+    diagnostic_id = _invalid_review_diagnostic_id(reason, captured)
+    parent = _invalid_results_directory(
+        control_root,
+        run_id=run_id,
+        round_number=round_number,
+    )
+    diagnostic_root = parent / diagnostic_id
+    if os.path.lexists(diagnostic_root):
+        _verify_invalid_review_diagnostic(
+            diagnostic_root,
+            run_id=run_id,
+            round_number=round_number,
+            request_id=request_id,
+            diagnostic_id=diagnostic_id,
+            reason=reason,
+            captured=captured,
+        )
+        return diagnostic_id
+
+    summary = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": utc_timestamp(),
+        "run_id": run_id,
+        "round": round_number,
+        "request_id": request_id,
+        "diagnostic_id": diagnostic_id,
+        "reason": reason,
+        "captured_files": sorted(captured),
+    }
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{diagnostic_id}.", dir=parent)
+    )
+    try:
+        staging.chmod(0o700)
+        if staging.resolve(strict=True).parent != parent:
+            raise HandoffRecoveryError(
+                "invalid-result staging directory escaped owned run storage"
+            )
+        for name, content in captured.items():
+            atomic_write(staging / name, content, mode=0o400)
+        atomic_write(
+            staging / "validation-error.json",
+            encode_json(summary),
+            mode=0o400,
+        )
+        _verify_invalid_review_diagnostic(
+            staging,
+            run_id=run_id,
+            round_number=round_number,
+            request_id=request_id,
+            diagnostic_id=diagnostic_id,
+            reason=reason,
+            captured=captured,
+        )
+        staging.replace(diagnostic_root)
+    except Exception:
+        if os.path.lexists(staging):
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    _verify_invalid_review_diagnostic(
+        diagnostic_root,
+        run_id=run_id,
+        round_number=round_number,
+        request_id=request_id,
+        diagnostic_id=diagnostic_id,
+        reason=reason,
+        captured=captured,
+    )
+    return diagnostic_id
+
+
+def _invalid_review_diagnostic_id(
+    reason: str,
+    captured: Mapping[str, bytes],
+) -> str:
+    """Hash unambiguously framed diagnostic fields and evidence bytes."""
+
+    digest = hashlib.sha256()
+    parts = [(b"reason", reason.encode("utf-8"))]
+    parts.extend(
+        (name.encode("utf-8"), content)
+        for name, content in sorted(captured.items())
+    )
+    for name, content in parts:
+        for value in (name, content):
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+    return digest.hexdigest()
+
+
+def _invalid_results_directory(
+    control_root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+) -> Path:
+    """Return a validated local diagnostic parent without following links."""
+
+    run_directory = runs.safe_run_directory(control_root, run_id)
+    rounds_root = _require_owned_directory(
+        run_directory / "rounds",
+        parent=run_directory,
+        label="review rounds",
+        create=False,
+    )
+    round_directory = _require_owned_directory(
+        rounds_root / f"{round_number:03d}",
+        parent=rounds_root,
+        label="active review round",
+        create=False,
+    )
+    diagnostics = _require_owned_directory(
+        round_directory / "diagnostics",
+        parent=round_directory,
+        label="review diagnostics",
+        create=True,
+    )
+    return _require_owned_directory(
+        diagnostics / "invalid-results",
+        parent=diagnostics,
+        label="invalid-result diagnostics",
+        create=True,
+    )
+
+
+def _require_owned_directory(
+    path: Path,
+    *,
+    parent: Path,
+    label: str,
+    create: bool,
+) -> Path:
+    """Create or validate one direct, normal directory descendant."""
+
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise HandoffRecoveryError(
+                f"{label} must be a non-symlink directory: {path}"
+            ) from None
+        path.mkdir(mode=0o700)
+        status = path.lstat()
+    if not stat.S_ISDIR(status.st_mode):
+        raise HandoffRecoveryError(
+            f"{label} must be a non-symlink directory: {path}"
+        )
+    resolved = path.resolve(strict=True)
+    if resolved.parent != parent:
+        raise HandoffRecoveryError(
+            f"{label} escaped its owned parent directory: {path}"
+        )
+    return resolved
+
+
+def _verify_invalid_review_diagnostic(
+    root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+    request_id: str,
+    diagnostic_id: str,
+    reason: str,
+    captured: Mapping[str, bytes],
+) -> None:
+    """Verify the exact immutable contents and identity of a diagnostic."""
+
+    tree = inspect_regular_tree(
+        root,
+        label="invalid-result diagnostic",
+        error_type=HandoffRecoveryError,
+    )
+    expected_names = set(captured) | {"validation-error.json"}
+    expected_paths = {PurePosixPath(name) for name in expected_names}
+    if tree.files != expected_paths or tree.directories:
+        raise HandoffRecoveryError(
+            "invalid-result diagnostic does not match captured evidence"
+        )
+    files = read_regular_tree(
+        root,
+        label="invalid-result diagnostic",
+        error_type=HandoffRecoveryError,
+    )
+    for name, expected in captured.items():
+        if files[PurePosixPath(name)] != expected:
+            raise HandoffRecoveryError(
+                f"invalid-result diagnostic differs for {name}"
+            )
+
+    summary_bytes = files[PurePosixPath("validation-error.json")]
+    try:
+        summary_value = decode_json(summary_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, InvalidJsonError) as error:
+        raise HandoffRecoveryError(
+            f"invalid-result diagnostic metadata is invalid: {error}"
+        ) from error
+    summary = _DIAGNOSTIC_VALIDATOR.require_object(
+        summary_value,
+        "invalid-result diagnostic metadata",
+    )
+    _DIAGNOSTIC_VALIDATOR.check_fields(
+        summary,
+        required={
+            "schema_version",
+            "created_at",
+            "run_id",
+            "round",
+            "request_id",
+            "diagnostic_id",
+            "reason",
+            "captured_files",
+        },
+        path="invalid-result diagnostic metadata",
+    )
+    if _DIAGNOSTIC_VALIDATOR.require_int(
+        summary["schema_version"],
+        "invalid-result diagnostic metadata.schema_version",
+    ) != SCHEMA_VERSION:
+        raise HandoffRecoveryError(
+            "invalid-result diagnostic metadata.schema_version must be "
+            f"{SCHEMA_VERSION}"
+        )
+    _DIAGNOSTIC_VALIDATOR.require_timestamp(
+        summary["created_at"],
+        "invalid-result diagnostic metadata.created_at",
+    )
+    actual = {
+        "run_id": _DIAGNOSTIC_VALIDATOR.require_uuid(
+            summary["run_id"],
+            "invalid-result diagnostic metadata.run_id",
+        ),
+        "round": _DIAGNOSTIC_VALIDATOR.require_int(
+            summary["round"],
+            "invalid-result diagnostic metadata.round",
+        ),
+        "request_id": _DIAGNOSTIC_VALIDATOR.require_uuid(
+            summary["request_id"],
+            "invalid-result diagnostic metadata.request_id",
+        ),
+        "diagnostic_id": _DIAGNOSTIC_VALIDATOR.require_digest(
+            summary["diagnostic_id"],
+            "invalid-result diagnostic metadata.diagnostic_id",
+        ),
+        "reason": _DIAGNOSTIC_VALIDATOR.require_string(
+            summary["reason"],
+            "invalid-result diagnostic metadata.reason",
+        ),
+        "captured_files": list(
+            _DIAGNOSTIC_VALIDATOR.require_narrow_relative_paths(
+                summary["captured_files"],
+                "invalid-result diagnostic metadata.captured_files",
+            )
+        ),
+    }
+    expected = {
+        "run_id": run_id,
+        "round": round_number,
+        "request_id": request_id,
+        "diagnostic_id": diagnostic_id,
+        "reason": reason,
+        "captured_files": sorted(captured),
+    }
+    if actual != expected:
+        raise HandoffRecoveryError(
+            "invalid-result diagnostic metadata does not match captured "
+            "evidence"
+        )
+    if summary_bytes != encode_json(summary):
+        raise HandoffRecoveryError(
+            "invalid-result diagnostic metadata is not canonically encoded"
+        )
+
+
+def _marker_blocks_resubmission(
+    *,
+    marker_bytes: bytes,
+    review_bytes: bytes | None,
+    request: ReviewRequest,
+) -> bool:
+    """Return whether immutable marker state prevents a corrected result."""
+
+    if review_bytes is None:
+        return True
+    try:
+        marker = ReviewerLocalMarker.from_dict(
+            decode_json(marker_bytes.decode("utf-8"))
+        )
+        review = ReviewResult.from_dict(
+            decode_json(review_bytes.decode("utf-8")),
+            object_format=request.object_format,
+        )
+    except (
+        UnicodeDecodeError,
+        InvalidJsonError,
+        ArtifactValidationError,
+    ):
+        return True
+    comparisons = (
+        (marker.request_id, request.request_id),
+        (marker.result_id, review.result_id),
+        (marker.review_json_path, request.review_output_path),
+        (marker.review_sha256, hashlib.sha256(review_bytes).hexdigest()),
+        (review.request_id, request.request_id),
+        (review.run_id, request.run_id),
+        (review.round_number, request.round_number),
+        (review.base_oid, request.base_oid),
+        (review.head_oid, request.head_oid),
+    )
+    return any(actual != expected for actual, expected in comparisons)
+
+
+def _remove_captured_marker(path: Path, *, expected: bytes) -> None:
+    """Remove a blocking marker only if it is still the captured file."""
+
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        raise HandoffRecoveryError(
+            "review marker changed after invalid evidence was preserved"
+        ) from None
+    if not stat.S_ISREG(status.st_mode) or path.read_bytes() != expected:
+        raise HandoffRecoveryError(
+            "review marker changed after invalid evidence was preserved"
+        )
+    path.unlink()
 
 
 def _record_handoff(

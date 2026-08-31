@@ -565,6 +565,10 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 env_overrides=prepared.environment,
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            self.assertEqual(
+                marker.read_bytes(),
+                original_evidence["local-state.json"],
+            )
 
             invalid_results = (
                 run_directory
@@ -587,6 +591,19 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 diagnostic.name,
             )
             self.assertEqual(
+                validation_error["run_id"],
+                original_state["active_run_id"],
+            )
+            self.assertEqual(validation_error["round"], 1)
+            self.assertEqual(
+                validation_error["request_id"],
+                original_round["request_id"],
+            )
+            self.assertRegex(
+                validation_error["created_at"],
+                r"^\d{4}-\d{2}-\d{2}T.*Z$",
+            )
+            self.assertEqual(
                 validation_error["captured_files"],
                 ["local-state.json", "review.json", "review.md"],
             )
@@ -601,6 +618,94 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 .splitlines()
             ]
             self.assertEqual(events[-1]["diagnostic_id"], diagnostic.name)
+
+    def test_malformed_marker_can_be_replaced_and_applied_same_round(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            original_review = _write_review(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            marker = prepared.bundle / "local-state.json"
+            malformed_marker = b'{"schema_version":\n'
+            marker.write_bytes(malformed_marker)
+            original_state, run_directory = _artifacts(prepared.repository)
+            original_round = original_state["active_round"]
+
+            recovered = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn(
+                "Recovery action: re-prompted Reviewer",
+                recovered.stdout,
+            )
+            self.assertFalse(marker.exists())
+            diagnostics = list(
+                (
+                    run_directory
+                    / "rounds/001/diagnostics/invalid-results"
+                ).iterdir()
+            )
+            self.assertEqual(len(diagnostics), 1)
+            self.assertEqual(
+                (diagnostics[0] / "local-state.json").read_bytes(),
+                malformed_marker,
+            )
+
+            corrected_review = dict(original_review)
+            corrected_review["result_id"] = (
+                "44444444-4444-4444-8444-444444444444"
+            )
+            (prepared.bundle / "output/review.json").write_text(
+                f"{json.dumps(corrected_review, indent=2)}\n",
+                encoding="utf-8",
+            )
+            resubmitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(resubmitted.returncode, 0, resubmitted.stderr)
+            self.assertIn(
+                "Reviewer-local marker created",
+                resubmitted.stdout,
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(corrected_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            final_state, final_run_directory = _artifacts(
+                prepared.repository
+            )
+            self.assertEqual(final_run_directory, run_directory)
+            self.assertEqual(final_state["current_round"], 1)
+            self.assertEqual(
+                final_state["active_round"]["request_id"],
+                original_round["request_id"],
+            )
+            self.assertEqual(
+                final_state["active_round"]["result_id"],
+                corrected_review["result_id"],
+            )
+            _assert_single_round(self, run_directory)
 
     def test_history_adopts_a_delivered_request_whose_state_is_pending(
         self,

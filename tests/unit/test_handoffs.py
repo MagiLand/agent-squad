@@ -184,20 +184,35 @@ class RetryHandoffGuardTests(unittest.TestCase):
 
 
 class InvalidEvidencePreservationTests(unittest.TestCase):
-    def _prepare_evidence(
+    def _prepare_archive(
         self,
         root: Path,
-    ) -> tuple[Path, ActiveRoundRecord, SimpleNamespace]:
-        active_round = _active_round(root)
-        bundle = active_round.review_worktree / ".agent-squad-review"
-        (bundle / "output").mkdir(parents=True)
-        (bundle / "output/review.json").write_bytes(b'{"invalid":true}\n')
-        (bundle / "output/review.md").write_bytes(b"# Invalid\n")
-        (bundle / "local-state.json").write_bytes(b'{"marker":true}\n')
-        return (
-            root / ".agent-squad",
-            active_round,
-            SimpleNamespace(run_id=RUN_ID),
+    ) -> tuple[Path, dict[str, bytes]]:
+        control_root = root / ".agent-squad"
+        (
+            control_root
+            / runs.RUNS_DIRECTORY_NAME
+            / RUN_ID
+            / "rounds/001"
+        ).mkdir(parents=True)
+        return control_root, {
+            "review.json": b'{"invalid":true}\n',
+            "review.md": b"# Invalid\n",
+            "local-state.json": b'{"marker":true}\n',
+        }
+
+    def _archive(
+        self,
+        control_root: Path,
+        captured: dict[str, bytes],
+    ) -> str:
+        return handoffs._archive_invalid_review_evidence(
+            control_root,
+            run_id=RUN_ID,
+            round_number=1,
+            request_id=REQUEST_ID,
+            reason="digest mismatch",
+            captured=captured,
         )
 
     def test_preserves_evidence_idempotently_with_validation_reason(
@@ -205,23 +220,18 @@ class InvalidEvidencePreservationTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            control_root, active_round, active = self._prepare_evidence(root)
-            invalid = runs.InvalidUnappliedReviewResult("digest mismatch")
+            control_root, captured = self._prepare_archive(root)
 
-            first_id = handoffs._preserve_invalid_review_evidence(
-                control_root,
-                active=active,
-                active_round=active_round,
-                invalid_review=invalid,
-            )
-            second_id = handoffs._preserve_invalid_review_evidence(
-                control_root,
-                active=active,
-                active_round=active_round,
-                invalid_review=invalid,
-            )
+            with mock.patch.object(
+                handoffs,
+                "utc_timestamp",
+                return_value="2026-08-31T12:00:00Z",
+            ) as timestamp:
+                first_id = self._archive(control_root, captured)
+                second_id = self._archive(control_root, captured)
 
             self.assertEqual(second_id, first_id)
+            self.assertEqual(timestamp.call_count, 1)
             diagnostic_root = (
                 control_root
                 / runs.RUNS_DIRECTORY_NAME
@@ -242,12 +252,102 @@ class InvalidEvidencePreservationTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(summary["reason"], "digest mismatch")
+            self.assertEqual(
+                summary,
+                {
+                    "schema_version": 1,
+                    "created_at": "2026-08-31T12:00:00Z",
+                    "run_id": RUN_ID,
+                    "round": 1,
+                    "request_id": REQUEST_ID,
+                    "diagnostic_id": first_id,
+                    "reason": "digest mismatch",
+                    "captured_files": [
+                        "local-state.json",
+                        "review.json",
+                        "review.md",
+                    ],
+                },
+            )
+
+    def test_hash_framing_distinguishes_previous_null_collision(self) -> None:
+        first = handoffs._invalid_review_diagnostic_id(
+            "same reason",
+            {"review.json": b"A\0review.md\0B"},
+        )
+        second = handoffs._invalid_review_diagnostic_id(
+            "same reason",
+            {"review.json": b"A", "review.md": b"B"},
+        )
+
+        self.assertNotEqual(first, second)
+
+    def test_symlinked_diagnostic_parent_cannot_escape_run_storage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            control_root, captured = self._prepare_archive(root)
+            diagnostics = (
+                control_root
+                / runs.RUNS_DIRECTORY_NAME
+                / RUN_ID
+                / "rounds/001/diagnostics"
+            )
+            diagnostics.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (diagnostics / "invalid-results").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(
+                handoffs.HandoffRecoveryError,
+                "invalid-result diagnostics must be a non-symlink directory",
+            ):
+                self._archive(control_root, captured)
+
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_existing_diagnostic_must_match_the_exact_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            control_root, captured = self._prepare_archive(root)
+            diagnostic_id = self._archive(control_root, captured)
+            diagnostic = (
+                control_root
+                / runs.RUNS_DIRECTORY_NAME
+                / RUN_ID
+                / "rounds/001/diagnostics/invalid-results"
+                / diagnostic_id
+            )
+            (diagnostic / "stale.txt").write_text(
+                "stale\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                handoffs.HandoffRecoveryError,
+                "does not match captured evidence",
+            ):
+                self._archive(control_root, captured)
 
     def test_write_failure_refuses_to_risk_overwriting_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            control_root, active_round, active = self._prepare_evidence(root)
+            control_root, captured = self._prepare_archive(root)
+            active_round = _active_round(root)
+            bundle = active_round.review_worktree / ".agent-squad-review"
+            (bundle / "output").mkdir(parents=True)
+            (bundle / "output/review.json").write_bytes(
+                captured["review.json"]
+            )
+            (bundle / "output/review.md").write_bytes(
+                captured["review.md"]
+            )
+            marker = bundle / "local-state.json"
+            marker.write_bytes(captured["local-state.json"])
 
             with (
                 mock.patch.object(
@@ -262,12 +362,25 @@ class InvalidEvidencePreservationTests(unittest.TestCase):
             ):
                 handoffs._preserve_invalid_review_evidence(
                     control_root,
-                    active=active,
+                    active=SimpleNamespace(run_id=RUN_ID),
                     active_round=active_round,
+                    request=SimpleNamespace(),
                     invalid_review=runs.InvalidUnappliedReviewResult(
                         "digest mismatch"
                     ),
                 )
+
+            invalid_results = (
+                control_root
+                / runs.RUNS_DIRECTORY_NAME
+                / RUN_ID
+                / "rounds/001/diagnostics/invalid-results"
+            )
+            self.assertEqual(list(invalid_results.iterdir()), [])
+            self.assertEqual(
+                marker.read_bytes(),
+                captured["local-state.json"],
+            )
 
 
 class HandoffPersistenceTests(unittest.TestCase):
