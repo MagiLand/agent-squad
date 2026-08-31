@@ -1145,7 +1145,7 @@ Suggested layout:
 
 Files that are not applicable MAY be absent. When the run has recorded Developer resolutions, every resolution JSON and companion Markdown MUST be present in the bundle in ascending `created_at` order.
 
-`retired-results.json` is present only after recovery retires a marker-confirmed result identity. The implementation-owned round copy is authoritative. The review-bundle copy is an advisory mirror that allows `review-submit` to reject contradictory reuse early without requiring access to `.agent-squad/`.
+`retired-results.json` is present only after recovery retires a marker-confirmed result identity. The implementation-owned round copy is authoritative. The review-bundle copy is an advisory mirror that allows `review-submit` to reject contradictory reuse early without requiring access to `.agent-squad/`. Implementation-side decisions MUST NOT depend on that advisory copy being present or valid.
 
 The bundle MUST contain every protocol artifact the round-scoped Reviewer needs without requiring write access to the implementation worktree's `.agent-squad/` directory.
 
@@ -2587,7 +2587,7 @@ A corrected review artifact after a rejected local submission SHOULD use a new r
 
 The exact correction rule MUST be deterministic and tested.
 
-Before recovery removes a marker-confirmed result identity, it MUST durably bind that result ID to its original review digest in implementation-owned round storage. A Reviewer-local mirror MAY provide earlier rejection, but implementation-side discovery and `apply-review` MUST enforce the authoritative binding even when that mirror is absent.
+Before recovery removes a marker-confirmed result identity, it MUST durably bind that result ID to its original review digest in implementation-owned round storage. A Reviewer-local mirror MAY provide earlier rejection, but implementation-side discovery and `apply-review` MUST use the authoritative binding even when that mirror is absent, malformed, or identity-mismatched.
 
 ### 31.7 Recorded result replay and unknown-result refusal
 

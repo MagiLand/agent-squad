@@ -905,6 +905,140 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             )
             _assert_single_round(self, run_directory)
 
+    def test_invalid_reviewer_ledger_cannot_veto_authoritative_result(
+        self,
+    ) -> None:
+        cases = ("malformed", "mismatched")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    review = _write_review(prepared)
+                    submitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        submitted.returncode,
+                        0,
+                        submitted.stderr,
+                    )
+                    marker = prepared.bundle / "local-state.json"
+                    marker.write_bytes(b'{"schema_version":\n')
+                    recovered = run_cli(
+                        prepared.repository,
+                        "retry-handoff",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        recovered.returncode,
+                        0,
+                        recovered.stderr,
+                    )
+                    self.assertFalse(marker.exists())
+
+                    resubmitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        resubmitted.returncode,
+                        0,
+                        resubmitted.stderr,
+                    )
+                    _, run_directory = _artifacts(prepared.repository)
+                    authoritative_ledger = (
+                        run_directory
+                        / "rounds/001/retired-results.json"
+                    )
+                    authoritative_before = (
+                        authoritative_ledger.read_bytes()
+                    )
+                    reviewer_ledger = (
+                        prepared.bundle / "retired-results.json"
+                    )
+                    if case == "malformed":
+                        reviewer_ledger.write_bytes(
+                            b'{"schema_version":\n'
+                        )
+                    else:
+                        mismatched = json.loads(
+                            authoritative_before.decode("utf-8")
+                        )
+                        mismatched["request_id"] = (
+                            "99999999-9999-4999-8999-999999999999"
+                        )
+                        reviewer_ledger.write_text(
+                            f"{json.dumps(mismatched, indent=2)}\n",
+                            encoding="utf-8",
+                        )
+                    advisory_before = reviewer_ledger.read_bytes()
+
+                    status = run_cli(
+                        prepared.repository,
+                        "status",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(status.returncode, 0, status.stderr)
+                    self.assertIn(
+                        "Marker-confirmed unapplied result: ready",
+                        status.stdout,
+                    )
+                    self.assertIn(
+                        f"Result ID: {review['result_id']}",
+                        status.stdout,
+                    )
+
+                    rediscovered = run_cli(
+                        prepared.repository,
+                        "retry-handoff",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        rediscovered.returncode,
+                        0,
+                        rediscovered.stderr,
+                    )
+                    self.assertIn(
+                        "Recovery action: use marker-confirmed result",
+                        rediscovered.stdout,
+                    )
+                    self.assertEqual(
+                        reviewer_ledger.read_bytes(),
+                        advisory_before,
+                    )
+                    self.assertEqual(
+                        authoritative_ledger.read_bytes(),
+                        authoritative_before,
+                    )
+
+                    applied = run_cli(
+                        prepared.repository,
+                        "apply-review",
+                        "--result-id",
+                        str(review["result_id"]),
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(applied.returncode, 0, applied.stderr)
+                    final_state, final_run_directory = _artifacts(
+                        prepared.repository
+                    )
+                    self.assertEqual(final_run_directory, run_directory)
+                    self.assertEqual(final_state["phase"], "approved")
+                    self.assertEqual(
+                        final_state["active_round"]["result_id"],
+                        review["result_id"],
+                    )
+                    _assert_single_round(self, run_directory)
+
     def test_retired_identity_write_failure_keeps_malformed_marker(
         self,
     ) -> None:

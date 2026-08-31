@@ -372,7 +372,11 @@ def load_marker_confirmed_review(
             _assert_fresh_result_id(previous_review, review)
             review_digest = hashlib.sha256(review_bytes).hexdigest()
             retired_ledger = _load_retired_review_ledger(
-                bundle_root,
+                (
+                    bundle_root
+                    if authoritative_results_root is None
+                    else authoritative_results_root
+                ),
                 request=request,
             )
             _assert_retired_result_reuse(
@@ -380,16 +384,6 @@ def load_marker_confirmed_review(
                 result_id=review.result_id,
                 review_digest=review_digest,
             )
-            if authoritative_results_root is not None:
-                authoritative_ledger = _load_retired_review_ledger(
-                    authoritative_results_root,
-                    request=request,
-                )
-                _assert_retired_result_reuse(
-                    authoritative_ledger,
-                    result_id=review.result_id,
-                    review_digest=review_digest,
-                )
 
             marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
             marker_value, marker_bytes = _load_json_file(
