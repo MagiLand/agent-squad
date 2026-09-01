@@ -32,6 +32,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    validate_followup_submission_head,
     validate_review_response,
 )
 from .herdr import (
@@ -298,11 +299,14 @@ def _prepare_submission_locked(
             run_directory,
             active,
         )
-        _validate_followup_submission_mode(
-            mode,
-            head_oid=head_oid,
-            previous_reviewed_head_oid=previous.review.head_oid,
-        )
+        try:
+            validate_followup_submission_head(
+                mode,
+                head_oid=head_oid,
+                previous_reviewed_head_oid=previous.review.head_oid,
+            )
+        except ArtifactValidationError as error:
+            raise SubmissionError(str(error)) from error
         round_number = active.current_round + 1
 
     report = _capture_report(
@@ -1093,26 +1097,6 @@ def _validate_first_submission_mode(
         raise SubmissionError(
             "the first review round requires a committed candidate whose "
             "HEAD differs from the fixed base"
-        )
-
-
-def _validate_followup_submission_mode(
-    mode: SubmissionMode,
-    *,
-    head_oid: str,
-    previous_reviewed_head_oid: str,
-) -> None:
-    if mode is SubmissionMode.NEW_REVISION:
-        if head_oid == previous_reviewed_head_oid:
-            raise SubmissionError(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD"
-            )
-        return
-    if head_oid != previous_reviewed_head_oid:
-        raise SubmissionError(
-            "a reconsideration submission must keep the exact previously "
-            "reviewed HEAD"
         )
 
 

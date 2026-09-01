@@ -1463,7 +1463,9 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 runs.RunPhase.REVIEWING,
             )
 
-    def test_same_head_reconsideration_can_reach_approval(self) -> None:
+    def test_same_head_reconsideration_accepts_evidence_and_rejects_false_fix(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             prepared, review = _marker_confirmed_review(
@@ -1486,6 +1488,71 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 encoding="utf-8",
             )
             response_path = root / "reconsideration-response.json"
+            _write_fixed_response(response_path, prepared, review)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state_before = state_path.read_bytes()
+            state = json.loads(state_before)
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            first_round = run_directory / "rounds/001"
+            second_round = run_directory / "rounds/002"
+
+            def assert_rejected_without_round(result) -> None:
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "reconsideration requires rejected dispositions with "
+                    "evidence",
+                    result.stderr,
+                )
+                self.assertEqual(state_path.read_bytes(), state_before)
+                self.assertFalse((first_round / "response.json").exists())
+                self.assertFalse(second_round.exists())
+
+            false_fix = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            assert_rejected_without_round(false_fix)
+
+            needs_human_response = json.loads(
+                response_path.read_text(encoding="utf-8")
+            )
+            needs_human_response["responses"][0].update(
+                disposition="needs_human",
+                changed_files=[],
+                evidence=[],
+                verification="",
+            )
+            response_path.write_text(
+                f"{json.dumps(needs_human_response, indent=2)}\n",
+                encoding="utf-8",
+            )
+            unresolved = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            assert_rejected_without_round(unresolved)
+
             _write_rejected_response(response_path, prepared, review)
 
             submitted = run_cli(
@@ -1502,36 +1569,91 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             )
 
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
-            control_root = prepared.repository / ".agent-squad"
             state = json.loads(
-                (control_root / "state.json").read_text(encoding="utf-8")
+                state_path.read_text(encoding="utf-8")
             )
-            run_directory = (
-                control_root / "runs" / str(state["active_run_id"])
-            )
-            second_round = run_directory / "rounds/002"
             second_request = json.loads(
                 (second_round / "request.json").read_text(encoding="utf-8")
             )
             second_worktree = Path(state["active_round"]["review_worktree"])
+            second_bundle = second_worktree / ".agent-squad-review"
             self.assertEqual(state["current_round"], 2)
             self.assertEqual(state["current_head_oid"], review["head_oid"])
             self.assertEqual(second_request["mode"], "reconsideration")
             self.assertEqual(second_request["head_oid"], review["head_oid"])
+            self.assertEqual(
+                second_request["previous_review_path"],
+                "input/previous-review.json",
+            )
+            self.assertEqual(
+                second_request["previous_response_path"],
+                "input/previous-response.json",
+            )
+            self.assertNotEqual(
+                second_request["reviewer_name"],
+                prepared.request["reviewer_name"],
+            )
+            self.assertNotEqual(second_worktree, prepared.review_worktree)
+            self.assertEqual(
+                run(["git", "rev-parse", "HEAD"], cwd=second_worktree)
+                .stdout.strip(),
+                review["head_oid"],
+            )
+            self.assertEqual(
+                run(
+                    ["git", "symbolic-ref", "--quiet", "HEAD"],
+                    cwd=second_worktree,
+                    check=False,
+                ).returncode,
+                1,
+            )
+            self.assertEqual(
+                (second_round / "implementation-report.md").read_bytes(),
+                report.read_bytes(),
+            )
             stored_response = json.loads(
-                (run_directory / "rounds/001/response.json").read_text(
+                (first_round / "response.json").read_text(
                     encoding="utf-8"
                 )
+            )
+            self.assertEqual(
+                stored_response["reviewed_head_oid"],
+                review["head_oid"],
+            )
+            self.assertEqual(
+                stored_response["responses"][0]["evidence"],
+                ["feature.txt:1 contains the complete candidate value"],
             )
             self.assertEqual(
                 stored_response["responses"][0]["verification"],
                 "",
             )
+            self.assertEqual(
+                (second_bundle / "input/previous-review.json").read_bytes(),
+                (first_round / "review.json").read_bytes(),
+            )
+            self.assertEqual(
+                (second_bundle / "input/previous-response.json").read_bytes(),
+                response_path.read_bytes(),
+            )
+            for immutable_path in (
+                second_round / "request.json",
+                second_round / "implementation-report.md",
+                first_round / "response.json",
+                second_bundle / "input/request.json",
+                second_bundle / "input/implementation-report.md",
+                second_bundle / "input/previous-review.json",
+                second_bundle / "input/previous-response.json",
+            ):
+                self.assertEqual(
+                    stat.S_IMODE(immutable_path.stat().st_mode),
+                    0o400,
+                )
 
             second_prepared = replace(
                 prepared,
                 review_worktree=second_worktree,
-                bundle=second_worktree / ".agent-squad-review",
+                bundle=second_bundle,
                 request=second_request,
             )
             approval_review = _submit_with_lost_notification(
@@ -1555,6 +1677,100 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             self.assertEqual(
                 approved_state["approved_head_oid"],
                 review["head_oid"],
+            )
+
+    def test_status_rejects_relabelled_same_head_new_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+
+            report = root / "reconsideration-report.md"
+            report.write_text(
+                "# Implementation Report\n\nNo code change is required.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "reconsideration-response.json"
+            _write_rejected_response(response_path, prepared, review)
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            round_path = run_directory / "rounds/002/round.json"
+            request_path = run_directory / "rounds/002/request.json"
+            bundle_request_path = (
+                Path(state["active_round"]["review_worktree"])
+                / ".agent-squad-review/input/request.json"
+            )
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["mode"] = "new_revision"
+            request_bytes = review_applications.encode_json(request)
+            request_digest = hashlib.sha256(request_bytes).hexdigest()
+            round_record = json.loads(
+                round_path.read_text(encoding="utf-8")
+            )
+            round_record["mode"] = "new_revision"
+            round_record["artifacts"]["request"]["sha256"] = (
+                request_digest
+            )
+            request_input = next(
+                artifact
+                for artifact in round_record["artifacts"]["bundle_inputs"]
+                if artifact["path"] == "input/request.json"
+            )
+            request_input["sha256"] = request_digest
+            state["active_round"]["mode"] = "new_revision"
+            for path, content in (
+                (state_path, review_applications.encode_json(state)),
+                (
+                    round_path,
+                    review_applications.encode_json(round_record),
+                ),
+                (request_path, request_bytes),
+                (bundle_request_path, request_bytes),
+            ):
+                path.chmod(0o600)
+                path.write_bytes(content)
+
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(status.returncode, 1)
+            self.assertIn(
+                "a new_revision submission after changes_requested requires "
+                "a new committed HEAD",
+                status.stderr,
             )
 
     def test_invalid_correction_stays_correctable_before_round_commit(
