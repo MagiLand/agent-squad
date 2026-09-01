@@ -711,53 +711,40 @@ class RoundReplayGuardTests(unittest.TestCase):
                 presented_result_id=REQUEST_ID,
             )
 
-        mismatched_round_record = copy.copy(round_record)
-        mismatched_round_record.request_id = RUN_ID
-        with (
-            mock.patch.object(
-                review_applications.runs,
-                "safe_run_directory",
-                return_value=Path("/run"),
-            ),
-            mock.patch.object(
-                review_applications.runs,
-                "find_recorded_review_round",
-                return_value=(Path("/round"), mismatched_round_record),
-            ),
-            self.assertRaisesRegex(
-                review_applications.ReviewApplicationError,
-                "approved round request ID does not match authoritative state",
-            ),
-        ):
-            review_applications._approved_replay(
-                repository,
-                active,
-                presented_result_id=RESULT_ID,
-            )
-
-        mismatched_round_record = copy.copy(round_record)
-        mismatched_round_record.head_oid = "c" * 40
-        with (
-            mock.patch.object(
-                review_applications.runs,
-                "safe_run_directory",
-                return_value=Path("/run"),
-            ),
-            mock.patch.object(
-                review_applications.runs,
-                "find_recorded_review_round",
-                return_value=(Path("/round"), mismatched_round_record),
-            ),
-            self.assertRaisesRegex(
-                review_applications.ReviewApplicationError,
-                "approved round head OID does not match authoritative state",
-            ),
-        ):
-            review_applications._approved_replay(
-                repository,
-                active,
-                presented_result_id=RESULT_ID,
-            )
+        mismatches = (
+            ("round_number", 2, "round number"),
+            ("request_id", RUN_ID, "request ID"),
+            ("result_id", RUN_ID, "result ID"),
+            ("head_oid", "c" * 40, "head OID"),
+            ("status", RoundStatus.INVALID, "status"),
+            ("verdict", ReviewVerdict.CHANGES_REQUESTED, "verdict"),
+        )
+        for field, value, label in mismatches:
+            with self.subTest(field=field):
+                mismatched_round_record = copy.copy(round_record)
+                setattr(mismatched_round_record, field, value)
+                with (
+                    mock.patch.object(
+                        review_applications.runs,
+                        "safe_run_directory",
+                        return_value=Path("/run"),
+                    ),
+                    mock.patch.object(
+                        review_applications.runs,
+                        "find_recorded_review_round",
+                        return_value=(Path("/round"), mismatched_round_record),
+                    ),
+                    self.assertRaisesRegex(
+                        review_applications.ReviewApplicationError,
+                        f"approved round {label} does not match "
+                        "authoritative state",
+                    ),
+                ):
+                    review_applications._approved_replay(
+                        repository,
+                        active,
+                        presented_result_id=RESULT_ID,
+                    )
 
         with (
             mock.patch.object(
