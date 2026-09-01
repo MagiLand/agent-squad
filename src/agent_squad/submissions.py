@@ -32,6 +32,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    validate_followup_submission_head,
     validate_review_response,
 )
 from .herdr import (
@@ -1102,18 +1103,14 @@ def _validate_followup_submission_mode(
     head_oid: str,
     previous_reviewed_head_oid: str,
 ) -> None:
-    if mode is SubmissionMode.NEW_REVISION:
-        if head_oid == previous_reviewed_head_oid:
-            raise SubmissionError(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD"
-            )
-        return
-    if head_oid != previous_reviewed_head_oid:
-        raise SubmissionError(
-            "a reconsideration submission must keep the exact previously "
-            "reviewed HEAD"
+    try:
+        validate_followup_submission_head(
+            mode,
+            head_oid=head_oid,
+            previous_reviewed_head_oid=previous_reviewed_head_oid,
         )
+    except ArtifactValidationError as error:
+        raise SubmissionError(str(error)) from error
 
 
 def _sensitive_change_warnings(

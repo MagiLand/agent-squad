@@ -20,6 +20,7 @@ from .artifacts import (
     ReviewResult,
     ReviewVerdict,
     deterministic_reviewer_name,
+    validate_followup_submission_head,
     validate_review_response,
 )
 from .herdr import HerdrClient, HerdrError, format_herdr_error
@@ -844,6 +845,14 @@ def _validate_bundle_inputs(
             raise ReviewSubmissionError(
                 "previous review round must precede the requested round"
             )
+        try:
+            validate_followup_submission_head(
+                request.mode,
+                head_oid=request.head_oid,
+                previous_reviewed_head_oid=previous_review.head_oid,
+            )
+        except ArtifactValidationError as error:
+            raise ReviewSubmissionError(str(error)) from error
 
     if request.previous_response_path is not None:
         previous_response_path = PurePosixPath(

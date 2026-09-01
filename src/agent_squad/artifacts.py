@@ -1002,6 +1002,28 @@ def validate_review_response(
             )
 
 
+def validate_followup_submission_head(
+    mode: SubmissionMode,
+    *,
+    head_oid: str,
+    previous_reviewed_head_oid: str,
+) -> None:
+    """Validate the candidate head against the applied reviewed head."""
+
+    if mode is SubmissionMode.NEW_REVISION:
+        if head_oid == previous_reviewed_head_oid:
+            raise ArtifactValidationError(
+                "a new_revision submission after changes_requested requires "
+                "a new committed HEAD"
+            )
+        return
+    if head_oid != previous_reviewed_head_oid:
+        raise ArtifactValidationError(
+            "a reconsideration submission must keep the exact previously "
+            "reviewed HEAD"
+        )
+
+
 @dataclass(frozen=True)
 class ReviewerLocalMarker:
     """Reviewer-side proof that one result passed local validation."""

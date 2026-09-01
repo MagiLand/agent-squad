@@ -271,6 +271,27 @@ def _prepare_multi_input_round(
         bundle=review_worktree / ".agent-squad-review",
         request=copy.deepcopy(first_round.request),
     )
+    (review_worktree / "feature.txt").write_text(
+        "corrected candidate\n",
+        encoding="utf-8",
+    )
+    run(["git", "add", "feature.txt"], cwd=review_worktree)
+    run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "--no-verify",
+            "-m",
+            "fix: correct candidate",
+        ],
+        cwd=review_worktree,
+    )
+    corrected_head = run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=review_worktree,
+    ).stdout.strip()
     input_root = prepared.bundle / "input"
     previous_review = _review_result(
         first_round.request,
@@ -341,6 +362,7 @@ def _prepare_multi_input_round(
     request = copy.deepcopy(prepared.request)
     request.update(
         round=2,
+        head_oid=corrected_head,
         reviewer_name=deterministic_reviewer_name(
             str(request["run_id"]),
             2,
@@ -770,6 +792,46 @@ class ReviewSubmitCommandTests(unittest.TestCase):
 
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             self.assertEqual(len(_result_prompt_events(prepared)), 1)
+
+    def test_new_revision_bundle_cannot_reuse_the_reviewed_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            previous_review_path = (
+                prepared.bundle / "input/previous-review.json"
+            )
+            previous_response_path = (
+                prepared.bundle / "input/previous-response.json"
+            )
+            previous_review = json.loads(
+                previous_review_path.read_text(encoding="utf-8")
+            )
+            previous_review["head_oid"] = prepared.request["head_oid"]
+            _write_json_fixture(previous_review_path, previous_review)
+            previous_response = json.loads(
+                previous_response_path.read_text(encoding="utf-8")
+            )
+            previous_response["reviewed_head_oid"] = prepared.request[
+                "head_oid"
+            ]
+            _write_json_fixture(previous_response_path, previous_response)
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertIn(
+                "a new_revision submission after changes_requested requires "
+                "a new committed HEAD",
+                submitted.stderr,
+            )
+            self.assertFalse((prepared.bundle / "local-state.json").exists())
+            self.assertEqual(_result_prompt_events(prepared), [])
 
     def test_multi_input_document_validation_failures_are_rejected(
         self,

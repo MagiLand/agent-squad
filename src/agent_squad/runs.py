@@ -34,6 +34,7 @@ from .artifacts import (
     ROUND_RESPONSE_FILE_NAME,
     ReviewerLocalMarker,
     RoundStatus,
+    validate_followup_submission_head,
 )
 from .initialization import (
     AgentKind,
@@ -1615,6 +1616,14 @@ def _validate_active_review_artifacts(
                 "a correction-round request must follow the most recent "
                 "applied changes_requested result"
             )
+        try:
+            validate_followup_submission_head(
+                request.mode,
+                head_oid=request.head_oid,
+                previous_reviewed_head_oid=previous.review.head_oid,
+            )
+        except ArtifactValidationError as error:
+            raise RunStateError(str(error)) from error
         additional_by_path = {
             artifact.path: artifact for artifact in additional_inputs
         }
