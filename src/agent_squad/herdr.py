@@ -40,6 +40,13 @@ class ReviewerSession:
     adopted: bool
 
 
+@dataclass(frozen=True)
+class ReviewRequestProbe:
+    """Read-only evidence found for one deterministic review request."""
+
+    history: str | None
+
+
 class HerdrClient:
     """Small adapter for the exact Herdr surface Agent Squad needs."""
 
@@ -384,6 +391,48 @@ class HerdrClient:
             pane_id=pane_id,
             adopted=adopted,
         )
+
+    def probe_review_request(
+        self,
+        *,
+        reviewer_name: str,
+        reviewer_kind: AgentKind,
+        review_worktree: Path,
+    ) -> ReviewRequestProbe:
+        """Inspect the expected Reviewer and its recent terminal history."""
+
+        existing = self._get_agent(reviewer_name)
+        if existing is None:
+            return ReviewRequestProbe(history=None)
+        self._validate_agent(
+            existing,
+            reviewer_name=reviewer_name,
+            reviewer_kind=reviewer_kind,
+            review_worktree=review_worktree,
+        )
+        try:
+            history_probe = self._run(
+                (
+                    "agent",
+                    "read",
+                    reviewer_name,
+                    "--source",
+                    "recent-unwrapped",
+                    "--lines",
+                    "1000",
+                    "--format",
+                    "text",
+                ),
+                allow_failure=True,
+            )
+        except HerdrError:
+            return ReviewRequestProbe(history=None)
+        history = (
+            history_probe.stdout
+            if history_probe.returncode == 0
+            else None
+        )
+        return ReviewRequestProbe(history=history)
 
     def dispatch_review_result(
         self,

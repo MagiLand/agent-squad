@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, recover lost request or result handoffs, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -72,7 +72,24 @@ agent-squad submit \
 
 The first submission requires a clean tracked worktree, no unexpected untracked files, a current branch or detached state matching the run, a head different from the fixed base, and the fixed base as an ancestor of that head. Known generated paths may be configured through `allowed_generated_paths`.
 
-Before contacting Herdr, Agent Squad creates a durable round record, detached review worktree, self-contained `.agent-squad-review/` bundle, and pending handoff state. It discovers the installed Herdr schema and command capabilities, opens the exact worktree, and launches or adopts the deterministic Reviewer. If discovery, launch, or prompting fails, the same logical round and request remain recorded for recovery; another `submit` does not create a replacement round.
+Before contacting Herdr, Agent Squad creates a durable round record, detached review worktree, self-contained `.agent-squad-review/` bundle, and pending handoff state. It discovers the installed Herdr schema and command capabilities, opens the exact worktree, and launches or adopts the deterministic Reviewer. If discovery, launch, or prompting fails, the same logical round and request remain recorded for recovery; another `submit` does not create a replacement round. Run the reported `agent-squad retry-handoff` command instead.
+
+## Recover a review handoff
+
+Inspect the durable round and retry its current handoff from the implementation worktree:
+
+```bash
+agent-squad status
+agent-squad retry-handoff
+```
+
+Recovery first checks the expected review output and Reviewer-local marker. Marker-confirmed output is returned with the exact `apply-review` command without contacting Herdr. Output without a valid marker is reported as incomplete and is never treated as an applicable result.
+
+If a failed `apply-review` left a provisional archive for a result that recovery later retired, applying corrected marker-confirmed output preserves the retired attempt under the round's `diagnostics/retired-apply-attempts/` directory before archiving and applying the corrected result.
+
+When no valid result is ready, recovery checks the deterministic Reviewer session and, when Herdr supports it, reads recent terminal history before sending anything. It can adopt a request already visible in history, re-prompt the existing Reviewer, or relaunch the deterministic Reviewer in the same review worktree. If optional history diagnostics are unavailable or fail, recovery safely falls back to re-prompting. Every path reuses the run ID, round, request ID, Reviewer name, worktree, and bundle; repeated recovery never allocates a replacement round.
+
+If recovery must remove a malformed or mismatched marker, it first binds that result ID to its original digest in implementation-owned round storage. A copy in the review bundle gives `review-submit` early feedback, but implementation-side status, recovery, and application use only the authoritative binding; a missing, malformed, mismatched, or non-regular advisory copy cannot veto them. Recovery excludes that entry from invalid-result evidence traversal and safely replaces an invalid advisory directory from authority before removing the marker. Corrected content must use a new result ID.
 
 ## Apply a review, correct findings, and complete
 

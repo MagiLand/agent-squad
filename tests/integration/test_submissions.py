@@ -23,7 +23,7 @@ from tests._support import (
 
 add_src_to_path()
 
-from agent_squad import runs, submissions  # noqa: E402
+from agent_squad import handoffs, runs, submissions  # noqa: E402
 from agent_squad.artifacts import (  # noqa: E402
     ActiveRoundRecord,
     ArtifactValidationError,
@@ -288,6 +288,30 @@ class SubmitCommandTests(unittest.TestCase):
             self.assertIn(f"Request ID: {request_id}", status.stdout)
             self.assertIn(f"Reviewer session: {reviewer_name}", status.stdout)
             self.assertIn("Request handoff: sent", status.stdout)
+
+    def test_submit_does_not_require_optional_history_capabilities(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository, data_home, report, environment, _ = _start_run(root)
+            _commit_candidate(repository)
+            environment["FAKE_HERDR_SCHEMA_MISSING"] = "agent.read"
+
+            submitted = run_cli(
+                repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            state, _ = _artifacts(repository)
+            self.assertEqual(state["handoff"]["status"], "sent")
 
     def test_precommit_git_and_mode_failures_create_no_round(self) -> None:
         cases = (
@@ -928,7 +952,7 @@ class SubmitCommandTests(unittest.TestCase):
                 version="herdr test",
                 protocol=20,
             )
-            append_event = submissions.append_event
+            append_event = handoffs.append_event
 
             def fail_sent_event(
                 path: Path,
@@ -940,7 +964,7 @@ class SubmitCommandTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    submissions,
+                    handoffs,
                     "append_event",
                     side_effect=fail_sent_event,
                 ),
@@ -1296,8 +1320,7 @@ class SubmitCommandTests(unittest.TestCase):
                     self.assertEqual(status.returncode, 0, status.stderr)
                     self.assertIn("Request handoff: failed", status.stdout)
                     self.assertIn(
-                        "Next action: recover the preserved review-request "
-                        "handoff",
+                        "Next action: agent-squad retry-handoff",
                         status.stdout,
                     )
                     retry = run_cli(

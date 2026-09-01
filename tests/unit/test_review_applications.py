@@ -18,6 +18,7 @@ from agent_squad.artifacts import (  # noqa: E402
     BundleArtifact,
     RoundStatus,
     SubmissionMode,
+    ReviewVerdict,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
 
@@ -688,6 +689,17 @@ class RoundReplayGuardTests(unittest.TestCase):
             approval=approval,
             run_id=RUN_ID,
             current_round=1,
+            base_oid="a" * 40,
+            git_object_format="sha1",
+        )
+        round_record = SimpleNamespace(
+            round_number=1,
+            request_id=REQUEST_ID,
+            result_id=RESULT_ID,
+            head_oid="b" * 40,
+            status=RoundStatus.APPLIED,
+            verdict=ReviewVerdict.APPROVED,
+            updated_at="2026-08-28T00:00:01Z",
         )
         with self.assertRaisesRegex(
             review_applications.ReviewApplicationError,
@@ -699,11 +711,51 @@ class RoundReplayGuardTests(unittest.TestCase):
                 presented_result_id=REQUEST_ID,
             )
 
+        mismatches = (
+            ("round_number", 2, "round number"),
+            ("request_id", RUN_ID, "request ID"),
+            ("result_id", RUN_ID, "result ID"),
+            ("head_oid", "c" * 40, "head OID"),
+            ("status", RoundStatus.INVALID, "status"),
+            ("verdict", ReviewVerdict.CHANGES_REQUESTED, "verdict"),
+        )
+        for field, value, label in mismatches:
+            with self.subTest(field=field):
+                mismatched_round_record = copy.copy(round_record)
+                setattr(mismatched_round_record, field, value)
+                with (
+                    mock.patch.object(
+                        review_applications.runs,
+                        "safe_run_directory",
+                        return_value=Path("/run"),
+                    ),
+                    mock.patch.object(
+                        review_applications.runs,
+                        "find_recorded_review_round",
+                        return_value=(Path("/round"), mismatched_round_record),
+                    ),
+                    self.assertRaisesRegex(
+                        review_applications.ReviewApplicationError,
+                        f"approved round {label} does not match "
+                        "authoritative state",
+                    ),
+                ):
+                    review_applications._approved_replay(
+                        repository,
+                        active,
+                        presented_result_id=RESULT_ID,
+                    )
+
         with (
             mock.patch.object(
                 review_applications.runs,
                 "safe_run_directory",
                 return_value=Path("/run"),
+            ),
+            mock.patch.object(
+                review_applications.runs,
+                "find_recorded_review_round",
+                return_value=(Path("/round"), round_record),
             ),
             mock.patch.object(
                 review_applications,

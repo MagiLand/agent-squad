@@ -672,6 +672,7 @@ A consuming repository SHOULD use a layout equivalent to:
             │   ├── request.json
             │   ├── implementation-report.md
             │   ├── response.json
+            │   ├── retired-results.json
             │   ├── review.json
             │   ├── review.md
             │   ├── diagnostics/
@@ -1138,10 +1139,13 @@ Suggested layout:
 ├── output/
 │   ├── review.json
 │   └── review.md
+├── retired-results.json
 └── local-state.json
 ```
 
 Files that are not applicable MAY be absent. When the run has recorded Developer resolutions, every resolution JSON and companion Markdown MUST be present in the bundle in ascending `created_at` order.
+
+`retired-results.json` is present only after recovery retires a marker-confirmed result identity. The implementation-owned round copy is authoritative. The review-bundle copy is an advisory mirror that allows `review-submit` to reject contradictory reuse early without requiring access to `.agent-squad/`. Implementation-side decisions MUST NOT depend on that advisory copy being present or valid.
 
 The bundle MUST contain every protocol artifact the round-scoped Reviewer needs without requiring write access to the implementation worktree's `.agent-squad/` directory.
 
@@ -1231,6 +1235,27 @@ The archived bundle preserves:
 - the exact task and resolution inputs reviewed;
 - the output reviewed and applied;
 - the Reviewer-local submission marker.
+
+The transient `output/.review-submit.lock` file coordinates one local process;
+it is not review evidence and MUST NOT be included in the archive.
+
+If application is retried after the complete bundle archive was written but
+before the authoritative state transition committed, the existing archive is
+the provisional snapshot. The retry MUST revalidate every authoritative
+bundle entry against current evidence, retain any optional advisory
+`retired-results.json` snapshot already present in that archive, and derive
+the eventual authoritative manifest from the verified archive. A mutable live
+advisory mirror MUST NOT invalidate or redefine the provisional archive.
+
+If that provisional archive instead belongs to a result identity that recovery
+later retired, `apply-review` MUST verify the archived `review.json` result ID
+and digest against the authoritative retirement ledger before replacing it.
+It MUST first quarantine the complete provisional archive and any round-root
+apply artifacts under
+`diagnostics/retired-apply-attempts/<retired-result-id>/`. Quarantine MUST stay
+inside normal implementation-owned round directories and MUST be resumable if
+moving the evidence is interrupted. A mismatch without an exact authoritative
+retirement binding remains an integrity error.
 
 Convenience copies of `review.json`, `review.md`, and other key artifacts MAY also exist at the round root.
 
@@ -2582,6 +2607,8 @@ The Reviewer MAY rerun `review-submit` with the same result ID and digest to res
 A corrected review artifact after a rejected local submission SHOULD use a new result ID unless the original result was never marker-confirmed.
 
 The exact correction rule MUST be deterministic and tested.
+
+Before recovery removes a marker-confirmed result identity, it MUST durably bind that result ID to its original review digest in implementation-owned round storage. A Reviewer-local mirror MAY provide earlier rejection, but implementation-side discovery and `apply-review` MUST use the authoritative binding even when that mirror is absent, malformed, or identity-mismatched.
 
 ### 31.7 Recorded result replay and unknown-result refusal
 

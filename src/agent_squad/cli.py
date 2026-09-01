@@ -9,16 +9,27 @@ import sys
 
 from . import __version__
 from .artifacts import HandoffStatus, ReviewVerdict, SubmissionMode
+from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run
 from .review_submissions import submit_review_result
 from .runs import (
+    IncompleteReviewOutput,
     InvalidUnappliedReviewResult,
+    RETRY_HANDOFF_NEXT_ACTION,
     RunPhase,
     inspect_status,
     start_run,
 )
 from .submissions import submit_candidate
+
+
+_RECOVERY_ACTION_LABELS = {
+    HandoffRecoveryAction.ADOPTED: "adopted existing request",
+    HandoffRecoveryAction.REPROMPTED: "re-prompted Reviewer",
+    HandoffRecoveryAction.RELAUNCHED: "relaunched Reviewer",
+    HandoffRecoveryAction.RESULT_READY: "use marker-confirmed result",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -168,6 +179,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_review_parser.set_defaults(handler=_run_apply_review)
 
+    retry_handoff_parser = commands.add_parser(
+        "retry-handoff",
+        help="recover the current durable review handoff",
+        description=(
+            "Probe the current round's local result evidence, deterministic "
+            "Reviewer session, and terminal history before adopting, "
+            "re-prompting, or relaunching that same logical request."
+        ),
+    )
+    retry_handoff_parser.set_defaults(handler=_run_retry_handoff)
+
     complete_parser = commands.add_parser(
         "complete",
         help="complete the exact approved revision",
@@ -283,8 +305,21 @@ def _run_status(_arguments: argparse.Namespace) -> int:
                 "Marker-confirmed unapplied result: present but invalid: "
                 f"{unapplied_review.reason}"
             )
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
+        elif isinstance(unapplied_review, IncompleteReviewOutput):
+            print("Marker-confirmed unapplied result: none")
+            print("Unmarked review output: present and incomplete")
+            print(
+                "Incomplete output paths: "
+                + ", ".join(
+                    str(path) for path in unapplied_review.output_paths
+                )
+            )
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
         elif unapplied_review is None:
             print("Marker-confirmed unapplied result: none")
+            print("Unmarked review output: none")
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
         else:
             print("Marker-confirmed unapplied result: ready")
             print(f"Result ID: {unapplied_review.result_id}")
@@ -323,16 +358,13 @@ def _run_submit(arguments: argparse.Namespace) -> int:
     print(f"Reviewer: {result.reviewer_name}")
     print(f"Request handoff: {result.handoff_status.value}")
     if result.handoff_status is HandoffStatus.FAILED:
-        print(
-            "The durable review round was preserved for recovery.",
-            file=sys.stderr,
+        return _report_handoff_failure(
+            preservation_notice=(
+                "The durable review round was preserved for recovery."
+            ),
+            error_prefix="review request handoff failed",
+            error=result.handoff_error,
         )
-        print(
-            "agent-squad: error: review request handoff failed: "
-            f"{result.handoff_error}",
-            file=sys.stderr,
-        )
-        return 1
     print("Next action: wait for the Reviewer result")
     return 0
 
@@ -388,6 +420,59 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
     for warning in result.cleanup_warnings:
         print(f"agent-squad: warning: {warning}", file=sys.stderr)
     return 0
+
+
+def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
+    result = retry_handoff(_invocation_directory())
+    print(
+        f"Recovered review handoff for run {result.run_id}, "
+        f"round {result.round_number}"
+    )
+    print(f"Request ID: {result.request_id}")
+    print(f"Reviewer: {result.reviewer_name}")
+    print(f"Request handoff: {result.handoff_status.value}")
+    if result.action is not None:
+        print(
+            "Recovery action: "
+            f"{_RECOVERY_ACTION_LABELS[result.action]}"
+        )
+    if result.diagnostic_id is not None:
+        print(f"Preserved invalid-result diagnostics: {result.diagnostic_id}")
+    if result.result_id is not None:
+        next_action = (
+            "agent-squad apply-review --result-id "
+            f"{result.result_id}"
+        )
+        print(f"Result ID: {result.result_id}")
+        print(f"Next action: {next_action}")
+        return 0
+    if result.handoff_status is HandoffStatus.FAILED:
+        return _report_handoff_failure(
+            preservation_notice=(
+                "The durable review round remains available for recovery."
+            ),
+            error_prefix="review handoff recovery failed",
+            error=result.handoff_error,
+        )
+    print("Next action: wait for the Reviewer result")
+    return 0
+
+
+def _report_handoff_failure(
+    *,
+    preservation_notice: str,
+    error_prefix: str,
+    error: str | None,
+) -> int:
+    """Report one recoverable request-handoff failure consistently."""
+
+    print(preservation_notice, file=sys.stderr)
+    print(
+        f"agent-squad: error: {error_prefix}: {error}",
+        file=sys.stderr,
+    )
+    print(f"Next action: {RETRY_HANDOFF_NEXT_ACTION}")
+    return 1
 
 
 def _run_complete(_arguments: argparse.Namespace) -> int:

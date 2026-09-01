@@ -20,6 +20,7 @@ from .artifacts import (
     BundleArtifact,
     REVIEW_MARKDOWN_FILE_NAME,
     REVIEW_MARKER_FILE_NAME,
+    ReviewResult,
     ReviewRoundRecord,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
@@ -36,8 +37,10 @@ from .initialization import (
 )
 from .review_submissions import (
     MarkerConfirmedReview,
+    RETIRED_RESULTS_PATH,
     ReviewSubmissionError,
     load_marker_confirmed_review,
+    retired_review_identity_digest,
     verify_flagged_tracked_files,
 )
 from .storage import (
@@ -53,6 +56,13 @@ from .storage import (
 
 
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
+RETIRED_APPLY_ATTEMPTS_DIRECTORY_NAME = "retired-apply-attempts"
+_PROVISIONAL_APPLY_ARTIFACT_NAMES = (
+    REVIEW_RESULT_FILE_NAME,
+    REVIEW_MARKDOWN_FILE_NAME,
+    REVIEW_MARKER_FILE_NAME,
+    APPROVAL_FILE_NAME,
+)
 
 
 class ReviewApplicationError(AgentSquadError):
@@ -218,9 +228,17 @@ def _apply_review_locked(
         raise ReviewApplicationError(
             "reviewing state lost its active round before validation"
         )
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    round_directory = (
+        run_directory / "rounds" / f"{active.current_round:03d}"
+    )
     try:
         evidence = load_marker_confirmed_review(
-            active_round.review_worktree
+            active_round.review_worktree,
+            authoritative_results_root=round_directory,
         )
     except ReviewSubmissionError as error:
         raise ReviewApplicationError(
@@ -250,13 +268,6 @@ def _apply_review_locked(
             "version; no state was changed"
         )
 
-    run_directory = runs.safe_run_directory(
-        repository.control_root,
-        active.run_id,
-    )
-    round_directory = (
-        run_directory / "rounds" / f"{active.current_round:03d}"
-    )
     round_path = round_directory / "round.json"
     state_path = repository.control_root / runs.STATE_FILE_NAME
     run_path = run_directory / runs.RUN_RECORD_FILE_NAME
@@ -404,7 +415,7 @@ def _apply_review_locked(
         _ensure_event(
             run_directory / runs.EVENT_LOG_FILE_NAME,
             _review_applied_event(
-                timestamp=timestamp,
+                timestamp=next_round.updated_at,
                 run_id=active.run_id,
                 round_number=active.current_round,
                 request_id=evidence.request.request_id,
@@ -450,17 +461,11 @@ def _historical_result_replay(
         repository.control_root,
         active.run_id,
     )
-    try:
-        matched = runs.find_recorded_review_round(
-            run_directory=run_directory,
-            run_id=active.run_id,
-            current_round=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
-            result_id=result_id,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=result_id,
+    )
     if matched is None:
         return None
     round_directory, round_record = matched
@@ -543,14 +548,34 @@ def _approved_replay(
         repository.control_root,
         active.run_id,
     )
-    round_directory = (
-        run_directory / "rounds" / f"{active.current_round:03d}"
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=active_round.result_id,
     )
+    if matched is None:
+        raise ReviewApplicationError(
+            "the approved result is missing from authoritative round history"
+        )
+    round_directory, round_record = matched
+    comparisons = (
+        (round_record.round_number, active.current_round, "round number"),
+        (round_record.request_id, approval.request_id, "request ID"),
+        (round_record.result_id, approval.result_id, "result ID"),
+        (round_record.head_oid, approval.head_oid, "head OID"),
+        (round_record.status, RoundStatus.APPLIED, "status"),
+        (round_record.verdict, ReviewVerdict.APPROVED, "verdict"),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise ReviewApplicationError(
+                f"approved round {label} does not match authoritative state"
+            )
     try:
         _ensure_event(
             run_directory / runs.EVENT_LOG_FILE_NAME,
             _review_applied_event(
-                timestamp=approval.created_at,
+                timestamp=round_record.updated_at,
                 run_id=approval.run_id,
                 round_number=approval.round_number,
                 request_id=approval.request_id,
@@ -606,17 +631,11 @@ def _changes_requested_replay(
         repository.control_root,
         active.run_id,
     )
-    try:
-        matched = runs.find_recorded_review_round(
-            run_directory=run_directory,
-            run_id=active.run_id,
-            current_round=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
-            result_id=active_round.result_id,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=active_round.result_id,
+    )
     if matched is None:
         raise ReviewApplicationError(
             "the applied changes-requested result is missing from "
@@ -695,6 +714,27 @@ def _changes_requested_replay(
         next_action=runs.CORRECTION_SUBMIT_NEXT_ACTION,
         cleanup_warnings=cleanup_warnings,
     )
+
+
+def _find_recorded_review_round(
+    active: runs.ActiveRunStatus,
+    run_directory: Path,
+    *,
+    result_id: str,
+) -> tuple[Path, ReviewRoundRecord] | None:
+    """Find a recorded result, translating run-state errors for callers."""
+
+    try:
+        return runs.find_recorded_review_round(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+            result_id=result_id,
+        )
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
 
 
 def _complete_run_locked(
@@ -970,28 +1010,33 @@ def _archive_bundle(
     evidence: MarkerConfirmedReview,
 ) -> tuple[BundleArtifact, ...]:
     archive_root = round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
-    manifest = tuple(
-        BundleArtifact(
-            path=(
-                PurePosixPath(BUNDLE_ARCHIVE_DIRECTORY_NAME) / item.path
-            ).as_posix(),
-            sha256=hashlib.sha256(item.content).hexdigest(),
-        )
-        for item in evidence.bundle_files
-    )
+    live_files = {
+        item.path: item.content for item in evidence.bundle_files
+    }
     if os.path.lexists(archive_root):
-        _verify_bundle_tree(archive_root, manifest, label="existing")
-        return manifest
+        try:
+            return _validate_existing_bundle_archive(
+                archive_root,
+                live_files=live_files,
+            )
+        except ReviewApplicationError:
+            if not _quarantine_retired_apply_attempt(
+                round_directory,
+                archive_root=archive_root,
+                evidence=evidence,
+            ):
+                raise
 
+    manifest = _bundle_manifest(live_files)
     staging = Path(
         tempfile.mkdtemp(prefix=".bundle.", dir=round_directory)
     )
     try:
         staging.chmod(0o700)
-        for item in evidence.bundle_files:
-            destination = staging.joinpath(*item.path.parts)
+        for path, content in live_files.items():
+            destination = staging.joinpath(*path.parts)
             destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-            atomic_write(destination, item.content, mode=0o400)
+            atomic_write(destination, content, mode=0o400)
         _verify_bundle_tree(staging, manifest, label="staged")
         staging.replace(archive_root)
         _make_archive_read_only(archive_root)
@@ -999,6 +1044,308 @@ def _archive_bundle(
         if os.path.lexists(staging):
             shutil.rmtree(staging, ignore_errors=True)
         raise
+    _verify_bundle_tree(archive_root, manifest, label="existing")
+    return manifest
+
+
+def _quarantine_retired_apply_attempt(
+    round_directory: Path,
+    *,
+    archive_root: Path,
+    evidence: MarkerConfirmedReview,
+) -> bool:
+    """Retire one failed apply snapshot only after identity retirement."""
+
+    archived_files = read_regular_tree(
+        archive_root,
+        label="existing review bundle archive",
+        error_type=ReviewApplicationError,
+    )
+    archived_review_bytes = archived_files.get(
+        PurePosixPath("output") / REVIEW_RESULT_FILE_NAME
+    )
+    if archived_review_bytes is None:
+        return False
+    try:
+        archived_review = ReviewResult.from_dict(
+            decode_json(archived_review_bytes.decode("utf-8")),
+            object_format=evidence.request.object_format,
+        )
+    except (
+        UnicodeDecodeError,
+        InvalidJsonError,
+        ArtifactValidationError,
+    ):
+        return False
+    identity = (
+        (archived_review.run_id, evidence.request.run_id),
+        (archived_review.round_number, evidence.request.round_number),
+        (archived_review.request_id, evidence.request.request_id),
+        (archived_review.base_oid, evidence.request.base_oid),
+        (archived_review.head_oid, evidence.request.head_oid),
+    )
+    if any(actual != expected for actual, expected in identity):
+        return False
+    review_digest = hashlib.sha256(archived_review_bytes).hexdigest()
+    try:
+        retired_digest = retired_review_identity_digest(
+            round_directory,
+            request=evidence.request,
+            result_id=archived_review.result_id,
+        )
+    except ReviewSubmissionError as error:
+        raise ReviewApplicationError(
+            "could not validate the retired provisional apply identity: "
+            f"{error}"
+        ) from error
+    if retired_digest != review_digest:
+        return False
+
+    bundle_manifest = _bundle_manifest(archived_files)
+    parent = _retired_apply_attempts_directory(round_directory)
+    destination = parent / archived_review.result_id
+    destination = _require_direct_subdirectory(
+        destination,
+        parent=parent,
+        label="retired apply-attempt diagnostic",
+        create=not os.path.lexists(destination),
+    )
+    _resume_retired_apply_artifact_moves(
+        round_directory,
+        destination=destination,
+    )
+    _verify_bundle_tree(
+        archive_root,
+        bundle_manifest,
+        label="retired provisional",
+    )
+    try:
+        archive_root.chmod(0o700)
+        archive_root.replace(
+            destination / BUNDLE_ARCHIVE_DIRECTORY_NAME
+        )
+        _make_archive_read_only(
+            destination / BUNDLE_ARCHIVE_DIRECTORY_NAME
+        )
+        destination.chmod(0o500)
+    except OSError as error:
+        raise ReviewApplicationError(
+            "could not quarantine the retired provisional bundle archive: "
+            f"{error}"
+        ) from error
+    _verify_retired_apply_attempt(
+        destination,
+        bundle_manifest=bundle_manifest,
+    )
+    return True
+
+
+def _retired_apply_attempts_directory(round_directory: Path) -> Path:
+    """Return a local diagnostic parent without following linked entries."""
+
+    try:
+        round_root = round_directory.resolve(strict=True)
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot resolve the active review round: {error}"
+        ) from error
+    diagnostics = _require_direct_subdirectory(
+        round_root / "diagnostics",
+        parent=round_root,
+        label="review diagnostics",
+        create=True,
+    )
+    return _require_direct_subdirectory(
+        diagnostics / RETIRED_APPLY_ATTEMPTS_DIRECTORY_NAME,
+        parent=diagnostics,
+        label="retired apply-attempt diagnostics",
+        create=True,
+    )
+
+
+def _require_direct_subdirectory(
+    path: Path,
+    *,
+    parent: Path,
+    label: str,
+    create: bool,
+) -> Path:
+    """Create or validate one direct, non-symlink directory."""
+
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise ReviewApplicationError(
+                f"{label} must be a non-symlink directory: {path}"
+            ) from None
+        try:
+            path.mkdir(mode=0o700)
+            status = path.lstat()
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot create {label} {path}: {error}"
+            ) from error
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot inspect {label} {path}: {error}"
+        ) from error
+    if not stat.S_ISDIR(status.st_mode):
+        raise ReviewApplicationError(
+            f"{label} must be a non-symlink directory: {path}"
+        )
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot resolve {label} {path}: {error}"
+        ) from error
+    if resolved.parent != parent:
+        raise ReviewApplicationError(
+            f"{label} escaped its owned parent directory: {path}"
+        )
+    return resolved
+
+
+def _resume_retired_apply_artifact_moves(
+    round_directory: Path,
+    *,
+    destination: Path,
+) -> None:
+    """Resume atomic moves of round-root provisional apply artifacts."""
+
+    allowed = set(_PROVISIONAL_APPLY_ARTIFACT_NAMES)
+    try:
+        entries = list(destination.iterdir())
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot inspect retired apply-attempt diagnostic: {error}"
+        ) from error
+    for entry in entries:
+        try:
+            status = entry.lstat()
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot inspect retired apply-attempt artifact: {error}"
+            ) from error
+        if entry.name not in allowed or not stat.S_ISREG(status.st_mode):
+            raise ReviewApplicationError(
+                "retired apply-attempt diagnostic contains an unexpected "
+                f"entry: {entry}"
+            )
+    for name in _PROVISIONAL_APPLY_ARTIFACT_NAMES:
+        source = round_directory / name
+        target = destination / name
+        if not os.path.lexists(source):
+            continue
+        if os.path.lexists(target):
+            raise ReviewApplicationError(
+                "provisional apply artifact exists in both active and "
+                f"retired storage: {source}"
+            )
+        try:
+            status = source.lstat()
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot inspect provisional apply artifact {source}: {error}"
+            ) from error
+        if not stat.S_ISREG(status.st_mode):
+            raise ReviewApplicationError(
+                "provisional apply artifact must be a regular non-symlink "
+                f"file: {source}"
+            )
+        try:
+            source.replace(target)
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot quarantine provisional apply artifact {source}: "
+                f"{error}"
+            ) from error
+
+
+def _verify_retired_apply_attempt(
+    root: Path,
+    *,
+    bundle_manifest: tuple[BundleArtifact, ...],
+) -> None:
+    """Verify one completed retired apply-attempt diagnostic."""
+
+    files = read_regular_tree(
+        root,
+        label="retired apply-attempt diagnostic",
+        error_type=ReviewApplicationError,
+    )
+    allowed_root_files = {
+        PurePosixPath(name) for name in _PROVISIONAL_APPLY_ARTIFACT_NAMES
+    }
+    bundle_paths = {
+        PurePosixPath(artifact.path): artifact.sha256
+        for artifact in bundle_manifest
+    }
+    if not set(files).issubset(allowed_root_files | set(bundle_paths)):
+        raise ReviewApplicationError(
+            "retired apply-attempt diagnostic contains unexpected evidence"
+        )
+    if not set(bundle_paths).issubset(files):
+        raise ReviewApplicationError(
+            "retired apply-attempt diagnostic is missing bundle evidence"
+        )
+    for path, digest in bundle_paths.items():
+        if hashlib.sha256(files[path]).hexdigest() != digest:
+            raise ReviewApplicationError(
+                f"retired apply-attempt digest mismatch for {path}"
+            )
+
+
+def _bundle_manifest(
+    files: dict[PurePosixPath, bytes],
+) -> tuple[BundleArtifact, ...]:
+    return tuple(
+        BundleArtifact(
+            path=(
+                PurePosixPath(BUNDLE_ARCHIVE_DIRECTORY_NAME) / path
+            ).as_posix(),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        for path, content in sorted(
+            files.items(),
+            key=lambda item: str(item[0]),
+        )
+    )
+
+
+def _validate_existing_bundle_archive(
+    archive_root: Path,
+    *,
+    live_files: dict[PurePosixPath, bytes],
+) -> tuple[BundleArtifact, ...]:
+    archived_files = read_regular_tree(
+        archive_root,
+        label="existing review bundle archive",
+        error_type=ReviewApplicationError,
+    )
+    required_live = {
+        path: content
+        for path, content in live_files.items()
+        if path != RETIRED_RESULTS_PATH
+    }
+    required_archived = {
+        path: content
+        for path, content in archived_files.items()
+        if path != RETIRED_RESULTS_PATH
+    }
+    if set(required_archived) != set(required_live):
+        raise ReviewApplicationError(
+            "existing review bundle archive does not match validated evidence"
+        )
+    for path, content in required_archived.items():
+        if hashlib.sha256(content).digest() != hashlib.sha256(
+            required_live[path]
+        ).digest():
+            raise ReviewApplicationError(
+                f"existing review bundle digest mismatch for {path}"
+            )
+    manifest = _bundle_manifest(archived_files)
     _verify_bundle_tree(archive_root, manifest, label="existing")
     return manifest
 
@@ -1248,7 +1595,18 @@ def _cleanup_review_resources(
     if not os.path.lexists(review_worktree):
         return ()
     try:
-        evidence = load_marker_confirmed_review(review_worktree)
+        run_directory = runs.safe_run_directory(
+            repository.control_root,
+            active.run_id,
+        )
+        evidence = load_marker_confirmed_review(
+            review_worktree,
+            authoritative_results_root=(
+                run_directory
+                / "rounds"
+                / f"{active.current_round:03d}"
+            ),
+        )
         _validate_evidence(repository, active, evidence)
     except AgentSquadError as error:
         return (

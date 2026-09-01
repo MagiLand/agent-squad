@@ -30,6 +30,7 @@ class InvocationDirectoryTests(unittest.TestCase):
             ),
             ("review-submit",),
             ("apply-review",),
+            ("retry-handoff",),
             ("complete",),
         )
         for arguments in cases:
@@ -79,6 +80,7 @@ class LocalStateErrorTests(unittest.TestCase):
             ),
             (("review-submit",), "submit_review_result"),
             (("apply-review",), "apply_review"),
+            (("retry-handoff",), "retry_handoff"),
             (("complete",), "complete_run"),
         )
         for arguments, operation in cases:

@@ -19,7 +19,6 @@ from .artifacts import (
     ActiveRoundRecord,
     ArtifactValidationError,
     BundleArtifact,
-    HandoffRecord,
     HandoffStatus,
     PREVIOUS_RESPONSE_BUNDLE_PATH,
     PREVIOUS_REVIEW_BUNDLE_PATH,
@@ -40,6 +39,11 @@ from .herdr import (
     HerdrError,
     HerdrInstallation,
     format_herdr_error,
+)
+from .handoffs import (
+    format_review_request_prompt,
+    record_review_request_handoff,
+    review_request_handoff_record,
 )
 from .initialization import (
     AgentSquadError,
@@ -167,7 +171,10 @@ def submit_candidate(
                     reviewer_kind=prepared.request.reviewer_kind,
                     start_args=prepared.reviewer_start_args,
                     review_worktree=prepared.review_worktree,
-                    prompt=_review_request_prompt(prepared),
+                    prompt=format_review_request_prompt(
+                        prepared.request,
+                        prepared.review_worktree,
+                    ),
                 )
             except HerdrError as error:
                 detail = format_herdr_error(str(error))
@@ -412,7 +419,7 @@ def _prepare_submission_locked(
         ) from error
     request_bytes = encode_json(request.to_dict())
     request_digest = hashlib.sha256(request_bytes).hexdigest()
-    pending_handoff = _handoff_record(
+    pending_handoff = review_request_handoff_record(
         round_number=round_number,
         target=reviewer_name,
         status=HandoffStatus.PENDING,
@@ -717,61 +724,19 @@ def _record_handoff(
     error: str | None,
     installation: HerdrInstallation | None,
 ) -> None:
-    timestamp = utc_timestamp()
-    handoff = _handoff_record(
+    record_review_request_handoff(
+        prepared.repository.control_root,
+        run_id=prepared.run_id,
         round_number=prepared.round_number,
+        request_id=prepared.request.request_id,
         target=prepared.request.reviewer_name,
         status=status,
-        timestamp=timestamp,
         error=error,
         installation=installation,
+        sent_event_name="review_request_sent",
+        failed_event_name="review_request_failed",
+        error_type=SubmissionError,
     )
-    state_path = prepared.repository.control_root / runs.STATE_FILE_NAME
-    state = runs.load_json_object(state_path, "authoritative state")
-    if state.get("active_run_id") != prepared.run_id:
-        raise SubmissionError(
-            "active run changed before the review handoff was recorded"
-        )
-    active_round = state.get("active_round")
-    if not isinstance(active_round, dict) or (
-        active_round.get("request_id") != prepared.request.request_id
-    ):
-        raise SubmissionError(
-            "active round changed before the review handoff was recorded"
-        )
-
-    next_state = copy.deepcopy(state)
-    next_state["updated_at"] = timestamp
-    next_state["handoff"] = handoff.to_dict()
-    try:
-        atomic_write(state_path, encode_json(next_state), mode=0o600)
-    except OSError as write_error:
-        raise SubmissionError(
-            f"could not record review handoff state: {write_error}"
-        ) from write_error
-
-    try:
-        append_event(
-            prepared.round_directory.parent.parent / runs.EVENT_LOG_FILE_NAME,
-            {
-                "timestamp": timestamp,
-                "event": (
-                    "review_request_sent"
-                    if status is HandoffStatus.SENT
-                    else "review_request_failed"
-                ),
-                "run_id": prepared.run_id,
-                "round": prepared.round_number,
-                "request_id": prepared.request.request_id,
-                "target": prepared.request.reviewer_name,
-                "error": error,
-            },
-        )
-    except OSError as event_error:
-        raise SubmissionError(
-            "the handoff state is durable, but its event could not be "
-            f"recorded: {event_error}"
-        ) from event_error
 
 
 def _submission_result(
@@ -1464,56 +1429,6 @@ def _verify_bundle_file(
         raise SubmissionError(f"review-bundle input content mismatch: {path}")
     if hashlib.sha256(actual).hexdigest() != expected_digest:
         raise SubmissionError(f"review-bundle input digest mismatch: {path}")
-
-
-def _handoff_record(
-    *,
-    round_number: int,
-    target: str,
-    status: HandoffStatus,
-    timestamp: str,
-    error: str | None,
-    installation: HerdrInstallation | None,
-) -> HandoffRecord:
-    return HandoffRecord(
-        round_number=round_number,
-        status=status,
-        target=target,
-        last_error=error,
-        updated_at=timestamp,
-        herdr_version=(
-            installation.version if installation is not None else None
-        ),
-        herdr_protocol=(
-            installation.protocol if installation is not None else None
-        ),
-    )
-
-
-def _review_request_prompt(prepared: _PreparedSubmission) -> str:
-    request = prepared.request
-    request_path = (
-        prepared.review_worktree
-        / REVIEW_DIRECTORY_NAME
-        / "input"
-        / REQUEST_FILE_NAME
-    )
-    return (
-        "AGENT_SQUAD/0.4.4 REVIEW_REQUEST\n\n"
-        f"run_id: {request.run_id}\n"
-        f"round: {request.round_number}\n"
-        f"request_id: {request.request_id}\n"
-        f"base_oid: {request.base_oid}\n"
-        f"head_oid: {request.head_oid}\n"
-        f"review_worktree: {prepared.review_worktree}\n"
-        f"request: {request_path}\n\n"
-        "Review the exact requested revision in this worktree.\n"
-        "Read the complete local review bundle, including any Developer "
-        "resolutions.\n"
-        "Do not modify tracked files.\n"
-        "Write the required review artifacts and run agent-squad "
-        "review-submit."
-    )
 
 
 def _remove_review_worktree(

@@ -36,6 +36,38 @@ def _marker_confirmed_review(
     )
 
 
+def _marker_confirmed_retired_review(root: Path):
+    prepared = _prepare_round(root)
+    review = _write_review(prepared)
+    submitted = run_cli(
+        prepared.review_worktree,
+        "review-submit",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if submitted.returncode != 0:
+        raise AssertionError(submitted.stderr)
+    marker = prepared.bundle / "local-state.json"
+    marker.write_bytes(b'{"schema_version":\n')
+    recovered = run_cli(
+        prepared.repository,
+        "retry-handoff",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if recovered.returncode != 0:
+        raise AssertionError(recovered.stderr)
+    resubmitted = run_cli(
+        prepared.review_worktree,
+        "review-submit",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if resubmitted.returncode != 0:
+        raise AssertionError(resubmitted.stderr)
+    return prepared, review
+
+
 def _submit_with_lost_notification(prepared, *, verdict: str = "approved"):
     review = _write_review(prepared, verdict=verdict)
     failing_environment = dict(prepared.environment)
@@ -224,8 +256,11 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 status.stdout,
             )
             self.assertIn(
-                "Next action: inspect the review worktree; its "
-                "marker-confirmed result did not revalidate",
+                "Recovery command: agent-squad retry-handoff",
+                status.stdout,
+            )
+            self.assertIn(
+                "Next action: agent-squad retry-handoff",
                 status.stdout,
             )
 
@@ -2041,9 +2076,37 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     )
 
             self.assertTrue(observed_archive_before_state)
+            self.assertFalse(
+                (
+                    round_directory
+                    / "bundle/output/.review-submit.lock"
+                ).exists()
+            )
             self.assertEqual(state_path.read_bytes(), state_before)
             self.assertEqual(round_path.read_bytes(), round_before)
             self.assertEqual(run_path.read_bytes(), run_before)
+            archived_marker = round_directory / "bundle/local-state.json"
+            original_archived_marker = archived_marker.read_bytes()
+            archived_marker.chmod(0o600)
+            archived_marker.write_bytes(original_archived_marker + b" ")
+            try:
+                with self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "digest mismatch for local-state.json",
+                ):
+                    review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+            finally:
+                archived_marker.write_bytes(original_archived_marker)
+                archived_marker.chmod(0o400)
+            self.assertFalse(
+                (
+                    round_directory
+                    / "diagnostics/retired-apply-attempts"
+                ).exists()
+            )
             approval_path = round_directory / "approval.json"
             first_approval = approval_path.read_bytes()
             approval_mode = stat.S_IMODE(approval_path.stat().st_mode)
@@ -2085,22 +2148,373 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     self.assertEqual(round_path.read_bytes(), round_before)
                     self.assertEqual(run_path.read_bytes(), run_before)
 
-            with mock.patch.object(
-                review_applications,
-                "utc_timestamp",
-                return_value="2099-01-01T00:00:00Z",
+            with (
+                mock.patch.object(
+                    review_applications,
+                    "utc_timestamp",
+                    return_value="2099-01-01T00:00:00Z",
+                ),
+                mock.patch.object(
+                    review_applications,
+                    "append_event",
+                    side_effect=OSError("injected event append failure"),
+                ),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "injected event append failure",
+                ),
             ):
-                retried = review_applications.apply_review(
+                review_applications.apply_review(
                     prepared.repository,
                     result_id=str(review["result_id"]),
                 )
-            self.assertFalse(retried.replayed)
             self.assertEqual(approval_path.read_bytes(), first_approval)
             self.assertNotIn(b"2099-01-01T00:00:00Z", first_approval)
             self.assertEqual(
                 json.loads(state_path.read_text(encoding="utf-8"))["phase"],
                 "approved",
             )
+            self.assertEqual(
+                json.loads(round_path.read_text(encoding="utf-8"))[
+                    "updated_at"
+                ],
+                "2099-01-01T00:00:00Z",
+            )
+
+            replayed = review_applications.apply_review(
+                prepared.repository,
+                result_id=str(review["result_id"]),
+            )
+
+            self.assertTrue(replayed.replayed)
+            applied_events = [
+                event
+                for event in (
+                    json.loads(line)
+                    for line in (
+                        run_directory / "events.jsonl"
+                    ).read_text(encoding="utf-8").splitlines()
+                )
+                if event["event"] == "review_applied"
+            ]
+            self.assertEqual(len(applied_events), 1)
+            self.assertEqual(
+                applied_events[0]["timestamp"],
+                "2099-01-01T00:00:00Z",
+            )
+
+    def test_retired_failed_apply_is_quarantined_for_corrected_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, retired_review = _marker_confirmed_review(root)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state_before = state_path.read_bytes()
+            state = json.loads(state_before.decode("utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            round_directory = run_directory / "rounds/001"
+            real_atomic_write = review_applications.atomic_write
+
+            def fail_state_commit(path, content, *, mode):
+                if (
+                    path.resolve() == state_path.resolve()
+                    and b'"phase": "approved"' in content
+                ):
+                    raise OSError("injected state commit failure")
+                real_atomic_write(path, content, mode=mode)
+
+            with mock.patch.object(
+                review_applications,
+                "atomic_write",
+                side_effect=fail_state_commit,
+            ):
+                with self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "injected state commit failure",
+                ):
+                    review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(retired_review["result_id"]),
+                    )
+
+            self.assertEqual(state_path.read_bytes(), state_before)
+            archive_root = round_directory / "bundle"
+            archive_before = {
+                path.relative_to(archive_root).as_posix(): path.read_bytes()
+                for path in archive_root.rglob("*")
+                if path.is_file()
+            }
+            provisional_names = (
+                "review.json",
+                "review.md",
+                "review-marker.json",
+                "approval.json",
+            )
+            provisional_before = {
+                name: (round_directory / name).read_bytes()
+                for name in provisional_names
+            }
+
+            marker = prepared.bundle / "local-state.json"
+            marker.write_bytes(b'{"schema_version":\n')
+            recovered = run_cli(
+                prepared.repository,
+                "retry-handoff",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+
+            corrected_review = _write_review(prepared)
+            corrected_review["result_id"] = (
+                "44444444-4444-4444-8444-444444444444"
+            )
+            (prepared.bundle / "output/review.json").write_text(
+                f"{json.dumps(corrected_review, indent=2)}\n",
+                encoding="utf-8",
+            )
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+            external = root / "outside-diagnostics"
+            external.mkdir()
+            sentinel = external / "sentinel.txt"
+            sentinel.write_text("unchanged\n", encoding="utf-8")
+            attempts_parent = (
+                round_directory / "diagnostics/retired-apply-attempts"
+            )
+            attempts_parent.symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(
+                review_applications.ReviewApplicationError,
+                "must be a non-symlink directory",
+            ):
+                review_applications.apply_review(
+                    prepared.repository,
+                    result_id=str(corrected_review["result_id"]),
+                )
+            self.assertEqual(
+                sentinel.read_text(encoding="utf-8"),
+                "unchanged\n",
+            )
+            attempts_parent.unlink()
+
+            real_replace = Path.replace
+
+            def fail_archive_move(path, target):
+                if path.name == "bundle" and Path(target).name == "bundle":
+                    raise OSError("injected archive move failure")
+                return real_replace(path, target)
+
+            with (
+                mock.patch.object(Path, "replace", new=fail_archive_move),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "injected archive move failure",
+                ),
+            ):
+                review_applications.apply_review(
+                    prepared.repository,
+                    result_id=str(corrected_review["result_id"]),
+                )
+            self.assertTrue(archive_root.is_dir())
+            for name in provisional_names:
+                self.assertFalse((round_directory / name).exists())
+
+            applied = review_applications.apply_review(
+                prepared.repository,
+                result_id=str(corrected_review["result_id"]),
+            )
+
+            self.assertFalse(applied.replayed)
+            final_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(final_state["phase"], "approved")
+            quarantine = (
+                round_directory
+                / "diagnostics/retired-apply-attempts"
+                / str(retired_review["result_id"])
+            )
+            quarantined_archive = quarantine / "bundle"
+            self.assertEqual(
+                {
+                    path.relative_to(quarantined_archive).as_posix(): (
+                        path.read_bytes()
+                    )
+                    for path in quarantined_archive.rglob("*")
+                    if path.is_file()
+                },
+                archive_before,
+            )
+            for name, content in provisional_before.items():
+                self.assertEqual((quarantine / name).read_bytes(), content)
+            self.assertEqual(
+                json.loads(
+                    (archive_root / "output/review.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["result_id"],
+                corrected_review["result_id"],
+            )
+            self.assertFalse(
+                (archive_root / "output/.review-submit.lock").exists()
+            )
+            self.assertEqual(
+                json.loads(
+                    (round_directory / "review.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["result_id"],
+                corrected_review["result_id"],
+            )
+
+    def test_failed_apply_retry_ignores_live_advisory_changes(self) -> None:
+        cases = ("missing", "malformed", "mismatched", "directory")
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_retired_review(root)
+                    control_root = prepared.repository / ".agent-squad"
+                    state_path = control_root / "state.json"
+                    state_before = state_path.read_bytes()
+                    state = json.loads(state_before.decode("utf-8"))
+                    run_directory = (
+                        control_root
+                        / "runs"
+                        / str(state["active_run_id"])
+                    )
+                    round_directory = run_directory / "rounds/001"
+                    advisory = prepared.bundle / "retired-results.json"
+                    authority = round_directory / "retired-results.json"
+                    self.assertEqual(
+                        advisory.read_bytes(),
+                        authority.read_bytes(),
+                    )
+                    real_atomic_write = review_applications.atomic_write
+
+                    def fail_state_commit(path, content, *, mode):
+                        if (
+                            path.resolve() == state_path.resolve()
+                            and b'"phase": "approved"' in content
+                        ):
+                            raise OSError("injected state commit failure")
+                        real_atomic_write(path, content, mode=mode)
+
+                    with mock.patch.object(
+                        review_applications,
+                        "atomic_write",
+                        side_effect=fail_state_commit,
+                    ):
+                        with self.assertRaisesRegex(
+                            review_applications.ReviewApplicationError,
+                            "injected state commit failure",
+                        ):
+                            review_applications.apply_review(
+                                prepared.repository,
+                                result_id=str(review["result_id"]),
+                            )
+
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    archive_root = round_directory / "bundle"
+                    archive_before = {
+                        path.relative_to(archive_root).as_posix(): (
+                            path.read_bytes()
+                        )
+                        for path in archive_root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertIn("retired-results.json", archive_before)
+                    if case == "missing":
+                        advisory.unlink()
+                    elif case == "malformed":
+                        advisory.write_bytes(b'{"schema_version":\n')
+                    elif case == "mismatched":
+                        mismatched = json.loads(
+                            authority.read_text(encoding="utf-8")
+                        )
+                        mismatched["request_id"] = (
+                            "99999999-9999-4999-8999-999999999999"
+                        )
+                        advisory.write_text(
+                            f"{json.dumps(mismatched, indent=2)}\n",
+                            encoding="utf-8",
+                        )
+                    else:
+                        advisory.unlink()
+                        advisory.mkdir()
+
+                    retried = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+
+                    self.assertFalse(retried.replayed)
+                    archive_after = {
+                        path.relative_to(archive_root).as_posix(): (
+                            path.read_bytes()
+                        )
+                        for path in archive_root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertEqual(archive_after, archive_before)
+                    final_state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(final_state["phase"], "approved")
+                    round_record = json.loads(
+                        (round_directory / "round.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    manifest = {
+                        str(item["path"])[len("bundle/"):]: item["sha256"]
+                        for item in round_record["artifacts"]["bundle_archive"]
+                    }
+                    self.assertEqual(
+                        manifest,
+                        {
+                            path: hashlib.sha256(content).hexdigest()
+                            for path, content in archive_before.items()
+                        },
+                    )
+                    events_path = run_directory / "events.jsonl"
+                    applied_events = [
+                        event
+                        for event in (
+                            json.loads(line)
+                            for line in events_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        )
+                        if event["event"] == "review_applied"
+                    ]
+                    self.assertEqual(len(applied_events), 1)
+                    replayed = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    self.assertTrue(replayed.replayed)
+                    replay_events = [
+                        event
+                        for event in (
+                            json.loads(line)
+                            for line in events_path.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        )
+                        if event["event"] == "review_applied"
+                    ]
+                    self.assertEqual(len(replay_events), 1)
 
     def test_interruptions_rollback_uncommitted_state_transitions(
         self,

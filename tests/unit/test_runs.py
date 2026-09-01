@@ -353,15 +353,24 @@ class ProtocolValueValidationTests(unittest.TestCase):
                 runs.RunPhase.REVIEWING,
                 unapplied_review=invalid,
             ),
-            "inspect the review worktree; its marker-confirmed result did "
-            "not revalidate",
+            "agent-squad retry-handoff",
         )
         self.assertEqual(
             runs._next_action(
                 runs.RunPhase.REVIEWING,
                 handoff_status=runs.HandoffStatus.FAILED,
             ),
-            "recover the preserved review-request handoff",
+            "agent-squad retry-handoff",
+        )
+        incomplete = runs.IncompleteReviewOutput(
+            output_paths=(Path("/review.json"),),
+        )
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                unapplied_review=incomplete,
+            ),
+            "agent-squad retry-handoff",
         )
         self.assertEqual(
             runs._next_action(runs.RunPhase.APPROVED),
