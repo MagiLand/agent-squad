@@ -16,6 +16,7 @@ from .artifacts import (
     BundleArtifact,
     DeveloperResolution,
     RECOVERY_ROUND_BUNDLE_PATH,
+    RECOVERY_ROUND_STATUSES,
     ReviewRequest,
     ReviewResponse,
     ReviewRoundRecord,
@@ -903,11 +904,7 @@ def _validate_bundle_inputs(
                     f"recovery round authority {label} does not match the "
                     "request"
                 )
-        if recovery_round.status not in {
-            RoundStatus.SUPERSEDED,
-            RoundStatus.STALE,
-            RoundStatus.INVALID,
-        }:
+        if recovery_round.status not in RECOVERY_ROUND_STATUSES:
             raise ReviewSubmissionError(
                 "recovery round authority must record a superseded, stale, "
                 "or invalid round"
@@ -926,22 +923,20 @@ def _validate_bundle_inputs(
                     "candidate whose head differs from the fixed base"
                 )
         else:
-            if (
-                recovery_round is None
-                or previous_review.round_number >= recovery_round.round_number
-            ):
+            if previous_review.round_number >= recovery_round.round_number:
                 raise ReviewSubmissionError(
                     "the applied previous review must precede the recovery "
                     "round"
                 )
-            try:
-                validate_followup_submission_head(
-                    request.mode,
-                    head_oid=request.head_oid,
-                    previous_reviewed_head_oid=previous_review.head_oid,
-                )
-            except ArtifactValidationError as error:
-                raise ReviewSubmissionError(str(error)) from error
+            if request.head_oid != recovery_round.head_oid:
+                try:
+                    validate_followup_submission_head(
+                        request.mode,
+                        head_oid=request.head_oid,
+                        previous_reviewed_head_oid=previous_review.head_oid,
+                    )
+                except ArtifactValidationError as error:
+                    raise ReviewSubmissionError(str(error)) from error
     elif previous_review is not None:
         try:
             validate_followup_submission_head(

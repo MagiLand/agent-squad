@@ -321,7 +321,7 @@ def _prepare_submission_locked(
                         "committed candidate whose HEAD differs from the "
                         "fixed base"
                     )
-            else:
+            elif head_oid != active.current_head_oid:
                 try:
                     validate_followup_submission_head(
                         mode,

@@ -529,7 +529,8 @@ class ReviewRoundRecordTests(unittest.TestCase):
             ),
             (
                 lambda value: value.update(status="reviewing"),
-                "only a superseded round may record supersession authority",
+                "round record: only a superseded round may record "
+                "supersession authority",
             ),
         )
         for mutate, message in cases:

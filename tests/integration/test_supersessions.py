@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
+from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
-from tests._support import add_src_to_path, run_cli
+from tests._support import add_src_to_path, run, run_cli
+from tests.integration.test_review_applications import (
+    _write_fixed_response,
+    _write_rejected_response,
+)
 from tests.integration.test_review_submissions import (
     _PreparedRound,
     _prepare_round,
@@ -17,7 +24,12 @@ from tests.integration.test_review_submissions import (
 
 add_src_to_path()
 
-from agent_squad import review_applications, review_submissions  # noqa: E402
+from agent_squad import (  # noqa: E402
+    review_applications,
+    review_submissions,
+    runs,
+)
+from agent_squad.artifacts import ReviewRoundRecord  # noqa: E402
 from agent_squad.herdr import HerdrError, HerdrInstallation  # noqa: E402
 
 
@@ -115,6 +127,51 @@ def _start_recovery_round(root: Path) -> tuple[_PreparedRound, _PreparedRound]:
         bundle=review_worktree / ".agent-squad-review",
         request=request,
     )
+
+
+def _prepared_from_active(prepared: _PreparedRound) -> _PreparedRound:
+    state, _, _ = _state_and_round(prepared.repository)
+    active_round = state["active_round"]
+    if not isinstance(active_round, dict):
+        raise AssertionError("active round must be persisted")
+    review_worktree = Path(str(active_round["review_worktree"]))
+    bundle = review_worktree / ".agent-squad-review"
+    request = json.loads(
+        (bundle / "input/request.json").read_text(encoding="utf-8")
+    )
+    return _PreparedRound(
+        repository=prepared.repository,
+        data_home=prepared.data_home,
+        environment=prepared.environment,
+        review_worktree=review_worktree,
+        bundle=bundle,
+        request=request,
+    )
+
+
+def _apply_changes_requested(
+    prepared: _PreparedRound,
+) -> dict[str, object]:
+    review = _write_review(prepared, verdict="changes_requested")
+    submitted = run_cli(
+        prepared.review_worktree,
+        "review-submit",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if submitted.returncode != 0:
+        raise AssertionError(submitted.stderr)
+    applied = run_cli(
+        prepared.repository,
+        "apply-review",
+        "--result-id",
+        str(review["result_id"]),
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if applied.returncode != 0:
+        raise AssertionError(applied.stderr)
+    return review
 
 
 class SupersedeReviewTests(unittest.TestCase):
@@ -407,6 +464,270 @@ class SupersedeReviewTests(unittest.TestCase):
                 review_submitted.stderr,
             )
 
+    def test_same_head_recovery_after_superseded_reconsideration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            review = _apply_changes_requested(prepared)
+            response_path = root / "reconsideration-response.json"
+            _write_rejected_response(
+                response_path,
+                prepared,
+                review,
+            )
+            report_path = root / "reconsideration-report.md"
+            report_path.write_text(
+                "# Implementation Report\n\nNo code change is required.\n",
+                encoding="utf-8",
+            )
+            reconsideration = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                reconsideration.returncode,
+                0,
+                reconsideration.stderr,
+            )
+            second_round = _prepared_from_active(prepared)
+
+            superseded = run_cli(
+                prepared.repository,
+                "supersede",
+                "--reason",
+                "The reconsideration Reviewer did not complete.",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(superseded.returncode, 0, superseded.stderr)
+
+            recovered = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            third_round = _prepared_from_active(prepared)
+            self.assertEqual(third_round.request["round"], 3)
+            self.assertEqual(
+                third_round.request["head_oid"],
+                second_round.request["head_oid"],
+            )
+            self.assertEqual(
+                third_round.request["head_oid"],
+                review["head_oid"],
+            )
+            self.assertEqual(
+                third_round.request["previous_review_path"],
+                "input/previous-review.json",
+            )
+            self.assertEqual(
+                third_round.request["previous_response_path"],
+                "input/previous-response.json",
+            )
+            self.assertEqual(
+                third_round.request["recovery_round_path"],
+                "input/recovery-round.json",
+            )
+            self.assertNotEqual(
+                third_round.request["reviewer_name"],
+                second_round.request["reviewer_name"],
+            )
+
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            _write_review(third_round)
+            review_submitted = run_cli(
+                third_round.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                review_submitted.returncode,
+                0,
+                review_submitted.stderr,
+            )
+
+    def test_recovery_cannot_roll_back_to_the_applied_review_head(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            review = _apply_changes_requested(prepared)
+            (prepared.repository / "feature.txt").write_text(
+                "complete candidate\n",
+                encoding="utf-8",
+            )
+            run(["git", "add", "feature.txt"], cwd=prepared.repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "fix: complete candidate",
+                ],
+                cwd=prepared.repository,
+            )
+            report_path = root / "corrected-report.md"
+            report_path.write_text(
+                "# Implementation Report\n\nCompleted the candidate.\n",
+                encoding="utf-8",
+            )
+            response_path = root / "fixed-response.json"
+            _write_fixed_response(response_path, prepared, review)
+            correction = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(correction.returncode, 0, correction.stderr)
+            second_round = _prepared_from_active(prepared)
+            self.assertNotEqual(
+                second_round.request["head_oid"],
+                review["head_oid"],
+            )
+            superseded = run_cli(
+                prepared.repository,
+                "supersede",
+                "--reason",
+                "The corrected review became obsolete.",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(superseded.returncode, 0, superseded.stderr)
+            run(
+                ["git", "reset", "--hard", str(review["head_oid"])],
+                cwd=prepared.repository,
+            )
+            state_path = prepared.repository / ".agent-squad/state.json"
+            state_before = state_path.read_bytes()
+
+            rolled_back = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(rolled_back.returncode, 1)
+            self.assertIn(
+                "a new_revision submission after changes_requested requires "
+                "a new committed HEAD",
+                rolled_back.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            _, round_directory, _ = _state_and_round(prepared.repository)
+            self.assertFalse((round_directory.parent / "003").exists())
+
+    def test_status_binds_prior_artifact_paths_to_round_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            review = _apply_changes_requested(prepared)
+            response_path = root / "reconsideration-response.json"
+            _write_rejected_response(response_path, prepared, review)
+            report_path = root / "reconsideration-report.md"
+            report_path.write_text(
+                "# Implementation Report\n\nNo code change is required.\n",
+                encoding="utf-8",
+            )
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(response_path),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            second_round = _prepared_from_active(prepared)
+            _, round_directory, round_record = _state_and_round(
+                prepared.repository
+            )
+            request_path = round_directory / "request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["previous_review_path"] = None
+            request_bytes = review_applications.encode_json(request)
+            request_digest = hashlib.sha256(request_bytes).hexdigest()
+            round_record["artifacts"]["request"]["sha256"] = request_digest
+            request_input = next(
+                item
+                for item in round_record["artifacts"]["bundle_inputs"]
+                if item["path"] == "input/request.json"
+            )
+            request_input["sha256"] = request_digest
+            for path, content in (
+                (request_path, request_bytes),
+                (
+                    second_round.bundle / "input/request.json",
+                    request_bytes,
+                ),
+                (
+                    round_directory / "round.json",
+                    review_applications.encode_json(round_record),
+                ),
+            ):
+                path.chmod(0o600)
+                path.write_bytes(content)
+
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(status.returncode, 1)
+            self.assertIn(
+                "active review request prior-artifact paths do not match "
+                "round history",
+                status.stderr,
+            )
+
     def test_cleanup_archives_result_after_state_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -540,6 +861,139 @@ class SupersedeReviewTests(unittest.TestCase):
             self.assertTrue(
                 (round_directory / "bundle/input/request.json").is_file()
             )
+
+    def test_cleanup_retains_worktree_when_any_identity_gate_fails(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "deterministic path",
+                "superseded review worktree does not match its "
+                "deterministic path",
+            ),
+            (
+                "worktree root",
+                "superseded cleanup target is not the review-worktree root",
+            ),
+            (
+                "common directory",
+                "superseded review worktree belongs to a different "
+                "repository",
+            ),
+            (
+                "head",
+                "superseded review worktree HEAD does not match its round",
+            ),
+            (
+                "detached head",
+                "superseded review cleanup requires the detached review "
+                "worktree",
+            ),
+            (
+                "bundle digest",
+                "superseded bundle input digest changed",
+            ),
+        )
+        for mutation, expected in cases:
+            with self.subTest(identity=mutation):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared = _prepare_round(root)
+                    repository = (
+                        review_applications.load_initialized_repository(
+                            prepared.repository
+                        )
+                    )
+                    status = runs.inspect_status(prepared.repository)
+                    active = status.active_run
+                    self.assertIsNotNone(active)
+                    assert active is not None
+                    _, round_directory, round_value = _state_and_round(
+                        prepared.repository
+                    )
+                    round_record = ReviewRoundRecord.from_dict(
+                        round_value,
+                        label="cleanup test round",
+                    )
+                    discovered = (
+                        review_applications.discover_git_worktree(
+                            prepared.review_worktree
+                        )
+                    )
+                    discovery_patch = nullcontext()
+                    if mutation == "deterministic path":
+                        repository = replace(
+                            repository,
+                            configuration=replace(
+                                repository.configuration,
+                                review_worktree_root=(
+                                    root / "different-review-root"
+                                ),
+                            ),
+                        )
+                    elif mutation == "worktree root":
+                        discovery_patch = mock.patch.object(
+                            review_applications,
+                            "discover_git_worktree",
+                            return_value=replace(
+                                discovered,
+                                root=discovered.root.parent,
+                            ),
+                        )
+                    elif mutation == "common directory":
+                        discovery_patch = mock.patch.object(
+                            review_applications,
+                            "discover_git_worktree",
+                            return_value=replace(
+                                discovered,
+                                common_directory=(
+                                    discovered.common_directory.parent
+                                ),
+                            ),
+                        )
+                    elif mutation == "head":
+                        run(
+                            [
+                                "git",
+                                "checkout",
+                                "--detach",
+                                str(prepared.request["base_oid"]),
+                            ],
+                            cwd=prepared.review_worktree,
+                        )
+                    elif mutation == "detached head":
+                        run(
+                            ["git", "switch", "-c", "review-attached"],
+                            cwd=prepared.review_worktree,
+                        )
+                    else:
+                        task_path = prepared.bundle / "input/task.md"
+                        task_path.chmod(0o600)
+                        task_path.write_text(
+                            "tampered cleanup input\n",
+                            encoding="utf-8",
+                        )
+
+                    with discovery_patch:
+                        late_result_id, warnings = (
+                            review_applications
+                            ._cleanup_superseded_review_resources(
+                                repository,
+                                active=active,
+                                round_directory=round_directory,
+                                round_record=round_record,
+                            )
+                        )
+
+                    self.assertIsNone(late_result_id)
+                    self.assertEqual(len(warnings), 1)
+                    self.assertIn(
+                        "safe superseded-round cleanup failed",
+                        warnings[0],
+                    )
+                    self.assertIn(expected, warnings[0])
+                    self.assertTrue(prepared.review_worktree.is_dir())
+                    self.assertTrue(prepared.bundle.is_dir())
 
     def test_reviewer_rejects_tampered_recovery_round_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

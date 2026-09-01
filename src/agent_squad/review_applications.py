@@ -1935,80 +1935,10 @@ def _cleanup_superseded_review_resources(
                     f"{bundle_root}: {error}"
                 ) from error
 
-            generated_warnings = tuple(
-                warning
-                for configured in (
-                    repository.configuration.allowed_generated_paths
-                )
-                if (
-                    warning := _remove_generated_path(
-                        review_worktree,
-                        configured,
-                    )
-                )
-                is not None
-            )
-            if generated_warnings:
-                return late_result_id, generated_warnings
-
-            cleanliness = run_git(
+            return late_result_id, _remove_clean_review_worktree(
+                repository,
                 review_worktree,
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
             )
-            if cleanliness.returncode != 0:
-                detail = cleanliness.stderr.strip() or "unknown Git error"
-                raise ReviewApplicationError(
-                    "could not verify superseded review worktree cleanup "
-                    f"for {review_worktree}: {detail}"
-                )
-            if cleanliness.stdout:
-                return late_result_id, (
-                    f"retained review worktree {review_worktree} because "
-                    "files remain after scoped cleanup",
-                )
-
-            ignored = run_git(
-                review_worktree,
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-                "--",
-            )
-            if ignored.returncode != 0:
-                detail = ignored.stderr.strip() or "unknown Git error"
-                raise ReviewApplicationError(
-                    "could not inspect ignored review-worktree files: "
-                    f"{detail}"
-                )
-            if any(entry for entry in ignored.stdout.split("\0") if entry):
-                return late_result_id, (
-                    f"retained review worktree {review_worktree} because "
-                    "unconfigured ignored files remain after scoped cleanup",
-                )
-
-            removed = run_git(
-                repository.worktree.root,
-                "worktree",
-                "remove",
-                str(review_worktree),
-            )
-            if removed.returncode != 0 and os.path.lexists(review_worktree):
-                detail = removed.stderr.strip() or "unknown Git error"
-                raise ReviewApplicationError(
-                    f"could not remove superseded review worktree "
-                    f"{review_worktree}: {detail}"
-                )
-            _remove_empty_review_parents(
-                review_worktree.parent,
-                stop=repository.configuration.review_worktree_root,
-            )
-            return late_result_id, ()
     except (AgentSquadError, OSError) as error:
         return late_result_id, (
             f"retained review worktree {review_worktree} because safe "
@@ -2202,7 +2132,6 @@ def _cleanup_review_resources(
             f"evidence could not be revalidated: {error}",
         )
 
-    warnings: list[str] = []
     bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     try:
         shutil.rmtree(bundle_root)
@@ -2210,13 +2139,28 @@ def _cleanup_review_resources(
         return (
             f"could not remove archived review bundle {bundle_root}: {error}",
         )
-    for configured in repository.configuration.allowed_generated_paths:
-        warning = _remove_generated_path(review_worktree, configured)
-        if warning is not None:
-            warnings.append(warning)
-    if warnings:
-        return tuple(warnings)
+    return _remove_clean_review_worktree(repository, review_worktree)
 
+
+def _remove_clean_review_worktree(
+    repository: InitializedRepository,
+    review_worktree: Path,
+) -> tuple[str, ...]:
+    """Remove scoped generated files, then a demonstrably clean worktree."""
+
+    generated_warnings = tuple(
+        warning
+        for configured in repository.configuration.allowed_generated_paths
+        if (
+            warning := _remove_generated_path(
+                review_worktree,
+                configured,
+            )
+        )
+        is not None
+    )
+    if generated_warnings:
+        return generated_warnings
     cleanliness = run_git(
         review_worktree,
         "status",
@@ -2235,6 +2179,26 @@ def _cleanup_review_resources(
         return (
             f"retained review worktree {review_worktree} because files "
             "remain after scoped cleanup",
+        )
+    ignored = run_git(
+        review_worktree,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+    )
+    if ignored.returncode != 0:
+        detail = ignored.stderr.strip() or "unknown Git error"
+        return (
+            "could not inspect ignored review-worktree files: "
+            f"{detail}",
+        )
+    if any(entry for entry in ignored.stdout.split("\0") if entry):
+        return (
+            f"retained review worktree {review_worktree} because "
+            "unconfigured ignored files remain after scoped cleanup",
         )
     removed = run_git(
         repository.worktree.root,

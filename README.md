@@ -103,7 +103,7 @@ Supersession records the Implementer actor, cause, and timestamp in authoritativ
 
 Cleanup holds the Reviewer submission lock while it probes for marker-confirmed output. Any late result is copied to the round's `diagnostics/late-results/<result-id>/` directory without being applied, and the complete review bundle is archived and verified before removal. Agent Squad deletes only the review bundle and configured generated paths, then uses normal non-forced Git worktree removal. If unrelated tracked, untracked, or ignored files remain, it preserves the worktree and reports why.
 
-A later `new_revision` submission creates a distinct round and Reviewer. It may reuse the superseded round's head because that round produced no applied result. If an older applied `changes_requested` result exists, its complete response is still required and the submitted head must still differ from that most recent applied reviewed head.
+A later `new_revision` submission creates a distinct round and Reviewer. It may reuse the immediately preceding superseded round's head because that round produced no applied result, even when an older applied `changes_requested` result reviewed the same head. The older applied result's complete response is still required. A different submitted head remains subject to the normal rule that it must differ from the most recent applied reviewed head.
 
 ## Apply a review, correct findings, and complete
 

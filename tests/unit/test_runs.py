@@ -883,7 +883,7 @@ class AppliedReviewHistoryTests(unittest.TestCase):
             _, first_review = _write_history_round(run_directory, 1)
             _write_history_round(run_directory, 2, status="invalid")
 
-            authority = runs.latest_applied_review_before(
+            authority = runs.find_latest_applied_review_before(
                 run_directory=run_directory,
                 run_id=str(first_review["run_id"]),
                 current_round=3,
@@ -891,6 +891,8 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                 object_format="sha1",
             )
 
+            self.assertIsNotNone(authority)
+            assert authority is not None
             self.assertEqual(authority.round_record.round_number, 1)
             self.assertEqual(
                 authority.review.result_id,
@@ -967,7 +969,7 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                 runs.RunStateError,
                 "history must contain normal directories",
             ):
-                runs.latest_applied_review_before(
+                runs.find_latest_applied_review_before(
                     run_directory=run_directory,
                     run_id="12345678-1234-5678-9234-567812345678",
                     current_round=2,
@@ -975,7 +977,7 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                     object_format="sha1",
                 )
 
-    def test_latest_history_requires_an_applied_review(self) -> None:
+    def test_latest_history_returns_none_without_applied_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             run_directory = Path(temporary_directory) / "run"
             _, review = _write_history_round(
@@ -984,17 +986,15 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                 status="invalid",
             )
 
-            with self.assertRaisesRegex(
-                runs.RunStateError,
-                "no previous applied review",
-            ):
-                runs.latest_applied_review_before(
-                    run_directory=run_directory,
-                    run_id=str(review["run_id"]),
-                    current_round=2,
-                    base_oid=str(review["base_oid"]),
-                    object_format="sha1",
-                )
+            authority = runs.find_latest_applied_review_before(
+                run_directory=run_directory,
+                run_id=str(review["run_id"]),
+                current_round=2,
+                base_oid=str(review["base_oid"]),
+                object_format="sha1",
+            )
+
+            self.assertIsNone(authority)
 
     def test_applied_review_digest_is_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1009,7 +1009,7 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                 runs.RunStateError,
                 "review result digest does not match",
             ):
-                runs.latest_applied_review_before(
+                runs.find_latest_applied_review_before(
                     run_directory=run_directory,
                     run_id=str(review["run_id"]),
                     current_round=2,
@@ -1109,7 +1109,7 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                         runs.RunStateError,
                         f"review {label} does not match authoritative history",
                     ):
-                        runs.latest_applied_review_before(
+                        runs.find_latest_applied_review_before(
                             run_directory=run_directory,
                             run_id=str(record["run_id"]),
                             current_round=2,

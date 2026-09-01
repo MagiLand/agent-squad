@@ -77,6 +77,15 @@ class RoundStatus(StrEnum):
     INVALID = "invalid"
 
 
+RECOVERY_ROUND_STATUSES = frozenset(
+    {
+        RoundStatus.SUPERSEDED,
+        RoundStatus.STALE,
+        RoundStatus.INVALID,
+    }
+)
+
+
 class HandoffStatus(StrEnum):
     """Durable delivery states for one logical handoff."""
 
@@ -1809,7 +1818,8 @@ class ReviewRoundRecord:
                 )
         elif supersession is not None:
             raise ArtifactValidationError(
-                f"only a superseded round may record supersession authority"
+                f"{label}: only a superseded round may record supersession "
+                "authority"
             )
         created_at = _require_timestamp(
             data["created_at"],
