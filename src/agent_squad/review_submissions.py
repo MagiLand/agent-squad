@@ -49,6 +49,7 @@ REQUEST_PATH = PurePosixPath("input/request.json")
 MARKER_PATH = PurePosixPath("local-state.json")
 RETIRED_RESULTS_PATH = PurePosixPath("retired-results.json")
 SUBMISSION_LOCK_PATH = PurePosixPath("output/.review-submit.lock")
+ADVISORY_IGNORED_ROOT_ENTRIES = frozenset({RETIRED_RESULTS_PATH.name})
 
 
 class ReviewSubmissionError(AgentSquadError):
@@ -429,9 +430,10 @@ def load_marker_confirmed_review(
                 ignored_root_entries=(
                     frozenset()
                     if authoritative_results_root is None
-                    else frozenset({RETIRED_RESULTS_PATH.name})
+                    else ADVISORY_IGNORED_ROOT_ENTRIES
                 ),
             )
+            captured_files.pop(SUBMISSION_LOCK_PATH, None)
             if authoritative_results_root is not None:
                 advisory_bytes = _read_optional_advisory_ledger(bundle_root)
                 if advisory_bytes is not None:

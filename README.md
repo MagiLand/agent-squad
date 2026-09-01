@@ -85,6 +85,8 @@ agent-squad retry-handoff
 
 Recovery first checks the expected review output and Reviewer-local marker. Marker-confirmed output is returned with the exact `apply-review` command without contacting Herdr. Output without a valid marker is reported as incomplete and is never treated as an applicable result.
 
+If a failed `apply-review` left a provisional archive for a result that recovery later retired, applying corrected marker-confirmed output preserves the retired attempt under the round's `diagnostics/retired-apply-attempts/` directory before archiving and applying the corrected result.
+
 When no valid result is ready, recovery checks the deterministic Reviewer session and, when Herdr supports it, reads recent terminal history before sending anything. It can adopt a request already visible in history, re-prompt the existing Reviewer, or relaunch the deterministic Reviewer in the same review worktree. If optional history diagnostics are unavailable or fail, recovery safely falls back to re-prompting. Every path reuses the run ID, round, request ID, Reviewer name, worktree, and bundle; repeated recovery never allocates a replacement round.
 
 If recovery must remove a malformed or mismatched marker, it first binds that result ID to its original digest in implementation-owned round storage. A copy in the review bundle gives `review-submit` early feedback, but implementation-side status, recovery, and application use only the authoritative binding; a missing, malformed, mismatched, or non-regular advisory copy cannot veto them. Recovery excludes that entry from invalid-result evidence traversal and safely replaces an invalid advisory directory from authority before removing the marker. Corrected content must use a new result ID.

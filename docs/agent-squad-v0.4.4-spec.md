@@ -1236,6 +1236,9 @@ The archived bundle preserves:
 - the output reviewed and applied;
 - the Reviewer-local submission marker.
 
+The transient `output/.review-submit.lock` file coordinates one local process;
+it is not review evidence and MUST NOT be included in the archive.
+
 If application is retried after the complete bundle archive was written but
 before the authoritative state transition committed, the existing archive is
 the provisional snapshot. The retry MUST revalidate every authoritative
@@ -1243,6 +1246,16 @@ bundle entry against current evidence, retain any optional advisory
 `retired-results.json` snapshot already present in that archive, and derive
 the eventual authoritative manifest from the verified archive. A mutable live
 advisory mirror MUST NOT invalidate or redefine the provisional archive.
+
+If that provisional archive instead belongs to a result identity that recovery
+later retired, `apply-review` MUST verify the archived `review.json` result ID
+and digest against the authoritative retirement ledger before replacing it.
+It MUST first quarantine the complete provisional archive and any round-root
+apply artifacts under
+`diagnostics/retired-apply-attempts/<retired-result-id>/`. Quarantine MUST stay
+inside normal implementation-owned round directories and MUST be resumable if
+moving the evidence is interrupted. A mismatch without an exact authoritative
+retirement binding remains an integrity error.
 
 Convenience copies of `review.json`, `review.md`, and other key artifacts MAY also exist at the round root.
 

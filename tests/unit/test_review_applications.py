@@ -18,6 +18,7 @@ from agent_squad.artifacts import (  # noqa: E402
     BundleArtifact,
     RoundStatus,
     SubmissionMode,
+    ReviewVerdict,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
 
@@ -688,6 +689,16 @@ class RoundReplayGuardTests(unittest.TestCase):
             approval=approval,
             run_id=RUN_ID,
             current_round=1,
+            base_oid="a" * 40,
+            git_object_format="sha1",
+        )
+        round_record = SimpleNamespace(
+            round_number=1,
+            request_id=REQUEST_ID,
+            result_id=RESULT_ID,
+            status=RoundStatus.APPLIED,
+            verdict=ReviewVerdict.APPROVED,
+            updated_at="2026-08-28T00:00:01Z",
         )
         with self.assertRaisesRegex(
             review_applications.ReviewApplicationError,
@@ -704,6 +715,11 @@ class RoundReplayGuardTests(unittest.TestCase):
                 review_applications.runs,
                 "safe_run_directory",
                 return_value=Path("/run"),
+            ),
+            mock.patch.object(
+                review_applications.runs,
+                "find_recorded_review_round",
+                return_value=(Path("/round"), round_record),
             ),
             mock.patch.object(
                 review_applications,

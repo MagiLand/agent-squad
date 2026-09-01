@@ -38,8 +38,8 @@ from .initialization import (
     load_initialized_repository,
 )
 from .review_submissions import (
+    ADVISORY_IGNORED_ROOT_ENTRIES,
     MARKER_PATH,
-    RETIRED_RESULTS_PATH,
     SUBMISSION_LOCK_PATH,
     ReviewSubmissionError,
     mirror_retired_review_identities,
@@ -378,9 +378,7 @@ def _preserve_invalid_review_evidence(
                 bundle_root,
                 label="invalid marker-confirmed review bundle",
                 error_type=HandoffRecoveryError,
-                ignored_root_entries=frozenset(
-                    {RETIRED_RESULTS_PATH.name}
-                ),
+                ignored_root_entries=ADVISORY_IGNORED_ROOT_ENTRIES,
             )
             captured = {
                 name: bundle_files[path]
