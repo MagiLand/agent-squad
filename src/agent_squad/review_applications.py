@@ -14,6 +14,7 @@ import uuid
 
 from . import runs
 from .artifacts import (
+    ActiveRoundRecord,
     APPROVAL_FILE_NAME,
     ApprovalRecord,
     ArtifactValidationError,
@@ -1862,6 +1863,7 @@ def _cleanup_superseded_review_resources(
             _validate_superseded_cleanup_target(
                 repository,
                 active=active,
+                active_round=active_round,
                 round_record=round_record,
             )
             evidence: MarkerConfirmedReview | None = None
@@ -1938,6 +1940,11 @@ def _cleanup_superseded_review_resources(
             return late_result_id, _remove_clean_review_worktree(
                 repository,
                 review_worktree,
+                inspect_ignored=True,
+                operational_failure_prefix=(
+                    f"retained review worktree {review_worktree} because "
+                    "safe superseded-round cleanup failed: "
+                ),
             )
     except (AgentSquadError, OSError) as error:
         return late_result_id, (
@@ -1950,13 +1957,9 @@ def _validate_superseded_cleanup_target(
     repository: InitializedRepository,
     *,
     active: runs.ActiveRunStatus,
+    active_round: ActiveRoundRecord,
     round_record: ReviewRoundRecord,
 ) -> None:
-    active_round = active.active_round
-    if active_round is None:
-        raise ReviewApplicationError(
-            "superseded cleanup requires a linked review round"
-        )
     review_worktree = active_round.review_worktree
     try:
         resolved = review_worktree.resolve(strict=True)
@@ -2145,6 +2148,9 @@ def _cleanup_review_resources(
 def _remove_clean_review_worktree(
     repository: InitializedRepository,
     review_worktree: Path,
+    *,
+    inspect_ignored: bool = False,
+    operational_failure_prefix: str = "",
 ) -> tuple[str, ...]:
     """Remove scoped generated files, then a demonstrably clean worktree."""
 
@@ -2172,7 +2178,8 @@ def _remove_clean_review_worktree(
     if cleanliness.returncode != 0:
         detail = cleanliness.stderr.strip() or "unknown Git error"
         return (
-            f"could not verify review worktree cleanup for "
+            f"{operational_failure_prefix}could not verify review worktree "
+            "cleanup for "
             f"{review_worktree}: {detail}",
         )
     if cleanliness.stdout:
@@ -2180,26 +2187,27 @@ def _remove_clean_review_worktree(
             f"retained review worktree {review_worktree} because files "
             "remain after scoped cleanup",
         )
-    ignored = run_git(
-        review_worktree,
-        "ls-files",
-        "--others",
-        "--ignored",
-        "--exclude-standard",
-        "-z",
-        "--",
-    )
-    if ignored.returncode != 0:
-        detail = ignored.stderr.strip() or "unknown Git error"
-        return (
-            "could not inspect ignored review-worktree files: "
-            f"{detail}",
+    if inspect_ignored:
+        ignored = run_git(
+            review_worktree,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
         )
-    if any(entry for entry in ignored.stdout.split("\0") if entry):
-        return (
-            f"retained review worktree {review_worktree} because "
-            "unconfigured ignored files remain after scoped cleanup",
-        )
+        if ignored.returncode != 0:
+            detail = ignored.stderr.strip() or "unknown Git error"
+            return (
+                f"{operational_failure_prefix}could not inspect ignored "
+                f"review-worktree files: {detail}",
+            )
+        if any(entry for entry in ignored.stdout.split("\0") if entry):
+            return (
+                f"retained review worktree {review_worktree} because "
+                "unconfigured ignored files remain after scoped cleanup",
+            )
     removed = run_git(
         repository.worktree.root,
         "worktree",
@@ -2209,7 +2217,8 @@ def _remove_clean_review_worktree(
     if removed.returncode != 0 and os.path.lexists(review_worktree):
         detail = removed.stderr.strip() or "unknown Git error"
         return (
-            f"could not remove review worktree {review_worktree}: {detail}",
+            f"{operational_failure_prefix}could not remove review worktree "
+            f"{review_worktree}: {detail}",
         )
     _remove_empty_review_parents(
         review_worktree.parent,

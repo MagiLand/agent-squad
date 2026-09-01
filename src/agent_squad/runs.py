@@ -1633,26 +1633,20 @@ def _validate_active_review_artifacts(
                     "a correction-round request must follow the most recent "
                     "applied changes_requested result"
                 )
-            if recovering:
-                if request.mode is not SubmissionMode.NEW_REVISION:
-                    raise RunStateError(
-                        "recovery after a non-applied round must use "
-                        "new_revision"
-                    )
-            same_head_recovery = (
-                recovering
-                and preceding_round is not None
-                and request.head_oid == preceding_round.head_oid
+            recovery_head_oid = (
+                preceding_round.head_oid
+                if recovering and preceding_round is not None
+                else None
             )
-            if not same_head_recovery:
-                try:
-                    validate_followup_submission_head(
-                        request.mode,
-                        head_oid=request.head_oid,
-                        previous_reviewed_head_oid=previous.review.head_oid,
-                    )
-                except ArtifactValidationError as error:
-                    raise RunStateError(str(error)) from error
+            try:
+                validate_followup_submission_head(
+                    request.mode,
+                    head_oid=request.head_oid,
+                    previous_reviewed_head_oid=previous.review.head_oid,
+                    recovery_head_oid=recovery_head_oid,
+                )
+            except ArtifactValidationError as error:
+                raise RunStateError(str(error)) from error
 
     expected_additional_paths: tuple[str, ...] = ()
     if previous is not None:

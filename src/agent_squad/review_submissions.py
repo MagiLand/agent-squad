@@ -26,6 +26,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    response_validation_mode,
     validate_followup_submission_head,
     validate_review_response,
 )
@@ -912,11 +913,12 @@ def _validate_bundle_inputs(
 
     recovering = recovery_round is not None
     if recovering:
-        if request.mode is not SubmissionMode.NEW_REVISION:
-            raise ReviewSubmissionError(
-                "recovery after a non-applied round must use new_revision"
-            )
         if previous_review is None:
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise ReviewSubmissionError(
+                    "recovery without an applied prior review must use "
+                    "new_revision"
+                )
             if request.head_oid == request.base_oid:
                 raise ReviewSubmissionError(
                     "recovery without an applied prior review requires a "
@@ -928,15 +930,15 @@ def _validate_bundle_inputs(
                     "the applied previous review must precede the recovery "
                     "round"
                 )
-            if request.head_oid != recovery_round.head_oid:
-                try:
-                    validate_followup_submission_head(
-                        request.mode,
-                        head_oid=request.head_oid,
-                        previous_reviewed_head_oid=previous_review.head_oid,
-                    )
-                except ArtifactValidationError as error:
-                    raise ReviewSubmissionError(str(error)) from error
+            try:
+                validate_followup_submission_head(
+                    request.mode,
+                    head_oid=request.head_oid,
+                    previous_reviewed_head_oid=previous_review.head_oid,
+                    recovery_head_oid=recovery_round.head_oid,
+                )
+            except ArtifactValidationError as error:
+                raise ReviewSubmissionError(str(error)) from error
     elif previous_review is not None:
         try:
             validate_followup_submission_head(
@@ -981,10 +983,15 @@ def _validate_bundle_inputs(
                 response_value,
                 object_format=request.object_format,
             )
+            response_mode = response_validation_mode(
+                request.mode,
+                head_oid=request.head_oid,
+                previous_reviewed_head_oid=previous_review.head_oid,
+            )
             validate_review_response(
                 response,
                 previous_review,
-                request.mode,
+                response_mode,
             )
         except ArtifactValidationError as error:
             raise ReviewSubmissionError(

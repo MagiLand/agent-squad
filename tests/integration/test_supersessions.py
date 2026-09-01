@@ -174,6 +174,25 @@ def _apply_changes_requested(
     return review
 
 
+def _write_ignored_reviewer_file(prepared: _PreparedRound) -> Path:
+    exclude_text = run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=prepared.review_worktree,
+    ).stdout.strip()
+    exclude_path = Path(exclude_text)
+    if not exclude_path.is_absolute():
+        exclude_path = prepared.review_worktree / exclude_path
+    original = exclude_path.read_text(encoding="utf-8")
+    exclude_path.write_text(
+        f"{original.rstrip()}\nreviewer-cache/\n",
+        encoding="utf-8",
+    )
+    ignored = prepared.review_worktree / "reviewer-cache/notes.txt"
+    ignored.parent.mkdir()
+    ignored.write_text("retained reviewer diagnostics\n", encoding="utf-8")
+    return ignored
+
+
 class SupersedeReviewTests(unittest.TestCase):
     def test_reason_must_be_nonempty_single_line_before_state_changes(
         self,
@@ -511,6 +530,46 @@ class SupersedeReviewTests(unittest.TestCase):
             )
             self.assertEqual(superseded.returncode, 0, superseded.stderr)
 
+            fixed_response_path = root / "false-fixed-response.json"
+            _write_fixed_response(fixed_response_path, prepared, review)
+            state_path = prepared.repository / ".agent-squad/state.json"
+            state_before_false_fixed = state_path.read_bytes()
+            _, second_round_directory, _ = _state_and_round(
+                prepared.repository
+            )
+            response_authority_path = (
+                second_round_directory.parent / "001/response.json"
+            )
+            response_before_false_fixed = (
+                response_authority_path.read_bytes()
+            )
+            false_fixed = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(fixed_response_path),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(false_fixed.returncode, 1)
+            self.assertIn(
+                "reconsideration requires rejected dispositions with "
+                "evidence for every response",
+                false_fixed.stderr,
+            )
+            self.assertEqual(
+                state_path.read_bytes(),
+                state_before_false_fixed,
+            )
+            self.assertEqual(
+                response_authority_path.read_bytes(),
+                response_before_false_fixed,
+            )
+
             recovered = run_cli(
                 prepared.repository,
                 "submit",
@@ -559,6 +618,33 @@ class SupersedeReviewTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             _write_review(third_round)
+            previous_response_path = (
+                third_round.bundle / "input/previous-response.json"
+            )
+            rejected_response = previous_response_path.read_bytes()
+            previous_response_path.chmod(0o600)
+            previous_response_path.write_bytes(
+                fixed_response_path.read_bytes()
+            )
+            previous_response_path.chmod(0o400)
+            false_reviewer_submission = run_cli(
+                third_round.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(false_reviewer_submission.returncode, 1)
+            self.assertIn(
+                "reconsideration requires rejected dispositions with "
+                "evidence for every response",
+                false_reviewer_submission.stderr,
+            )
+            self.assertFalse(
+                (third_round.bundle / "local-state.json").exists()
+            )
+            previous_response_path.chmod(0o600)
+            previous_response_path.write_bytes(rejected_response)
+            previous_response_path.chmod(0o400)
             review_submitted = run_cli(
                 third_round.review_worktree,
                 "review-submit",
@@ -571,7 +657,7 @@ class SupersedeReviewTests(unittest.TestCase):
                 review_submitted.stderr,
             )
 
-    def test_recovery_cannot_roll_back_to_the_applied_review_head(
+    def test_recovery_at_applied_head_requires_reconsideration(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -658,6 +744,59 @@ class SupersedeReviewTests(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), state_before)
             _, round_directory, _ = _state_and_round(prepared.repository)
             self.assertFalse((round_directory.parent / "003").exists())
+
+            reconsideration_response = root / "reconsideration-response.json"
+            _write_rejected_response(
+                reconsideration_response,
+                prepared,
+                review,
+            )
+            reconsidered = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report_path),
+                "--response",
+                str(reconsideration_response),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                reconsidered.returncode,
+                0,
+                reconsidered.stderr,
+            )
+            third_round = _prepared_from_active(prepared)
+            self.assertEqual(third_round.request["round"], 3)
+            self.assertEqual(
+                third_round.request["mode"],
+                "reconsideration",
+            )
+            self.assertEqual(
+                third_round.request["head_oid"],
+                review["head_oid"],
+            )
+            status = run_cli(
+                prepared.repository,
+                "status",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            _write_review(third_round)
+            review_submitted = run_cli(
+                third_round.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                review_submitted.returncode,
+                0,
+                review_submitted.stderr,
+            )
 
     def test_status_binds_prior_artifact_paths_to_round_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -862,6 +1001,164 @@ class SupersedeReviewTests(unittest.TestCase):
                 (round_directory / "bundle/input/request.json").is_file()
             )
 
+    def test_superseded_cleanup_retains_unconfigured_ignored_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            ignored = _write_ignored_reviewer_file(prepared)
+
+            superseded = run_cli(
+                prepared.repository,
+                "supersede",
+                "--reason",
+                "The review is no longer relevant.",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(superseded.returncode, 0, superseded.stderr)
+            self.assertIn(
+                "unconfigured ignored files remain after scoped cleanup",
+                superseded.stderr,
+            )
+            self.assertTrue(prepared.review_worktree.is_dir())
+            self.assertEqual(
+                ignored.read_text(encoding="utf-8"),
+                "retained reviewer diagnostics\n",
+            )
+            self.assertFalse(prepared.bundle.exists())
+
+    def test_applied_cleanup_keeps_legacy_ignored_file_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            review = _write_review(
+                prepared,
+                verdict="changes_requested",
+            )
+            _write_ignored_reviewer_file(prepared)
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertFalse(
+                prepared.review_worktree.exists(),
+                applied.stderr,
+            )
+
+    def test_superseded_cleanup_reports_operational_failures_with_path(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "status",
+                "could not verify review worktree cleanup",
+            ),
+            (
+                "ignored",
+                "could not inspect ignored review-worktree files",
+            ),
+            (
+                "remove",
+                "could not remove review worktree",
+            ),
+        )
+        for operation, expected in cases:
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared = _prepare_round(root)
+                    repository = (
+                        review_applications.load_initialized_repository(
+                            prepared.repository
+                        )
+                    )
+                    status = runs.inspect_status(prepared.repository)
+                    active = status.active_run
+                    self.assertIsNotNone(active)
+                    assert active is not None
+                    _, round_directory, round_value = _state_and_round(
+                        prepared.repository
+                    )
+                    round_record = ReviewRoundRecord.from_dict(
+                        round_value,
+                        label="cleanup test round",
+                    )
+                    real_run_git = review_applications.run_git
+
+                    def fail_operation(
+                        start: Path,
+                        *arguments: str,
+                    ) -> object:
+                        matches = (
+                            operation == "status"
+                            and arguments[:1] == ("status",)
+                        ) or (
+                            operation == "ignored"
+                            and arguments[:1] == ("ls-files",)
+                            and "--ignored" in arguments
+                        ) or (
+                            operation == "remove"
+                            and arguments[:2] == ("worktree", "remove")
+                        )
+                        if matches:
+                            return mock.Mock(
+                                returncode=1,
+                                stdout="",
+                                stderr=f"injected {operation} failure",
+                            )
+                        return real_run_git(start, *arguments)
+
+                    with mock.patch.object(
+                        review_applications,
+                        "run_git",
+                        side_effect=fail_operation,
+                    ):
+                        late_result_id, warnings = (
+                            review_applications
+                            ._cleanup_superseded_review_resources(
+                                repository,
+                                active=active,
+                                round_directory=round_directory,
+                                round_record=round_record,
+                            )
+                        )
+
+                    self.assertIsNone(late_result_id)
+                    self.assertEqual(len(warnings), 1)
+                    self.assertIn(
+                        f"retained review worktree "
+                        f"{prepared.review_worktree}",
+                        warnings[0],
+                    )
+                    self.assertIn(
+                        "safe superseded-round cleanup failed",
+                        warnings[0],
+                    )
+                    self.assertIn(expected, warnings[0])
+                    self.assertIn(
+                        f"injected {operation} failure",
+                        warnings[0],
+                    )
+                    self.assertTrue(prepared.review_worktree.is_dir())
+                    self.assertFalse(prepared.bundle.exists())
+
     def test_cleanup_retains_worktree_when_any_identity_gate_fails(
         self,
     ) -> None:
@@ -892,6 +1189,11 @@ class SupersedeReviewTests(unittest.TestCase):
             (
                 "bundle digest",
                 "superseded bundle input digest changed",
+            ),
+            (
+                "bundle file type",
+                "superseded bundle input must be a regular non-symlink "
+                "file",
             ),
         )
         for mutation, expected in cases:
@@ -966,13 +1268,17 @@ class SupersedeReviewTests(unittest.TestCase):
                             ["git", "switch", "-c", "review-attached"],
                             cwd=prepared.review_worktree,
                         )
-                    else:
+                    elif mutation == "bundle digest":
                         task_path = prepared.bundle / "input/task.md"
                         task_path.chmod(0o600)
                         task_path.write_text(
                             "tampered cleanup input\n",
                             encoding="utf-8",
                         )
+                    else:
+                        task_path = prepared.bundle / "input/task.md"
+                        task_path.unlink()
+                        task_path.symlink_to("request.json")
 
                     with discovery_patch:
                         late_result_id, warnings = (

@@ -33,6 +33,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    response_validation_mode,
     validate_followup_submission_head,
     validate_review_response,
 )
@@ -285,6 +286,7 @@ def _prepare_submission_locked(
 
     previous: runs.AppliedReviewAuthority | None = None
     implementation_response: ImplementationResponse | None = None
+    response_mode = mode
     recovering = False
     recovery_round_content: bytes | None = None
     additional_bundle_contents: tuple[
@@ -305,28 +307,29 @@ def _prepare_submission_locked(
             )
         recovering = active_round.status in runs.RECOVERY_ROUND_STATUSES
         if recovering:
-            if mode is not SubmissionMode.NEW_REVISION:
-                raise SubmissionError(
-                    "recovery after a non-applied round must use "
-                    "--mode new_revision"
-                )
             previous = _find_applied_changes_review(
                 run_directory,
                 active,
             )
             if previous is None:
+                if mode is not SubmissionMode.NEW_REVISION:
+                    raise SubmissionError(
+                        "recovery without an applied prior review must use "
+                        "--mode new_revision"
+                    )
                 if head_oid == active.base_oid:
                     raise SubmissionError(
                         "recovery without an applied prior review requires a "
                         "committed candidate whose HEAD differs from the "
                         "fixed base"
                     )
-            elif head_oid != active.current_head_oid:
+            else:
                 try:
                     validate_followup_submission_head(
                         mode,
                         head_oid=head_oid,
                         previous_reviewed_head_oid=previous.review.head_oid,
+                        recovery_head_oid=active.current_head_oid,
                     )
                 except ArtifactValidationError as error:
                     raise SubmissionError(str(error)) from error
@@ -350,6 +353,13 @@ def _prepare_submission_locked(
             except ArtifactValidationError as error:
                 raise SubmissionError(str(error)) from error
         round_number = active.current_round + 1
+
+    if previous is not None:
+        response_mode = response_validation_mode(
+            mode,
+            head_oid=head_oid,
+            previous_reviewed_head_oid=previous.review.head_oid,
+        )
 
     report = _capture_report(
         report_path,
@@ -380,7 +390,7 @@ def _prepare_submission_locked(
             repository.worktree.invocation_directory,
             object_format=object_format,
             previous_review=previous.review,
-            mode=mode,
+            mode=response_mode,
         )
         additional_bundle_contents = (
             (

@@ -27,6 +27,8 @@ from agent_squad.artifacts import (  # noqa: E402
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    response_validation_mode,
+    validate_followup_submission_head,
     validate_review_response,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
@@ -695,6 +697,33 @@ class ReviewRequestTests(unittest.TestCase):
 
         self.assertIsNone(request.recovery_round_path)
 
+    def test_recovery_mode_depends_on_previous_applied_review(self) -> None:
+        value = _request()
+        value.update(
+            round=2,
+            mode="reconsideration",
+            recovery_round_path="input/recovery-round.json",
+            reviewer_name="asq-876543211234-r002-reviewer",
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "without a previous review must use mode new_revision",
+        ):
+            ReviewRequest.from_dict(value)
+
+        value.update(
+            previous_review_path="input/previous-review.json",
+            previous_response_path="input/previous-response.json",
+        )
+        request = ReviewRequest.from_dict(value)
+
+        self.assertIs(request.mode, SubmissionMode.RECONSIDERATION)
+        self.assertEqual(
+            request.recovery_round_path,
+            "input/recovery-round.json",
+        )
+
     def test_first_round_requires_new_revision_and_changed_head(self) -> None:
         cases = (
             ("mode", "reconsideration", "must use mode new_revision"),
@@ -1065,6 +1094,68 @@ class ReviewResponseTests(unittest.TestCase):
             rejected,
             review,
             SubmissionMode.RECONSIDERATION,
+        )
+
+
+class SubmissionSemanticsTests(unittest.TestCase):
+    def test_recovery_exception_preserves_both_submission_modes(self) -> None:
+        previous_head = "a" * 40
+        recovery_head = "b" * 40
+
+        validate_followup_submission_head(
+            SubmissionMode.NEW_REVISION,
+            head_oid=recovery_head,
+            previous_reviewed_head_oid=previous_head,
+            recovery_head_oid=recovery_head,
+        )
+        validate_followup_submission_head(
+            SubmissionMode.RECONSIDERATION,
+            head_oid=previous_head,
+            previous_reviewed_head_oid=previous_head,
+            recovery_head_oid=recovery_head,
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "new committed HEAD",
+        ):
+            validate_followup_submission_head(
+                SubmissionMode.NEW_REVISION,
+                head_oid=previous_head,
+                previous_reviewed_head_oid=previous_head,
+                recovery_head_oid=recovery_head,
+            )
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "exact previously reviewed HEAD",
+        ):
+            validate_followup_submission_head(
+                SubmissionMode.RECONSIDERATION,
+                head_oid=recovery_head,
+                previous_reviewed_head_oid=previous_head,
+                recovery_head_oid=recovery_head,
+            )
+
+    def test_unchanged_head_uses_reconsideration_response_semantics(
+        self,
+    ) -> None:
+        previous_head = "a" * 40
+
+        self.assertIs(
+            response_validation_mode(
+                SubmissionMode.NEW_REVISION,
+                head_oid=previous_head,
+                previous_reviewed_head_oid=previous_head,
+            ),
+            SubmissionMode.RECONSIDERATION,
+        )
+        self.assertIs(
+            response_validation_mode(
+                SubmissionMode.NEW_REVISION,
+                head_oid="b" * 40,
+                previous_reviewed_head_oid=previous_head,
+            ),
+            SubmissionMode.NEW_REVISION,
         )
 
 

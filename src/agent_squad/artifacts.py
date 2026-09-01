@@ -1070,15 +1070,34 @@ def validate_review_response(
             )
 
 
+def response_validation_mode(
+    submission_mode: SubmissionMode,
+    *,
+    head_oid: str,
+    previous_reviewed_head_oid: str,
+) -> SubmissionMode:
+    """Return response semantics that preserve changed-revision claims."""
+
+    if head_oid == previous_reviewed_head_oid:
+        return SubmissionMode.RECONSIDERATION
+    return submission_mode
+
+
 def validate_followup_submission_head(
     mode: SubmissionMode,
     *,
     head_oid: str,
     previous_reviewed_head_oid: str,
+    recovery_head_oid: str | None = None,
 ) -> None:
     """Validate the candidate head against the applied reviewed head."""
 
     if mode is SubmissionMode.NEW_REVISION:
+        if (
+            recovery_head_oid is not None
+            and head_oid == recovery_head_oid
+        ):
+            return
         if head_oid == previous_reviewed_head_oid:
             raise ArtifactValidationError(
                 "a new_revision submission after changes_requested requires "
@@ -1485,11 +1504,14 @@ class ReviewRequest:
                 "the first review round cannot reference previous review "
                 "artifacts"
             )
-        if recovery_round_path is not None and (
-            mode is not SubmissionMode.NEW_REVISION
+        if (
+            recovery_round_path is not None
+            and previous_review_path is None
+            and mode is not SubmissionMode.NEW_REVISION
         ):
             raise ArtifactValidationError(
-                "a recovery-round request must use mode new_revision"
+                "a recovery-round request without a previous review must "
+                "use mode new_revision"
             )
         resolution_paths = _require_path_list(
             data["resolution_paths"],
