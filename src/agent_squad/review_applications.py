@@ -461,17 +461,11 @@ def _historical_result_replay(
         repository.control_root,
         active.run_id,
     )
-    try:
-        matched = runs.find_recorded_review_round(
-            run_directory=run_directory,
-            run_id=active.run_id,
-            current_round=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
-            result_id=result_id,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=result_id,
+    )
     if matched is None:
         return None
     round_directory, round_record = matched
@@ -554,32 +548,29 @@ def _approved_replay(
         repository.control_root,
         active.run_id,
     )
-    try:
-        matched = runs.find_recorded_review_round(
-            run_directory=run_directory,
-            run_id=active.run_id,
-            current_round=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
-            result_id=active_round.result_id,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=active_round.result_id,
+    )
     if matched is None:
         raise ReviewApplicationError(
             "the approved result is missing from authoritative round history"
         )
     round_directory, round_record = matched
-    if (
-        round_record.round_number != active.current_round
-        or round_record.request_id != approval.request_id
-        or round_record.result_id != approval.result_id
-        or round_record.status is not RoundStatus.APPLIED
-        or round_record.verdict is not ReviewVerdict.APPROVED
-    ):
-        raise ReviewApplicationError(
-            "the approved result does not match authoritative round history"
-        )
+    comparisons = (
+        (round_record.round_number, active.current_round, "round number"),
+        (round_record.request_id, approval.request_id, "request ID"),
+        (round_record.result_id, approval.result_id, "result ID"),
+        (round_record.head_oid, approval.head_oid, "head OID"),
+        (round_record.status, RoundStatus.APPLIED, "status"),
+        (round_record.verdict, ReviewVerdict.APPROVED, "verdict"),
+    )
+    for actual, expected, label in comparisons:
+        if actual != expected:
+            raise ReviewApplicationError(
+                f"approved round {label} does not match authoritative state"
+            )
     try:
         _ensure_event(
             run_directory / runs.EVENT_LOG_FILE_NAME,
@@ -640,17 +631,11 @@ def _changes_requested_replay(
         repository.control_root,
         active.run_id,
     )
-    try:
-        matched = runs.find_recorded_review_round(
-            run_directory=run_directory,
-            run_id=active.run_id,
-            current_round=active.current_round,
-            base_oid=active.base_oid,
-            object_format=active.git_object_format,
-            result_id=active_round.result_id,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
+    matched = _find_recorded_review_round(
+        active,
+        run_directory,
+        result_id=active_round.result_id,
+    )
     if matched is None:
         raise ReviewApplicationError(
             "the applied changes-requested result is missing from "
@@ -729,6 +714,27 @@ def _changes_requested_replay(
         next_action=runs.CORRECTION_SUBMIT_NEXT_ACTION,
         cleanup_warnings=cleanup_warnings,
     )
+
+
+def _find_recorded_review_round(
+    active: runs.ActiveRunStatus,
+    run_directory: Path,
+    *,
+    result_id: str,
+) -> tuple[Path, ReviewRoundRecord] | None:
+    """Find a recorded result while preserving application-layer errors."""
+
+    try:
+        return runs.find_recorded_review_round(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+            result_id=result_id,
+        )
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
 
 
 def _complete_run_locked(
@@ -1098,20 +1104,12 @@ def _quarantine_retired_apply_attempt(
     bundle_manifest = _bundle_manifest(archived_files)
     parent = _retired_apply_attempts_directory(round_directory)
     destination = parent / archived_review.result_id
-    if os.path.lexists(destination):
-        destination = _require_application_directory(
-            destination,
-            parent=parent,
-            label="retired apply-attempt diagnostic",
-            create=False,
-        )
-    else:
-        destination = _require_application_directory(
-            destination,
-            parent=parent,
-            label="retired apply-attempt diagnostic",
-            create=True,
-        )
+    destination = _require_direct_subdirectory(
+        destination,
+        parent=parent,
+        label="retired apply-attempt diagnostic",
+        create=not os.path.lexists(destination),
+    )
     _resume_retired_apply_artifact_moves(
         round_directory,
         destination=destination,
@@ -1151,13 +1149,13 @@ def _retired_apply_attempts_directory(round_directory: Path) -> Path:
         raise ReviewApplicationError(
             f"cannot resolve the active review round: {error}"
         ) from error
-    diagnostics = _require_application_directory(
+    diagnostics = _require_direct_subdirectory(
         round_root / "diagnostics",
         parent=round_root,
         label="review diagnostics",
         create=True,
     )
-    return _require_application_directory(
+    return _require_direct_subdirectory(
         diagnostics / RETIRED_APPLY_ATTEMPTS_DIRECTORY_NAME,
         parent=diagnostics,
         label="retired apply-attempt diagnostics",
@@ -1165,7 +1163,7 @@ def _retired_apply_attempts_directory(round_directory: Path) -> Path:
     )
 
 
-def _require_application_directory(
+def _require_direct_subdirectory(
     path: Path,
     *,
     parent: Path,

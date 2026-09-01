@@ -696,6 +696,7 @@ class RoundReplayGuardTests(unittest.TestCase):
             round_number=1,
             request_id=REQUEST_ID,
             result_id=RESULT_ID,
+            head_oid="b" * 40,
             status=RoundStatus.APPLIED,
             verdict=ReviewVerdict.APPROVED,
             updated_at="2026-08-28T00:00:01Z",
@@ -708,6 +709,30 @@ class RoundReplayGuardTests(unittest.TestCase):
                 repository,
                 active,
                 presented_result_id=REQUEST_ID,
+            )
+
+        mismatched_round_record = copy.copy(round_record)
+        mismatched_round_record.request_id = RUN_ID
+        with (
+            mock.patch.object(
+                review_applications.runs,
+                "safe_run_directory",
+                return_value=Path("/run"),
+            ),
+            mock.patch.object(
+                review_applications.runs,
+                "find_recorded_review_round",
+                return_value=(Path("/round"), mismatched_round_record),
+            ),
+            self.assertRaisesRegex(
+                review_applications.ReviewApplicationError,
+                "approved round request ID does not match authoritative state",
+            ),
+        ):
+            review_applications._approved_replay(
+                repository,
+                active,
+                presented_result_id=RESULT_ID,
             )
 
         with (
