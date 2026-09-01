@@ -722,7 +722,7 @@ def _find_recorded_review_round(
     *,
     result_id: str,
 ) -> tuple[Path, ReviewRoundRecord] | None:
-    """Find a recorded result while preserving application-layer errors."""
+    """Find a recorded result, translating run-state errors for callers."""
 
     try:
         return runs.find_recorded_review_round(
