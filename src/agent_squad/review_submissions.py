@@ -854,6 +854,15 @@ def _validate_bundle_inputs(
         except ArtifactValidationError as error:
             raise ReviewSubmissionError(str(error)) from error
 
+    if (
+        request.round_number > 1
+        and request.previous_response_path is None
+    ):
+        raise ReviewSubmissionError(
+            "a correction-round request must reference the previous review "
+            "and response"
+        )
+
     if request.previous_response_path is not None:
         previous_response_path = PurePosixPath(
             request.previous_response_path

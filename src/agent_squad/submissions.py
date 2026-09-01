@@ -299,11 +299,14 @@ def _prepare_submission_locked(
             run_directory,
             active,
         )
-        _validate_followup_submission_mode(
-            mode,
-            head_oid=head_oid,
-            previous_reviewed_head_oid=previous.review.head_oid,
-        )
+        try:
+            validate_followup_submission_head(
+                mode,
+                head_oid=head_oid,
+                previous_reviewed_head_oid=previous.review.head_oid,
+            )
+        except ArtifactValidationError as error:
+            raise SubmissionError(str(error)) from error
         round_number = active.current_round + 1
 
     report = _capture_report(
@@ -1095,22 +1098,6 @@ def _validate_first_submission_mode(
             "the first review round requires a committed candidate whose "
             "HEAD differs from the fixed base"
         )
-
-
-def _validate_followup_submission_mode(
-    mode: SubmissionMode,
-    *,
-    head_oid: str,
-    previous_reviewed_head_oid: str,
-) -> None:
-    try:
-        validate_followup_submission_head(
-            mode,
-            head_oid=head_oid,
-            previous_reviewed_head_oid=previous_reviewed_head_oid,
-        )
-    except ArtifactValidationError as error:
-        raise SubmissionError(str(error)) from error
 
 
 def _sensitive_change_warnings(

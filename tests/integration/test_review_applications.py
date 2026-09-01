@@ -1499,6 +1499,17 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             first_round = run_directory / "rounds/001"
             second_round = run_directory / "rounds/002"
 
+            def assert_rejected_without_round(result) -> None:
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "reconsideration requires rejected dispositions with "
+                    "evidence",
+                    result.stderr,
+                )
+                self.assertEqual(state_path.read_bytes(), state_before)
+                self.assertFalse((first_round / "response.json").exists())
+                self.assertFalse(second_round.exists())
+
             false_fix = run_cli(
                 prepared.repository,
                 "submit",
@@ -1512,15 +1523,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 env_overrides=prepared.environment,
             )
 
-            self.assertEqual(false_fix.returncode, 1)
-            self.assertIn(
-                "reconsideration requires rejected dispositions with "
-                "evidence",
-                false_fix.stderr,
-            )
-            self.assertEqual(state_path.read_bytes(), state_before)
-            self.assertFalse((first_round / "response.json").exists())
-            self.assertFalse(second_round.exists())
+            assert_rejected_without_round(false_fix)
 
             needs_human_response = json.loads(
                 response_path.read_text(encoding="utf-8")
@@ -1548,15 +1551,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 env_overrides=prepared.environment,
             )
 
-            self.assertEqual(unresolved.returncode, 1)
-            self.assertIn(
-                "reconsideration requires rejected dispositions with "
-                "evidence",
-                unresolved.stderr,
-            )
-            self.assertEqual(state_path.read_bytes(), state_before)
-            self.assertFalse((first_round / "response.json").exists())
-            self.assertFalse(second_round.exists())
+            assert_rejected_without_round(unresolved)
 
             _write_rejected_response(response_path, prepared, review)
 

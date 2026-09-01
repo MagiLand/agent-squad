@@ -833,6 +833,61 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertFalse((prepared.bundle / "local-state.json").exists())
             self.assertEqual(_result_prompt_events(prepared), [])
 
+    def test_reconsideration_bundle_cannot_use_a_changed_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            request = copy.deepcopy(prepared.request)
+            request["mode"] = "reconsideration"
+            prepared = _write_request(prepared, request)
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertIn(
+                "a reconsideration submission must keep the exact "
+                "previously reviewed HEAD",
+                submitted.stderr,
+            )
+            self.assertFalse((prepared.bundle / "local-state.json").exists())
+            self.assertEqual(_result_prompt_events(prepared), [])
+
+    def test_correction_bundle_cannot_hide_previous_review_inputs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            request = copy.deepcopy(prepared.request)
+            request["previous_review_path"] = None
+            request["previous_response_path"] = None
+            prepared = _write_request(prepared, request)
+            (prepared.bundle / "input/previous-review.json").unlink()
+            (prepared.bundle / "input/previous-response.json").unlink()
+
+            submitted = run_cli(
+                prepared.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(submitted.returncode, 1)
+            self.assertIn(
+                "a correction-round request must reference the previous "
+                "review and response",
+                submitted.stderr,
+            )
+            self.assertFalse((prepared.bundle / "local-state.json").exists())
+            self.assertEqual(_result_prompt_events(prepared), [])
+
     def test_multi_input_document_validation_failures_are_rejected(
         self,
     ) -> None:
