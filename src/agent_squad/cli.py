@@ -11,7 +11,7 @@ from . import __version__
 from .artifacts import HandoffStatus, ReviewVerdict, SubmissionMode
 from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
-from .review_applications import apply_review, complete_run
+from .review_applications import apply_review, complete_run, supersede_review
 from .review_submissions import submit_review_result
 from .runs import (
     IncompleteReviewOutput,
@@ -178,6 +178,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     apply_review_parser.set_defaults(handler=_run_apply_review)
+
+    supersede_parser = commands.add_parser(
+        "supersede",
+        help="invalidate the active review and return to implementation",
+        description=(
+            "Permanently supersede the active reviewing round, record its "
+            "actor and cause, preserve marker-confirmed late evidence, and "
+            "remove only safely disposable review resources."
+        ),
+    )
+    supersede_parser.add_argument(
+        "--reason",
+        required=True,
+        metavar="TEXT",
+        help="single-line cause explaining why the review is obsolete",
+    )
+    supersede_parser.set_defaults(handler=_run_supersede)
 
     retry_handoff_parser = commands.add_parser(
         "retry-handoff",
@@ -419,6 +436,35 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
     print(f"Next action: {result.next_action}")
     for warning in result.cleanup_warnings:
         print(f"agent-squad: warning: {warning}", file=sys.stderr)
+    return 0
+
+
+def _run_supersede(arguments: argparse.Namespace) -> int:
+    result = supersede_review(
+        _invocation_directory(),
+        reason=arguments.reason,
+    )
+    print(
+        f"Superseded review round {result.round_number} for run "
+        f"{result.run_id}"
+    )
+    print(f"Revision: {result.head_oid}")
+    print(f"Actor: {result.actor}")
+    print(f"Cause: {result.cause}")
+    if result.reviewer_notice_sent:
+        print("Reviewer notice: sent")
+    else:
+        print("Reviewer notice: not sent")
+        print(
+            "agent-squad: warning: Reviewer supersede notice failed: "
+            f"{result.reviewer_notice_error}",
+            file=sys.stderr,
+        )
+    if result.late_result_id is not None:
+        print(f"Archived late result: {result.late_result_id}")
+    for warning in result.cleanup_warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
+    print("Next action: continue implementing the captured task")
     return 0
 
 

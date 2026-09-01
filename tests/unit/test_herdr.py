@@ -64,6 +64,54 @@ class HerdrHelperTests(unittest.TestCase):
             ("agent", "prompt", "codex-main", "result ready")
         )
 
+    def test_reviewer_notice_is_skipped_when_session_is_absent(self) -> None:
+        client = HerdrClient(Path.cwd())
+        with (
+            mock.patch.object(client, "_get_agent", return_value=None),
+            mock.patch.object(client, "_prompt_agent") as prompt_agent,
+        ):
+            sent = client.dispatch_reviewer_notice(
+                reviewer_name="asq-12345678-r001-reviewer",
+                reviewer_kind=AgentKind.CLAUDE,
+                review_worktree=Path.cwd(),
+                prompt="review superseded",
+            )
+
+        self.assertFalse(sent)
+        prompt_agent.assert_not_called()
+
+    def test_reviewer_notice_revalidates_prompted_session(self) -> None:
+        review_worktree = Path.cwd()
+        reviewer_name = "asq-12345678-r001-reviewer"
+        agent = {
+            "name": reviewer_name,
+            "agent": "claude",
+            "cwd": str(review_worktree),
+        }
+        client = HerdrClient(review_worktree)
+        with (
+            mock.patch.object(client, "_get_agent", return_value=agent),
+            mock.patch.object(
+                client,
+                "_prompt_agent",
+                return_value=agent,
+            ) as prompt_agent,
+            mock.patch.object(client, "_validate_agent") as validate_agent,
+        ):
+            sent = client.dispatch_reviewer_notice(
+                reviewer_name=reviewer_name,
+                reviewer_kind=AgentKind.CLAUDE,
+                review_worktree=review_worktree,
+                prompt="review superseded",
+            )
+
+        self.assertTrue(sent)
+        prompt_agent.assert_called_once_with(
+            reviewer_name,
+            "review superseded",
+        )
+        self.assertEqual(validate_agent.call_count, 2)
+
     def test_agent_lookup_failure_identifies_the_role(self) -> None:
         client = HerdrClient(Path.cwd())
         process = mock.Mock(

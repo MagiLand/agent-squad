@@ -465,6 +465,34 @@ class HerdrClient:
             role="Implementer",
         )
 
+    def dispatch_reviewer_notice(
+        self,
+        *,
+        reviewer_name: str,
+        reviewer_kind: AgentKind,
+        review_worktree: Path,
+        prompt: str,
+    ) -> bool:
+        """Prompt the exact live Reviewer, returning false when it is gone."""
+
+        existing = self._get_agent(reviewer_name)
+        if existing is None:
+            return False
+        self._validate_agent(
+            existing,
+            reviewer_name=reviewer_name,
+            reviewer_kind=reviewer_kind,
+            review_worktree=review_worktree,
+        )
+        prompted_agent = self._prompt_agent(reviewer_name, prompt)
+        self._validate_agent(
+            prompted_agent,
+            reviewer_name=reviewer_name,
+            reviewer_kind=reviewer_kind,
+            review_worktree=review_worktree,
+        )
+        return True
+
     def _prompt_agent(
         self,
         agent_name: str,

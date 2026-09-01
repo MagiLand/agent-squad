@@ -141,6 +141,7 @@ def _write_history_round(
         "head_oid": head_oid,
         "git_object_format": object_format,
         "status": status,
+        "supersession": None,
         "review_worktree": f"/review/round-{round_number:03d}",
         "reviewer": {
             "name": (
@@ -1180,6 +1181,7 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
             "head_oid": "a" * 40,
             "git_object_format": "sha1",
             "status": "applied",
+            "supersession": None,
             "review_worktree": "/review",
             "reviewer": {
                 "name": "asq-123456781234-r001-reviewer",
@@ -1221,6 +1223,12 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
     ) -> ReviewRoundRecord:
         value = self._round_dict("approved")
         value["status"] = status.value
+        if status is RoundStatus.SUPERSEDED:
+            value["supersession"] = {
+                "created_at": value["updated_at"],
+                "actor": "codex-main",
+                "cause": "fixture supersession",
+            }
         if not retain_artifacts:
             artifacts = value["artifacts"]
             assert isinstance(artifacts, dict)

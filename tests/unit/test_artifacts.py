@@ -21,6 +21,7 @@ from agent_squad.artifacts import (  # noqa: E402
     ReviewerLocalMarker,
     ReviewResult,
     ReviewRoundRecord,
+    ReviewSupersession,
     ReviewVerdict,
     ResponseDisposition,
     RoundStatus,
@@ -81,6 +82,7 @@ def _request() -> dict[str, object]:
         ],
         "previous_review_path": None,
         "previous_response_path": None,
+        "recovery_round_path": None,
         "resolution_paths": [],
         "review_output_path": "output/review.json",
         "review_markdown_path": "output/review.md",
@@ -148,6 +150,7 @@ def _round_record() -> dict[str, object]:
         "head_oid": "b" * 40,
         "git_object_format": "sha1",
         "status": "reviewing",
+        "supersession": None,
         "review_worktree": "/tmp/review",
         "reviewer": {
             "name": "asq-87654321-r001-reviewer",
@@ -485,6 +488,63 @@ class ReviewRoundRecordTests(unittest.TestCase):
                         label="round record",
                     )
 
+    def test_superseded_round_requires_actor_timestamp_and_cause(self) -> None:
+        data = _round_record()
+        data.update(
+            updated_at="2026-08-25T12:15:00Z",
+            status="superseded",
+            supersession={
+                "created_at": "2026-08-25T12:15:00Z",
+                "actor": "codex-main",
+                "cause": "The requested revision is no longer relevant.",
+            },
+        )
+
+        record = ReviewRoundRecord.from_dict(data, label="round record")
+
+        self.assertEqual(
+            record.supersession,
+            ReviewSupersession(
+                created_at="2026-08-25T12:15:00Z",
+                actor="codex-main",
+                cause="The requested revision is no longer relevant.",
+            ),
+        )
+        self.assertEqual(record.to_dict(), data)
+
+        cases = (
+            (
+                lambda value: value.update(supersession=None),
+                "must record supersession authority",
+            ),
+            (
+                lambda value: value["supersession"].update(cause=" "),
+                "cause must contain non-whitespace text",
+            ),
+            (
+                lambda value: value["supersession"].update(
+                    created_at="2026-08-25T12:14:59Z"
+                ),
+                "timestamp must match updated_at",
+            ),
+            (
+                lambda value: value.update(status="reviewing"),
+                "only a superseded round may record supersession authority",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                changed = copy.deepcopy(data)
+                mutate(changed)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(
+                        changed,
+                        label="round record",
+                    )
+
 
 class ApprovalRecordTests(unittest.TestCase):
     def test_record_binds_all_approval_authority(self) -> None:
@@ -625,6 +685,14 @@ class ReviewRequestTests(unittest.TestCase):
         self.assertEqual(request.to_dict(), _request())
         self.assertEqual(request.round_number, 1)
         self.assertEqual(request.context_files[0].sha256, "e" * 64)
+
+    def test_request_without_recovery_field_remains_compatible(self) -> None:
+        value = _request()
+        value.pop("recovery_round_path")
+
+        request = ReviewRequest.from_dict(value)
+
+        self.assertIsNone(request.recovery_round_path)
 
     def test_first_round_requires_new_revision_and_changed_head(self) -> None:
         cases = (

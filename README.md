@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, recover lost request or result handoffs, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, recover or supersede stuck reviews, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -90,6 +90,20 @@ If a failed `apply-review` left a provisional archive for a result that recovery
 When no valid result is ready, recovery checks the deterministic Reviewer session and, when Herdr supports it, reads recent terminal history before sending anything. It can adopt a request already visible in history, re-prompt the existing Reviewer, or relaunch the deterministic Reviewer in the same review worktree. If optional history diagnostics are unavailable or fail, recovery safely falls back to re-prompting. Every path reuses the run ID, round, request ID, Reviewer name, worktree, and bundle; repeated recovery never allocates a replacement round.
 
 If recovery must remove a malformed or mismatched marker, it first binds that result ID to its original digest in implementation-owned round storage. A copy in the review bundle gives `review-submit` early feedback, but implementation-side status, recovery, and application use only the authoritative binding; a missing, malformed, mismatched, or non-regular advisory copy cannot veto them. Recovery excludes that entry from invalid-result evidence traversal and safely replaces an invalid advisory directory from authority before removing the marker. Corrected content must use a new result ID.
+
+## Supersede a stuck review
+
+When the active review is no longer relevant, invalidate that exact round from the implementation worktree:
+
+```bash
+agent-squad supersede --reason "The request is obsolete."
+```
+
+Supersession records the Implementer actor, cause, and timestamp in authoritative history, marks only the active reviewing round `superseded`, returns the run to `implementing`, and does not consume review budget. The Reviewer notice is best effort; a missing or unreachable Reviewer does not undo the committed transition.
+
+Cleanup holds the Reviewer submission lock while it probes for marker-confirmed output. Any late result is copied to the round's `diagnostics/late-results/<result-id>/` directory without being applied, and the complete review bundle is archived and verified before removal. Agent Squad deletes only the review bundle and configured generated paths, then uses normal non-forced Git worktree removal. If unrelated tracked, untracked, or ignored files remain, it preserves the worktree and reports why.
+
+A later `new_revision` submission creates a distinct round and Reviewer. It may reuse the superseded round's head because that round produced no applied result. If an older applied `changes_requested` result exists, its complete response is still required and the submitted head must still differ from that most recent applied reviewed head.
 
 ## Apply a review, correct findings, and complete
 

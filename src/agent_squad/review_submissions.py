@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -14,11 +15,15 @@ from .artifacts import (
     ArtifactValidationError,
     BundleArtifact,
     DeveloperResolution,
+    RECOVERY_ROUND_BUNDLE_PATH,
     ReviewRequest,
     ReviewResponse,
+    ReviewRoundRecord,
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
+    RoundStatus,
+    SubmissionMode,
     deterministic_reviewer_name,
     validate_followup_submission_head,
     validate_review_response,
@@ -339,8 +344,14 @@ def load_marker_confirmed_review(
     start: Path,
     *,
     authoritative_results_root: Path | None = None,
+    lock_held: bool = False,
 ) -> MarkerConfirmedReview:
-    """Independently validate one submitted result without notifying anyone."""
+    """Independently validate one submitted result without notifying anyone.
+
+    ``lock_held`` is reserved for implementation-side cleanup that already
+    owns the Reviewer submission lock and must keep it through resource
+    removal.
+    """
 
     worktree = discover_git_worktree(start)
     bundle_root = worktree.root / REVIEW_DIRECTORY_NAME
@@ -353,7 +364,8 @@ def load_marker_confirmed_review(
     _read_regular_file(lock_path, "review submission lock")
 
     try:
-        with exclusive_file_lock(lock_path):
+        lock = nullcontext() if lock_held else exclusive_file_lock(lock_path)
+        with lock:
             _require_normal_directory(bundle_root, "review bundle")
             _require_normal_directory(input_root, "review bundle input")
             _require_normal_directory(output_root, "review bundle output")
@@ -845,6 +857,92 @@ def _validate_bundle_inputs(
             raise ReviewSubmissionError(
                 "previous review round must precede the requested round"
             )
+
+    recovery_round: ReviewRoundRecord | None = None
+    if request.recovery_round_path is not None:
+        recovery_path = PurePosixPath(request.recovery_round_path)
+        expected_paths.add(recovery_path)
+        recovery_value, _ = _load_json_file(
+            bundle_root.joinpath(*recovery_path.parts),
+            "recovery round authority",
+        )
+        try:
+            recovery_round = ReviewRoundRecord.from_dict(
+                recovery_value,
+                label="recovery round authority",
+            )
+        except ArtifactValidationError as error:
+            raise ReviewSubmissionError(
+                f"recovery round authority failed validation: {error}"
+            ) from error
+        comparisons = (
+            (recovery_round.run_id, request.run_id, "run ID"),
+            (
+                recovery_round.round_number,
+                request.round_number - 1,
+                "round number",
+            ),
+            (recovery_round.base_oid, request.base_oid, "base OID"),
+            (
+                recovery_round.object_format,
+                request.object_format,
+                "object format",
+            ),
+            (
+                recovery_round.reviewer_name,
+                deterministic_reviewer_name(
+                    request.run_id,
+                    request.round_number - 1,
+                ),
+                "Reviewer name",
+            ),
+        )
+        for actual, expected, label in comparisons:
+            if actual != expected:
+                raise ReviewSubmissionError(
+                    f"recovery round authority {label} does not match the "
+                    "request"
+                )
+        if recovery_round.status not in {
+            RoundStatus.SUPERSEDED,
+            RoundStatus.STALE,
+            RoundStatus.INVALID,
+        }:
+            raise ReviewSubmissionError(
+                "recovery round authority must record a superseded, stale, "
+                "or invalid round"
+            )
+
+    recovering = recovery_round is not None
+    if recovering:
+        if request.mode is not SubmissionMode.NEW_REVISION:
+            raise ReviewSubmissionError(
+                "recovery after a non-applied round must use new_revision"
+            )
+        if previous_review is None:
+            if request.head_oid == request.base_oid:
+                raise ReviewSubmissionError(
+                    "recovery without an applied prior review requires a "
+                    "candidate whose head differs from the fixed base"
+                )
+        else:
+            if (
+                recovery_round is None
+                or previous_review.round_number >= recovery_round.round_number
+            ):
+                raise ReviewSubmissionError(
+                    "the applied previous review must precede the recovery "
+                    "round"
+                )
+            try:
+                validate_followup_submission_head(
+                    request.mode,
+                    head_oid=request.head_oid,
+                    previous_reviewed_head_oid=previous_review.head_oid,
+                )
+            except ArtifactValidationError as error:
+                raise ReviewSubmissionError(str(error)) from error
+    elif previous_review is not None:
         try:
             validate_followup_submission_head(
                 request.mode,
@@ -853,10 +951,17 @@ def _validate_bundle_inputs(
             )
         except ArtifactValidationError as error:
             raise ReviewSubmissionError(str(error)) from error
-
-    if (
+    elif (
         request.round_number > 1
         and request.previous_response_path is None
+    ):
+        raise ReviewSubmissionError(
+            "a correction-round request must reference the previous review "
+            "and response"
+        )
+
+    if previous_review is not None and (
+        request.previous_response_path is None
     ):
         raise ReviewSubmissionError(
             "a correction-round request must reference the previous review "

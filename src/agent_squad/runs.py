@@ -24,6 +24,7 @@ from .artifacts import (
     HandoffStatus,
     PREVIOUS_RESPONSE_BUNDLE_PATH,
     PREVIOUS_REVIEW_BUNDLE_PATH,
+    RECOVERY_ROUND_BUNDLE_PATH,
     REVIEW_MARKDOWN_FILE_NAME,
     REVIEW_MARKER_FILE_NAME,
     ReviewRequest,
@@ -34,6 +35,7 @@ from .artifacts import (
     ROUND_RESPONSE_FILE_NAME,
     ReviewerLocalMarker,
     RoundStatus,
+    SubmissionMode,
     validate_followup_submission_head,
 )
 from .initialization import (
@@ -115,6 +117,11 @@ class RunPhase(StrEnum):
 TERMINAL_PHASES = {RunPhase.COMPLETED, RunPhase.CANCELLED}
 CLOSED_ROUND_STATUSES = {
     RoundStatus.APPLIED,
+    RoundStatus.SUPERSEDED,
+    RoundStatus.STALE,
+    RoundStatus.INVALID,
+}
+RECOVERY_ROUND_STATUSES = {
     RoundStatus.SUPERSEDED,
     RoundStatus.STALE,
     RoundStatus.INVALID,
@@ -1584,49 +1591,105 @@ def _validate_active_review_artifacts(
         raise RunStateError(
             "active round bundle-input manifest does not match the request"
         )
-    expected_additional_paths = tuple(
-        path
-        for path in (
-            request.previous_review_path,
-            request.previous_response_path,
-        )
-        if path is not None
-    )
-    additional_inputs = bundle_inputs[len(base_bundle_inputs):]
-    additional_paths = tuple(item.path for item in additional_inputs)
-    if additional_paths != expected_additional_paths:
-        raise RunStateError(
-            "active round prior-artifact manifest does not match the request"
-        )
+    previous: AppliedReviewAuthority | None = None
+    recovering = False
+    preceding_round_directory: Path | None = None
     if current_round > 1:
-        previous = latest_applied_review_before(
+        preceding_round_directory, preceding_round = (
+            _load_historical_round_record(
+                run_directory=run_directory,
+                run_id=run_id,
+                round_number=current_round - 1,
+                base_oid=record.base_oid,
+                object_format=record.object_format,
+            )
+        )
+        if preceding_round.status not in CLOSED_ROUND_STATUSES:
+            raise RunStateError(
+                "a new review request must follow a closed round"
+            )
+        recovering = preceding_round.status in RECOVERY_ROUND_STATUSES
+        previous = find_latest_applied_review_before(
             run_directory=run_directory,
             run_id=run_id,
             current_round=current_round,
             base_oid=record.base_oid,
             object_format=record.object_format,
         )
+        if previous is None:
+            if not recovering:
+                raise RunStateError(
+                    "a correction-round request has no previous applied "
+                    "review"
+                )
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise RunStateError(
+                    "recovery after a non-applied round must use "
+                    "new_revision"
+                )
+        else:
+            if (
+                previous.round_record.verdict
+                is not ReviewVerdict.CHANGES_REQUESTED
+            ):
+                raise RunStateError(
+                    "a correction-round request must follow the most recent "
+                    "applied changes_requested result"
+                )
+            if recovering:
+                if request.mode is not SubmissionMode.NEW_REVISION:
+                    raise RunStateError(
+                        "recovery after a non-applied round must use "
+                        "new_revision"
+                    )
+            try:
+                validate_followup_submission_head(
+                    request.mode,
+                    head_oid=request.head_oid,
+                    previous_reviewed_head_oid=previous.review.head_oid,
+                )
+            except ArtifactValidationError as error:
+                raise RunStateError(str(error)) from error
+
+    expected_additional_paths: tuple[str, ...] = ()
+    if previous is not None:
+        expected_additional_paths += (
+            PREVIOUS_REVIEW_BUNDLE_PATH,
+            PREVIOUS_RESPONSE_BUNDLE_PATH,
+        )
+    if recovering:
+        expected_additional_paths += (RECOVERY_ROUND_BUNDLE_PATH,)
+    expected_recovery_path = (
+        RECOVERY_ROUND_BUNDLE_PATH if recovering else None
+    )
+    if request.recovery_round_path != expected_recovery_path:
+        raise RunStateError(
+            "active review request recovery authority does not match "
+            "round history"
+        )
+    additional_inputs = bundle_inputs[len(base_bundle_inputs):]
+    additional_paths = tuple(item.path for item in additional_inputs)
+    if additional_paths != expected_additional_paths:
+        raise RunStateError(
+            "active round prior-artifact manifest does not match the request"
+        )
+    additional_by_path = {
+        artifact.path: artifact for artifact in additional_inputs
+    }
+    if recovering:
+        if preceding_round_directory is None:
+            raise RunStateError(
+                "recovery request lost its preceding round authority"
+            )
+        recovery_artifact = additional_by_path[RECOVERY_ROUND_BUNDLE_PATH]
+        _verify_captured_digest(
+            preceding_round_directory / "round.json",
+            recovery_artifact.sha256,
+            "recovery round authority",
+        )
+    if previous is not None:
         previous_round_directory = previous.round_directory
         previous_round_record = previous.round_record
-        if (
-            previous_round_record.verdict
-            is not ReviewVerdict.CHANGES_REQUESTED
-        ):
-            raise RunStateError(
-                "a correction-round request must follow the most recent "
-                "applied changes_requested result"
-            )
-        try:
-            validate_followup_submission_head(
-                request.mode,
-                head_oid=request.head_oid,
-                previous_reviewed_head_oid=previous.review.head_oid,
-            )
-        except ArtifactValidationError as error:
-            raise RunStateError(str(error)) from error
-        additional_by_path = {
-            artifact.path: artifact for artifact in additional_inputs
-        }
         previous_review_artifact = previous_round_record.review_result
         if previous_review_artifact is None or (
             previous_review_artifact.sha256
@@ -1705,6 +1768,30 @@ def latest_applied_review_before(
 ) -> AppliedReviewAuthority:
     """Return the most recent validated applied review before a round."""
 
+    authority = find_latest_applied_review_before(
+        run_directory=run_directory,
+        run_id=run_id,
+        current_round=current_round,
+        base_oid=base_oid,
+        object_format=object_format,
+    )
+    if authority is not None:
+        return authority
+    raise RunStateError(
+        "a correction-round request has no previous applied review"
+    )
+
+
+def find_latest_applied_review_before(
+    *,
+    run_directory: Path,
+    run_id: str,
+    current_round: int,
+    base_oid: str,
+    object_format: str,
+) -> AppliedReviewAuthority | None:
+    """Return the latest applied review, or none after only closed failures."""
+
     for round_number in range(current_round - 1, 0, -1):
         round_directory, round_record = _load_historical_round_record(
             run_directory=run_directory,
@@ -1719,9 +1806,7 @@ def latest_applied_review_before(
                 round_record=round_record,
                 round_number=round_number,
             )
-    raise RunStateError(
-        "a correction-round request has no previous applied review"
-    )
+    return None
 
 
 def find_recorded_review_round(
@@ -2257,18 +2342,11 @@ def _assert_request_matches_active_round(
     if current_round == 1 and (
         request.previous_review_path is not None
         or request.previous_response_path is not None
+        or request.recovery_round_path is not None
     ):
         raise RunStateError(
             "the first active review request cannot reference previous "
             "review artifacts"
-        )
-    if current_round > 1 and (
-        request.previous_review_path != PREVIOUS_REVIEW_BUNDLE_PATH
-        or request.previous_response_path != PREVIOUS_RESPONSE_BUNDLE_PATH
-    ):
-        raise RunStateError(
-            "a correction-round request must reference the previous review "
-            "and response"
         )
     if request.resolution_paths:
         raise RunStateError(
