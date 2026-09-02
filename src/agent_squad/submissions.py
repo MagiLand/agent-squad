@@ -452,7 +452,7 @@ def _prepare_submission_locked(
         raise SubmissionError(
             f"cannot derive deterministic Reviewer name: {error}"
         ) from error
-    review_worktree = _review_worktree_path(
+    review_worktree = review_worktree_path(
         repository,
         repository_id=active.repository.repository_id,
         run_id=active.run_id,
@@ -1270,7 +1270,7 @@ def _context_bundle_artifacts(
     return tuple(artifacts)
 
 
-def _review_worktree_path(
+def review_worktree_path(
     repository: InitializedRepository,
     *,
     repository_id: str,

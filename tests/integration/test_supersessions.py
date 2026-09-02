@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -16,8 +17,11 @@ from tests.integration.test_review_applications import (
     _write_rejected_response,
 )
 from tests.integration.test_review_submissions import (
+    _BUNDLE_DAMAGE_CASES,
+    _damage_reviewer_worktree,
     _PreparedRound,
     _prepare_round,
+    _REVIEW_WORKTREE_DAMAGE_CASES,
     _write_review,
 )
 
@@ -292,6 +296,240 @@ class SupersedeReviewTests(unittest.TestCase):
             self.assertEqual(state["phase"], "implementing")
             self.assertEqual(round_record["status"], "superseded")
             self.assertFalse(prepared.review_worktree.exists())
+
+    def test_status_and_supersede_survive_reviewer_worktree_damage(
+        self,
+    ) -> None:
+        for damage in _REVIEW_WORKTREE_DAMAGE_CASES:
+            with self.subTest(damage=damage):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    _damage_reviewer_worktree(prepared, damage)
+
+                    status = run_cli(
+                        prepared.repository,
+                        "status",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(status.returncode, 0, status.stderr)
+                    self.assertIn("Phase: reviewing", status.stdout)
+                    self.assertIn(
+                        "Next action: wait for the Reviewer result",
+                        status.stdout,
+                    )
+                    if damage in _BUNDLE_DAMAGE_CASES:
+                        self.assertIn(
+                            "Review worktree available: yes",
+                            status.stdout,
+                        )
+                        self.assertIn(
+                            "Review bundle intact: no",
+                            status.stdout,
+                        )
+                        self.assertIn(
+                            "Review bundle warning:",
+                            status.stdout,
+                        )
+                    elif damage == "delete worktree":
+                        self.assertIn(
+                            "Review worktree available: no",
+                            status.stdout,
+                        )
+                    else:
+                        self.assertIn(
+                            "Review bundle intact: yes",
+                            status.stdout,
+                        )
+
+                    superseded = run_cli(
+                        prepared.repository,
+                        "supersede",
+                        "--reason",
+                        "The Reviewer worktree is no longer usable.",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(
+                        superseded.returncode,
+                        0,
+                        superseded.stderr,
+                    )
+                    state, round_directory, round_record = (
+                        _state_and_round(prepared.repository)
+                    )
+                    self.assertEqual(state["phase"], "implementing")
+                    self.assertEqual(round_record["status"], "superseded")
+                    archived = (round_directory / "bundle").is_dir()
+                    if damage == "delete worktree":
+                        worktrees = run(
+                            ["git", "worktree", "list", "--porcelain"],
+                            cwd=prepared.repository,
+                        )
+                        self.assertNotIn(
+                            str(prepared.review_worktree),
+                            worktrees.stdout,
+                        )
+                        self.assertFalse(archived)
+                        self.assertNotIn(
+                            "retained review worktree",
+                            superseded.stderr,
+                        )
+                    else:
+                        self.assertTrue(prepared.review_worktree.is_dir())
+                        self.assertIn(
+                            f"retained review worktree "
+                            f"{prepared.review_worktree}",
+                            superseded.stderr,
+                        )
+                        self.assertEqual(
+                            archived,
+                            damage == "untracked scratch file",
+                        )
+
+    def test_missing_worktree_registration_refuses_foreign_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            shutil.rmtree(prepared.review_worktree)
+            repository = review_applications.load_initialized_repository(
+                prepared.repository
+            )
+            active = runs.inspect_status_locked(
+                prepared.repository,
+                validate_live_review_bundle=False,
+            ).active_run
+            assert active is not None
+            foreign = prepared.review_worktree.with_name("round-002")
+
+            warnings = (
+                review_applications
+                ._remove_missing_review_worktree_registration(
+                    repository,
+                    active=active,
+                    review_worktree=foreign,
+                )
+            )
+
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(
+                "does not match its deterministic path",
+                warnings[0],
+            )
+            worktrees = run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=prepared.repository,
+            )
+            self.assertIn(str(prepared.review_worktree), worktrees.stdout)
+
+    def test_missing_worktree_registration_reports_resolution_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared = _prepare_round(Path(temporary_directory))
+            shutil.rmtree(prepared.review_worktree)
+            repository = review_applications.load_initialized_repository(
+                prepared.repository
+            )
+            active = runs.inspect_status_locked(
+                prepared.repository,
+                validate_live_review_bundle=False,
+            ).active_run
+            assert active is not None
+            path_type = type(prepared.review_worktree)
+            real_resolve = path_type.resolve
+
+            def fail_review_path(
+                path: Path,
+                strict: bool = False,
+            ) -> Path:
+                if path == prepared.review_worktree:
+                    raise OSError("injected path-resolution failure")
+                return real_resolve(path, strict=strict)
+
+            with mock.patch.object(
+                path_type,
+                "resolve",
+                autospec=True,
+                side_effect=fail_review_path,
+            ):
+                warnings = (
+                    review_applications
+                    ._remove_missing_review_worktree_registration(
+                        repository,
+                        active=active,
+                        review_worktree=prepared.review_worktree,
+                    )
+                )
+
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(
+                "could not validate missing review worktree registration",
+                warnings[0],
+            )
+            self.assertIn(
+                "injected path-resolution failure",
+                warnings[0],
+            )
+
+    def test_missing_worktree_registration_failure_is_nonfatal(self) -> None:
+        for failure in ("returned error", "raised error"):
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    shutil.rmtree(prepared.review_worktree)
+                    real_run_git = review_applications.run_git
+
+                    def fail_registration_removal(
+                        start: Path,
+                        *arguments: str,
+                    ) -> object:
+                        if arguments[:2] == ("worktree", "remove"):
+                            if failure == "raised error":
+                                raise review_applications.AgentSquadError(
+                                    "injected stale-registration failure"
+                                )
+                            return mock.Mock(
+                                returncode=1,
+                                stdout="",
+                                stderr=(
+                                    "injected stale-registration failure"
+                                ),
+                            )
+                        return real_run_git(start, *arguments)
+
+                    with mock.patch.object(
+                        review_applications,
+                        "run_git",
+                        side_effect=fail_registration_removal,
+                    ):
+                        result = review_applications.supersede_review(
+                            prepared.repository,
+                            reason=(
+                                "The missing Reviewer worktree is obsolete."
+                            ),
+                            herdr_client=mock.Mock(),
+                        )
+
+                    state, _, round_record = _state_and_round(
+                        prepared.repository
+                    )
+                    self.assertEqual(state["phase"], "implementing")
+                    self.assertEqual(
+                        round_record["status"],
+                        "superseded",
+                    )
+                    self.assertEqual(len(result.cleanup_warnings), 1)
+                    self.assertIn(
+                        "could not remove missing review worktree "
+                        "registration",
+                        result.cleanup_warnings[0],
+                    )
+                    self.assertIn(
+                        "injected stale-registration failure",
+                        result.cleanup_warnings[0],
+                    )
 
     def test_command_records_history_notifies_and_allows_same_head_recovery(
         self,

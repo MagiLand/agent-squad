@@ -20,6 +20,8 @@ from tests.integration.test_submissions import (
     _start_run,
 )
 from tests.integration.test_review_submissions import (
+    _BUNDLE_DAMAGE_CASES,
+    _damage_reviewer_worktree,
     _prepare_round,
     _write_review,
 )
@@ -227,6 +229,32 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 "review_request_recovery_failed",
             )
             self.assertIsNone(events[-1]["action"])
+
+    def test_retry_handoff_survives_reviewer_bundle_damage(self) -> None:
+        for damage in _BUNDLE_DAMAGE_CASES:
+            with self.subTest(damage=damage):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    _damage_reviewer_worktree(prepared, damage)
+
+                    recovered = run_cli(
+                        prepared.repository,
+                        "retry-handoff",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(
+                        recovered.returncode,
+                        0,
+                        recovered.stderr,
+                    )
+                    self.assertIn("Request handoff: sent", recovered.stdout)
+                    state, run_directory = _artifacts(prepared.repository)
+                    self.assertEqual(state["phase"], "reviewing")
+                    self.assertEqual(state["current_round"], 1)
+                    self.assertEqual(state["handoff"]["status"], "sent")
+                    _assert_single_round(self, run_directory)
 
     def test_lost_result_notification_uses_marker_without_herdr_probe(
         self,

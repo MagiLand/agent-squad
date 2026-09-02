@@ -42,6 +42,41 @@ class _PreparedRound:
     request: dict[str, object]
 
 
+_BUNDLE_DAMAGE_CASES = (
+    "tamper bundle input",
+    "delete bundle input",
+    "delete bundle",
+)
+_REVIEW_WORKTREE_DAMAGE_CASES = (
+    *_BUNDLE_DAMAGE_CASES,
+    "delete worktree",
+    "untracked scratch file",
+)
+
+
+def _damage_reviewer_worktree(
+    prepared: _PreparedRound,
+    damage: str,
+) -> None:
+    if damage == "tamper bundle input":
+        target = prepared.bundle / "input/task.md"
+        target.chmod(0o600)
+        target.write_text("tampered\n", encoding="utf-8")
+    elif damage == "delete bundle input":
+        (prepared.bundle / "input/task.md").unlink()
+    elif damage == "delete bundle":
+        shutil.rmtree(prepared.bundle)
+    elif damage == "delete worktree":
+        shutil.rmtree(prepared.review_worktree)
+    elif damage == "untracked scratch file":
+        (prepared.review_worktree / "scratch.txt").write_text(
+            "reviewer scratch\n",
+            encoding="utf-8",
+        )
+    else:
+        raise AssertionError(f"unknown Reviewer-worktree damage: {damage}")
+
+
 def _prepare_round(
     root: Path,
     *,
