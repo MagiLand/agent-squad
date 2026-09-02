@@ -3083,6 +3083,106 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 (prepared.review_worktree / "late-untracked.txt").is_file()
             )
 
+    def test_applied_cleanup_reports_raised_git_failures_as_warnings(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "status",
+                "could not verify review worktree cleanup",
+            ),
+            (
+                "remove",
+                "could not remove review worktree",
+            ),
+        )
+        for operation, expected in cases:
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_review(
+                        root,
+                        verdict="changes_requested",
+                    )
+                    state_path = (
+                        prepared.repository / ".agent-squad/state.json"
+                    )
+                    real_run_git = review_applications.run_git
+
+                    def fail_applied_cleanup(
+                        start: Path,
+                        *arguments: str,
+                    ) -> object:
+                        state = json.loads(
+                            state_path.read_text(encoding="utf-8")
+                        )
+                        matches = state["phase"] == "implementing" and (
+                            (
+                                operation == "status"
+                                and start == prepared.review_worktree
+                                and arguments
+                                == (
+                                    "status",
+                                    "--porcelain=v1",
+                                    "-z",
+                                    "--untracked-files=all",
+                                    "--ignore-submodules=none",
+                                )
+                            )
+                            or (
+                                operation == "remove"
+                                and arguments
+                                == (
+                                    "worktree",
+                                    "remove",
+                                    str(prepared.review_worktree),
+                                )
+                            )
+                        )
+                        if matches:
+                            raise review_applications.AgentSquadError(
+                                f"injected {operation} failure"
+                            )
+                        return real_run_git(start, *arguments)
+
+                    with mock.patch.object(
+                        review_applications,
+                        "run_git",
+                        side_effect=fail_applied_cleanup,
+                    ):
+                        applied = review_applications.apply_review(
+                            prepared.repository,
+                            result_id=str(review["result_id"]),
+                        )
+
+                    state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    run_id = str(state["active_run_id"])
+                    round_path = (
+                        prepared.repository
+                        / ".agent-squad/runs"
+                        / run_id
+                        / "rounds/001/round.json"
+                    )
+                    round_record = json.loads(
+                        round_path.read_text(encoding="utf-8")
+                    )
+
+                    self.assertEqual(len(applied.cleanup_warnings), 1)
+                    self.assertIn(expected, applied.cleanup_warnings[0])
+                    self.assertIn(
+                        f"injected {operation} failure",
+                        applied.cleanup_warnings[0],
+                    )
+                    self.assertEqual(state["phase"], "implementing")
+                    self.assertEqual(
+                        state["active_round"]["status"],
+                        "applied",
+                    )
+                    self.assertEqual(round_record["status"], "applied")
+                    self.assertTrue(prepared.review_worktree.is_dir())
+
     def test_completion_accepts_configured_output_without_deleting_it(
         self,
     ) -> None:

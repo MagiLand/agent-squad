@@ -300,6 +300,16 @@ class SupersedeReviewTests(unittest.TestCase):
     def test_status_and_supersede_survive_reviewer_worktree_damage(
         self,
     ) -> None:
+        retention_reasons = {
+            "tamper bundle input": (
+                "superseded bundle input digest changed"
+            ),
+            "delete bundle input": (
+                "cannot validate superseded bundle input"
+            ),
+            "delete bundle": "cannot inspect review bundle",
+            "untracked scratch file": "files remain after scoped cleanup",
+        }
         for damage in _REVIEW_WORKTREE_DAMAGE_CASES:
             with self.subTest(damage=damage):
                 with tempfile.TemporaryDirectory() as temporary_directory:
@@ -382,6 +392,10 @@ class SupersedeReviewTests(unittest.TestCase):
                         self.assertIn(
                             f"retained review worktree "
                             f"{prepared.review_worktree}",
+                            superseded.stderr,
+                        )
+                        self.assertIn(
+                            retention_reasons[damage],
                             superseded.stderr,
                         )
                         self.assertEqual(

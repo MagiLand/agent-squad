@@ -2237,14 +2237,20 @@ def _remove_clean_review_worktree(
     )
     if generated_warnings:
         return generated_warnings
-    cleanliness = run_git(
-        review_worktree,
-        "status",
-        "--porcelain=v1",
-        "-z",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    )
+    try:
+        cleanliness = run_git(
+            review_worktree,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        )
+    except AgentSquadError as error:
+        return (
+            f"{operational_failure_prefix}could not verify review worktree "
+            f"cleanup for {review_worktree}: {error}",
+        )
     if cleanliness.returncode != 0:
         detail = cleanliness.stderr.strip() or "unknown Git error"
         return (
@@ -2258,15 +2264,21 @@ def _remove_clean_review_worktree(
             "remain after scoped cleanup",
         )
     if inspect_ignored:
-        ignored = run_git(
-            review_worktree,
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-        )
+        try:
+            ignored = run_git(
+                review_worktree,
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+                "--",
+            )
+        except AgentSquadError as error:
+            return (
+                f"{operational_failure_prefix}could not inspect ignored "
+                f"review-worktree files: {error}",
+            )
         if ignored.returncode != 0:
             detail = ignored.stderr.strip() or "unknown Git error"
             return (
