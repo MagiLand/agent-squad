@@ -483,6 +483,93 @@ class SupersedeReviewTests(unittest.TestCase):
                 review_submitted.stderr,
             )
 
+    def test_recovery_without_applied_review_rejects_reconsideration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            superseded = run_cli(
+                prepared.repository,
+                "supersede",
+                "--reason",
+                "The initial review is obsolete.",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(superseded.returncode, 0, superseded.stderr)
+            report = root / "recovery-report.md"
+            report.write_text(
+                "# Recovery Report\n\nRequest reconsideration.\n",
+                encoding="utf-8",
+            )
+
+            rejected = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn(
+                "recovery without an applied prior review must use "
+                "--mode new_revision",
+                rejected.stderr,
+            )
+
+    def test_recovery_without_applied_review_rejects_base_head(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root)
+            superseded = run_cli(
+                prepared.repository,
+                "supersede",
+                "--reason",
+                "The initial review is obsolete.",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(superseded.returncode, 0, superseded.stderr)
+            run(
+                [
+                    "git",
+                    "reset",
+                    "--hard",
+                    str(prepared.request["base_oid"]),
+                ],
+                cwd=prepared.repository,
+            )
+            report = root / "recovery-report.md"
+            report.write_text(
+                "# Recovery Report\n\nResubmit the base revision.\n",
+                encoding="utf-8",
+            )
+
+            rejected = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(rejected.returncode, 1)
+            self.assertIn(
+                "recovery without an applied prior review requires a "
+                "committed candidate whose HEAD differs from the fixed base",
+                rejected.stderr,
+            )
+
     def test_same_head_recovery_after_superseded_reconsideration(
         self,
     ) -> None:

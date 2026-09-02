@@ -914,11 +914,6 @@ def _validate_bundle_inputs(
     recovering = recovery_round is not None
     if recovering:
         if previous_review is None:
-            if request.mode is not SubmissionMode.NEW_REVISION:
-                raise ReviewSubmissionError(
-                    "recovery without an applied prior review must use "
-                    "new_revision"
-                )
             if request.head_oid == request.base_oid:
                 raise ReviewSubmissionError(
                     "recovery without an applied prior review requires a "

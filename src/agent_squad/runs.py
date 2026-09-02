@@ -1621,7 +1621,7 @@ def _validate_active_review_artifacts(
                 )
             if request.mode is not SubmissionMode.NEW_REVISION:
                 raise RunStateError(
-                    "recovery after a non-applied round must use "
+                    "recovery without an applied prior review must use "
                     "new_revision"
                 )
         else:
@@ -1634,9 +1634,7 @@ def _validate_active_review_artifacts(
                     "applied changes_requested result"
                 )
             recovery_head_oid = (
-                preceding_round.head_oid
-                if recovering and preceding_round is not None
-                else None
+                preceding_round.head_oid if recovering else None
             )
             try:
                 validate_followup_submission_head(
