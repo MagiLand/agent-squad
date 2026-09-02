@@ -58,7 +58,7 @@ Inspect idle or active state from anywhere in the initialized worktree:
 agent-squad status
 ```
 
-Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action. If a disposable review worktree is absent, status still reports the authoritative run and marks that worktree unavailable; present bundle paths and contents remain subject to strict validation.
+Status validates the captured task and context digests before reporting the active phase, local Git identities, selected roles, fixed base, review budget, and next action. If a disposable review worktree is absent, status still reports the authoritative run and marks that worktree unavailable. If the worktree is present but the Reviewer altered or removed a bundle input, status still reports the run and prints `Review bundle intact: no` with the reason; commands that consume review content, such as `apply-review`, keep validating the bundle strictly.
 
 ## Submit the first candidate
 
@@ -101,7 +101,7 @@ agent-squad supersede --reason "The request is obsolete."
 
 Supersession records the Implementer actor, cause, and timestamp in authoritative history, marks only the active reviewing round `superseded`, returns the run to `implementing`, and does not consume review budget. The Reviewer notice is best effort; a missing or unreachable Reviewer does not undo the committed transition.
 
-Cleanup holds the Reviewer submission lock while it probes for marker-confirmed output. Any late result is copied to the round's `diagnostics/late-results/<result-id>/` directory without being applied, and the complete review bundle is archived and verified before removal. Agent Squad deletes only the review bundle and configured generated paths, then uses normal non-forced Git worktree removal. If unrelated tracked, untracked, or ignored files remain, it preserves the worktree and reports why.
+Cleanup holds the Reviewer submission lock while it probes for marker-confirmed output. Any late result is copied to the round's `diagnostics/late-results/<result-id>/` directory without being applied, and the complete review bundle is archived and verified before removal. Agent Squad deletes only the review bundle and configured generated paths, then uses normal non-forced Git worktree removal. If a bundle input was altered or removed, or if unrelated tracked, untracked, or ignored files remain, it preserves the worktree without archiving the damaged bundle and reports why. A missing review-worktree directory is unregistered through an exact-path Git operation.
 
 A later `new_revision` submission creates a distinct round and Reviewer. It may reuse the immediately preceding superseded round's head because that round produced no applied result, even when an older applied `changes_requested` result reviewed the same head. The older applied result's complete response is still required. A different submitted head remains subject to the normal rule that it must differ from the most recent applied reviewed head. Reconsideration remains available when recovery returns to the most recent applied reviewed head. Any response submitted at that unchanged applied head uses reconsideration semantics, so a `fixed` disposition still requires a different committed revision.
 

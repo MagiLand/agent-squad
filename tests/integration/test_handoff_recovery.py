@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +20,8 @@ from tests.integration.test_submissions import (
     _start_run,
 )
 from tests.integration.test_review_submissions import (
+    _BUNDLE_DAMAGE_CASES,
+    _damage_reviewer_worktree,
     _prepare_round,
     _write_review,
 )
@@ -230,23 +231,11 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             self.assertIsNone(events[-1]["action"])
 
     def test_retry_handoff_survives_reviewer_bundle_damage(self) -> None:
-        damage_cases = (
-            "tamper bundle input",
-            "delete bundle input",
-            "delete bundle",
-        )
-        for damage in damage_cases:
+        for damage in _BUNDLE_DAMAGE_CASES:
             with self.subTest(damage=damage):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     prepared = _prepare_round(Path(temporary_directory))
-                    task_path = prepared.bundle / "input/task.md"
-                    if damage == "tamper bundle input":
-                        task_path.chmod(0o600)
-                        task_path.write_text("tampered\n", encoding="utf-8")
-                    elif damage == "delete bundle input":
-                        task_path.unlink()
-                    else:
-                        shutil.rmtree(prepared.bundle)
+                    _damage_reviewer_worktree(prepared, damage)
 
                     recovered = run_cli(
                         prepared.repository,

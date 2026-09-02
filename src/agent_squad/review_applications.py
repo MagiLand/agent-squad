@@ -60,6 +60,7 @@ from .storage import (
     read_regular_tree,
     utc_timestamp,
 )
+from .submissions import review_worktree_path
 
 
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
@@ -1968,25 +1969,42 @@ def _remove_missing_review_worktree_registration(
 
     try:
         resolved = review_worktree.resolve(strict=False)
-        review_root = repository.configuration.review_worktree_root.resolve(
-            strict=False
+        expected = review_worktree_path(
+            repository,
+            repository_id=active.repository.repository_id,
+            run_id=active.run_id,
+            round_number=active.current_round,
         )
-    except (OSError, RuntimeError) as error:
+    except (AgentSquadError, OSError, RuntimeError) as error:
         return (
             "could not validate missing review worktree registration for "
             f"{review_worktree}: {error}",
         )
-    expected = (
-        review_root
-        / active.repository.repository_id
-        / active.run_id
-        / f"round-{active.current_round:03d}"
-    )
     if resolved != expected:
         return (
             "refused to remove missing review worktree registration because "
             f"{review_worktree} does not match its deterministic path",
         )
+    return _remove_review_worktree_registration(
+        repository,
+        review_worktree,
+        failure_prefix=(
+            "could not remove missing review worktree registration for "
+            f"{review_worktree}: "
+        ),
+        require_success=True,
+    )
+
+
+def _remove_review_worktree_registration(
+    repository: InitializedRepository,
+    review_worktree: Path,
+    *,
+    failure_prefix: str,
+    require_success: bool,
+) -> tuple[str, ...]:
+    """Remove one exact Git worktree registration and empty owned parents."""
+
     try:
         removed = run_git(
             repository.worktree.root,
@@ -1995,16 +2013,12 @@ def _remove_missing_review_worktree_registration(
             str(review_worktree),
         )
     except AgentSquadError as error:
-        return (
-            "could not remove missing review worktree registration for "
-            f"{review_worktree}: {error}",
-        )
-    if removed.returncode != 0:
+        return (f"{failure_prefix}{error}",)
+    if removed.returncode != 0 and (
+        require_success or os.path.lexists(review_worktree)
+    ):
         detail = removed.stderr.strip() or "unknown Git error"
-        return (
-            "could not remove missing review worktree registration for "
-            f"{review_worktree}: {detail}",
-        )
+        return (f"{failure_prefix}{detail}",)
     _remove_empty_review_parents(
         review_worktree.parent,
         stop=repository.configuration.review_worktree_root,
@@ -2022,19 +2036,16 @@ def _validate_superseded_cleanup_target(
     review_worktree = active_round.review_worktree
     try:
         resolved = review_worktree.resolve(strict=True)
-        review_root = repository.configuration.review_worktree_root.resolve(
-            strict=False
+        expected = review_worktree_path(
+            repository,
+            repository_id=active.repository.repository_id,
+            run_id=active.run_id,
+            round_number=active.current_round,
         )
-    except (OSError, RuntimeError) as error:
+    except (AgentSquadError, OSError, RuntimeError) as error:
         raise ReviewApplicationError(
             f"cannot resolve superseded review-worktree identity: {error}"
         ) from error
-    expected = (
-        review_root
-        / active.repository.repository_id
-        / active.run_id
-        / f"round-{active.current_round:03d}"
-    )
     if resolved != expected:
         raise ReviewApplicationError(
             "superseded review worktree does not match its deterministic path"
@@ -2267,23 +2278,15 @@ def _remove_clean_review_worktree(
                 f"retained review worktree {review_worktree} because "
                 "unconfigured ignored files remain after scoped cleanup",
             )
-    removed = run_git(
-        repository.worktree.root,
-        "worktree",
-        "remove",
-        str(review_worktree),
-    )
-    if removed.returncode != 0 and os.path.lexists(review_worktree):
-        detail = removed.stderr.strip() or "unknown Git error"
-        return (
+    return _remove_review_worktree_registration(
+        repository,
+        review_worktree,
+        failure_prefix=(
             f"{operational_failure_prefix}could not remove review worktree "
-            f"{review_worktree}: {detail}",
-        )
-    _remove_empty_review_parents(
-        review_worktree.parent,
-        stop=repository.configuration.review_worktree_root,
+            f"{review_worktree}: "
+        ),
+        require_success=False,
     )
-    return ()
 
 
 def _remove_generated_path(
