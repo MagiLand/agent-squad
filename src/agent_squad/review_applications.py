@@ -206,7 +206,8 @@ def _supersede_review_locked(
     herdr_client: HerdrClient | None,
 ) -> SupersedeReviewResult:
     status = runs.inspect_status_locked(
-        repository.worktree.invocation_directory
+        repository.worktree.invocation_directory,
+        validate_live_review_bundle=False,
     )
     active = status.active_run
     if active is None:
@@ -1851,7 +1852,11 @@ def _cleanup_superseded_review_resources(
         )
     review_worktree = active_round.review_worktree
     if not os.path.lexists(review_worktree):
-        return None, ()
+        return None, _remove_missing_review_worktree_registration(
+            repository,
+            active=active,
+            review_worktree=review_worktree,
+        )
     bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     output_root = bundle_root / "output"
     late_result_id: str | None = None
@@ -1951,6 +1956,60 @@ def _cleanup_superseded_review_resources(
             f"retained review worktree {review_worktree} because safe "
             f"superseded-round cleanup failed: {error}",
         )
+
+
+def _remove_missing_review_worktree_registration(
+    repository: InitializedRepository,
+    *,
+    active: runs.ActiveRunStatus,
+    review_worktree: Path,
+) -> tuple[str, ...]:
+    """Unregister one exact review worktree whose directory is already gone."""
+
+    try:
+        resolved = review_worktree.resolve(strict=False)
+        review_root = repository.configuration.review_worktree_root.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        return (
+            "could not validate missing review worktree registration for "
+            f"{review_worktree}: {error}",
+        )
+    expected = (
+        review_root
+        / active.repository.repository_id
+        / active.run_id
+        / f"round-{active.current_round:03d}"
+    )
+    if resolved != expected:
+        return (
+            "refused to remove missing review worktree registration because "
+            f"{review_worktree} does not match its deterministic path",
+        )
+    try:
+        removed = run_git(
+            repository.worktree.root,
+            "worktree",
+            "remove",
+            str(review_worktree),
+        )
+    except AgentSquadError as error:
+        return (
+            "could not remove missing review worktree registration for "
+            f"{review_worktree}: {error}",
+        )
+    if removed.returncode != 0:
+        detail = removed.stderr.strip() or "unknown Git error"
+        return (
+            "could not remove missing review worktree registration for "
+            f"{review_worktree}: {detail}",
+        )
+    _remove_empty_review_parents(
+        review_worktree.parent,
+        stop=repository.configuration.review_worktree_root,
+    )
+    return ()
 
 
 def _validate_superseded_cleanup_target(

@@ -219,7 +219,8 @@ def retry_handoff(
     try:
         with exclusive_file_lock(lock_path):
             status = runs.inspect_status_locked(
-                repository.worktree.invocation_directory
+                repository.worktree.invocation_directory,
+                validate_live_review_bundle=False,
             )
             active = status.active_run
             if active is None:

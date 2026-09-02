@@ -115,6 +115,14 @@ class RunPhase(StrEnum):
     CANCELLED = "cancelled"
 
 
+class _LiveReviewBundleMode(StrEnum):
+    """Control how status inspection treats Reviewer-controlled inputs."""
+
+    STRICT = "strict"
+    REPORT = "report"
+    SKIP = "skip"
+
+
 TERMINAL_PHASES = {RunPhase.COMPLETED, RunPhase.CANCELLED}
 CLOSED_ROUND_STATUSES = {
     RoundStatus.APPLIED,
@@ -340,6 +348,16 @@ class AppliedReviewAuthority:
     review_bytes: bytes
 
 
+@dataclass(frozen=True)
+class _ActiveReviewArtifacts:
+    """Validated authority plus optional live review-bundle diagnostics."""
+
+    round_record: ReviewRoundRecord
+    review_worktree_available: bool | None
+    review_bundle_intact: bool | None
+    review_bundle_error: str | None
+
+
 UnappliedReviewState = (
     UnappliedReviewResult
     | InvalidUnappliedReviewResult
@@ -372,6 +390,8 @@ class ActiveRunStatus:
     active_round: ActiveRoundRecord | None
     handoff: HandoffRecord | None
     review_worktree_available: bool | None
+    review_bundle_intact: bool | None
+    review_bundle_error: str | None
     unapplied_review: UnappliedReviewState
     approval: ApprovalRecord | None
     review_budget: ReviewBudget
@@ -462,15 +482,31 @@ def start_run(
 
 
 def inspect_status(start: Path) -> RepositoryStatus:
-    """Return validated state while holding the active-run lock."""
+    """Return state and report damage confined to the live review bundle."""
 
-    return _inspect_status(start, lock_held=False)
+    return _inspect_status(
+        start,
+        lock_held=False,
+        live_review_bundle_mode=_LiveReviewBundleMode.REPORT,
+    )
 
 
-def inspect_status_locked(start: Path) -> RepositoryStatus:
+def inspect_status_locked(
+    start: Path,
+    *,
+    validate_live_review_bundle: bool = True,
+) -> RepositoryStatus:
     """Return validated state when the caller holds the canonical lock."""
 
-    return _inspect_status(start, lock_held=True)
+    return _inspect_status(
+        start,
+        lock_held=True,
+        live_review_bundle_mode=(
+            _LiveReviewBundleMode.STRICT
+            if validate_live_review_bundle
+            else _LiveReviewBundleMode.SKIP
+        ),
+    )
 
 
 def load_completed_run(
@@ -599,7 +635,7 @@ def load_completed_run(
         active_round = ActiveRoundRecord.from_dict(state["active_round"])
     except ArtifactValidationError as error:
         raise RunStateError(str(error)) from error
-    _, round_record = _validate_active_review_artifacts(
+    review_artifacts = _validate_active_review_artifacts(
         run_directory=run_directory,
         record=record,
         run_id=run_id,
@@ -608,6 +644,7 @@ def load_completed_run(
         active_round=active_round,
         validate_live_worktree=False,
     )
+    round_record = review_artifacts.round_record
     approval = _validate_approval_artifacts(
         run_directory=run_directory,
         round_record=round_record,
@@ -629,6 +666,7 @@ def _inspect_status(
     start: Path,
     *,
     lock_held: bool,
+    live_review_bundle_mode: _LiveReviewBundleMode,
 ) -> RepositoryStatus:
     """Implement status inspection with explicit lock ownership."""
 
@@ -647,7 +685,11 @@ def _inspect_status(
             )
         try:
             with exclusive_file_lock(lock_path):
-                return _inspect_status(start, lock_held=True)
+                return _inspect_status(
+                    start,
+                    lock_held=True,
+                    live_review_bundle_mode=live_review_bundle_mode,
+                )
         except RunError:
             raise
         except OSError as error:
@@ -778,21 +820,26 @@ def _inspect_status(
         record.base_oid,
     )
     review_worktree_available: bool | None = None
+    review_bundle_intact: bool | None = None
+    review_bundle_error: str | None = None
     round_record: ReviewRoundRecord | None = None
     if validated_round is not None:
-        review_worktree_available, round_record = (
-            _validate_active_review_artifacts(
-                run_directory=run_directory,
-                record=record,
-                run_id=active_run_id,
-                current_round=current_round,
-                current_head_oid=current_head_oid,
-                active_round=validated_round,
-                validate_live_worktree=(
-                    phase is not RunPhase.IMPLEMENTING
-                ),
-            )
+        review_artifacts = _validate_active_review_artifacts(
+            run_directory=run_directory,
+            record=record,
+            run_id=active_run_id,
+            current_round=current_round,
+            current_head_oid=current_head_oid,
+            active_round=validated_round,
+            validate_live_worktree=(phase is not RunPhase.IMPLEMENTING),
+            live_review_bundle_mode=live_review_bundle_mode,
         )
+        review_worktree_available = (
+            review_artifacts.review_worktree_available
+        )
+        review_bundle_intact = review_artifacts.review_bundle_intact
+        review_bundle_error = review_artifacts.review_bundle_error
+        round_record = review_artifacts.round_record
     approval: ApprovalRecord | None = None
     if phase is RunPhase.APPROVED:
         if round_record is None:
@@ -857,6 +904,8 @@ def _inspect_status(
             active_round=active_round,
             handoff=handoff,
             review_worktree_available=review_worktree_available,
+            review_bundle_intact=review_bundle_intact,
+            review_bundle_error=review_bundle_error,
             unapplied_review=unapplied_review,
             approval=approval,
             review_budget=budget,
@@ -1466,7 +1515,10 @@ def _validate_active_review_artifacts(
     current_head_oid: str | None,
     active_round: ActiveRoundRecord,
     validate_live_worktree: bool = True,
-) -> tuple[bool | None, ReviewRoundRecord]:
+    live_review_bundle_mode: _LiveReviewBundleMode = (
+        _LiveReviewBundleMode.STRICT
+    ),
+) -> _ActiveReviewArtifacts:
     """Validate round artifacts and optionally report worktree availability."""
 
     round_directory = (
@@ -1745,28 +1797,60 @@ def _validate_active_review_artifacts(
 
     review_worktree = active_round.review_worktree
     if not validate_live_worktree:
-        return None, round_record
+        return _ActiveReviewArtifacts(
+            round_record=round_record,
+            review_worktree_available=None,
+            review_bundle_intact=None,
+            review_bundle_error=None,
+        )
     if not os.path.lexists(review_worktree):
-        return False, round_record
+        return _ActiveReviewArtifacts(
+            round_record=round_record,
+            review_worktree_available=False,
+            review_bundle_intact=None,
+            review_bundle_error=None,
+        )
     if review_worktree.is_symlink() or not review_worktree.is_dir():
         raise RunStateError(
             "active review worktree is not a normal directory: "
             f"{review_worktree}"
         )
-    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
-    for artifact in bundle_inputs:
-        path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)
-        if path.is_symlink() or not path.is_file():
-            raise RunStateError(
-                "active review bundle input must be a regular non-symlink "
-                f"file: {path}"
-            )
-        _verify_captured_digest(
-            path,
-            artifact.sha256,
-            f"active review bundle input {artifact.path}",
+    if live_review_bundle_mode is _LiveReviewBundleMode.SKIP:
+        return _ActiveReviewArtifacts(
+            round_record=round_record,
+            review_worktree_available=True,
+            review_bundle_intact=None,
+            review_bundle_error=None,
         )
-    return True, round_record
+    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
+    try:
+        for artifact in bundle_inputs:
+            path = bundle_root.joinpath(*PurePosixPath(artifact.path).parts)
+            if path.is_symlink() or not path.is_file():
+                raise RunStateError(
+                    "active review bundle input must be a regular "
+                    f"non-symlink file: {path}"
+                )
+            _verify_captured_digest(
+                path,
+                artifact.sha256,
+                f"active review bundle input {artifact.path}",
+            )
+    except RunStateError as error:
+        if live_review_bundle_mode is _LiveReviewBundleMode.REPORT:
+            return _ActiveReviewArtifacts(
+                round_record=round_record,
+                review_worktree_available=True,
+                review_bundle_intact=False,
+                review_bundle_error=str(error),
+            )
+        raise
+    return _ActiveReviewArtifacts(
+        round_record=round_record,
+        review_worktree_available=True,
+        review_bundle_intact=True,
+        review_bundle_error=None,
+    )
 
 
 def find_latest_applied_review_before(

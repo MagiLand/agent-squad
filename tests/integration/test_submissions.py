@@ -1165,7 +1165,9 @@ class SubmitCommandTests(unittest.TestCase):
             )
             self.assertEqual(captured_report.read_bytes(), report_bytes)
 
-    def test_status_rejects_tampered_round_and_bundle_inputs(self) -> None:
+    def test_status_rejects_authoritative_tampering_and_warns_for_live_bundle(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository, data_home, report, environment, _ = _start_run(root)
@@ -1212,9 +1214,25 @@ class SubmitCommandTests(unittest.TestCase):
                 data_home=data_home,
                 env_overrides=environment,
             )
-            self.assertNotEqual(status.returncode, 0)
-            self.assertIn("bundle input input/task.md", status.stderr)
-            self.assertIn("digest does not match", status.stderr)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("Review bundle intact: no", status.stdout)
+            self.assertIn(
+                "Review bundle warning: active review bundle input "
+                "input/task.md digest does not match run metadata",
+                status.stdout,
+            )
+
+            applied = run_cli(
+                repository,
+                "apply-review",
+                "--result-id",
+                "99999999-9999-4999-8999-999999999999",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertNotEqual(applied.returncode, 0)
+            self.assertIn("bundle input input/task.md", applied.stderr)
+            self.assertIn("digest does not match", applied.stderr)
 
     def test_status_rejects_live_round_mislabeled_as_implementing(
         self,

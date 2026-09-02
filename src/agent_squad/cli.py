@@ -315,6 +315,11 @@ def _run_status(_arguments: argparse.Namespace) -> int:
     if run.review_worktree_available is not None:
         availability = "yes" if run.review_worktree_available else "no"
         print(f"Review worktree available: {availability}")
+    if run.review_bundle_intact is not None:
+        integrity = "yes" if run.review_bundle_intact else "no"
+        print(f"Review bundle intact: {integrity}")
+    if run.review_bundle_error is not None:
+        print(f"Review bundle warning: {run.review_bundle_error}")
     unapplied_review = run.unapplied_review
     if run.phase is RunPhase.REVIEWING:
         if isinstance(unapplied_review, InvalidUnappliedReviewResult):

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -227,6 +228,44 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 "review_request_recovery_failed",
             )
             self.assertIsNone(events[-1]["action"])
+
+    def test_retry_handoff_survives_reviewer_bundle_damage(self) -> None:
+        damage_cases = (
+            "tamper bundle input",
+            "delete bundle input",
+            "delete bundle",
+        )
+        for damage in damage_cases:
+            with self.subTest(damage=damage):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    task_path = prepared.bundle / "input/task.md"
+                    if damage == "tamper bundle input":
+                        task_path.chmod(0o600)
+                        task_path.write_text("tampered\n", encoding="utf-8")
+                    elif damage == "delete bundle input":
+                        task_path.unlink()
+                    else:
+                        shutil.rmtree(prepared.bundle)
+
+                    recovered = run_cli(
+                        prepared.repository,
+                        "retry-handoff",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+
+                    self.assertEqual(
+                        recovered.returncode,
+                        0,
+                        recovered.stderr,
+                    )
+                    self.assertIn("Request handoff: sent", recovered.stdout)
+                    state, run_directory = _artifacts(prepared.repository)
+                    self.assertEqual(state["phase"], "reviewing")
+                    self.assertEqual(state["current_round"], 1)
+                    self.assertEqual(state["handoff"]["status"], "sent")
+                    _assert_single_round(self, run_directory)
 
     def test_lost_result_notification_uses_marker_without_herdr_probe(
         self,
