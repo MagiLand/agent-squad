@@ -30,6 +30,7 @@ class InvocationDirectoryTests(unittest.TestCase):
             ),
             ("review-submit",),
             ("apply-review",),
+            ("supersede", "--reason", "review is obsolete"),
             ("retry-handoff",),
             ("complete",),
         )
@@ -80,6 +81,10 @@ class LocalStateErrorTests(unittest.TestCase):
             ),
             (("review-submit",), "submit_review_result"),
             (("apply-review",), "apply_review"),
+            (
+                ("supersede", "--reason", "review is obsolete"),
+                "supersede_review",
+            ),
             (("retry-handoff",), "retry_handoff"),
             (("complete",), "complete_run"),
         )

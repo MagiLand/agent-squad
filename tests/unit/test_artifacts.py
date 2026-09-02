@@ -21,11 +21,14 @@ from agent_squad.artifacts import (  # noqa: E402
     ReviewerLocalMarker,
     ReviewResult,
     ReviewRoundRecord,
+    ReviewSupersession,
     ReviewVerdict,
     ResponseDisposition,
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    response_validation_mode,
+    validate_followup_submission_head,
     validate_review_response,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
@@ -81,6 +84,7 @@ def _request() -> dict[str, object]:
         ],
         "previous_review_path": None,
         "previous_response_path": None,
+        "recovery_round_path": None,
         "resolution_paths": [],
         "review_output_path": "output/review.json",
         "review_markdown_path": "output/review.md",
@@ -148,6 +152,7 @@ def _round_record() -> dict[str, object]:
         "head_oid": "b" * 40,
         "git_object_format": "sha1",
         "status": "reviewing",
+        "supersession": None,
         "review_worktree": "/tmp/review",
         "reviewer": {
             "name": "asq-87654321-r001-reviewer",
@@ -485,6 +490,64 @@ class ReviewRoundRecordTests(unittest.TestCase):
                         label="round record",
                     )
 
+    def test_superseded_round_requires_actor_timestamp_and_cause(self) -> None:
+        data = _round_record()
+        data.update(
+            updated_at="2026-08-25T12:15:00Z",
+            status="superseded",
+            supersession={
+                "created_at": "2026-08-25T12:15:00Z",
+                "actor": "codex-main",
+                "cause": "The requested revision is no longer relevant.",
+            },
+        )
+
+        record = ReviewRoundRecord.from_dict(data, label="round record")
+
+        self.assertEqual(
+            record.supersession,
+            ReviewSupersession(
+                created_at="2026-08-25T12:15:00Z",
+                actor="codex-main",
+                cause="The requested revision is no longer relevant.",
+            ),
+        )
+        self.assertEqual(record.to_dict(), data)
+
+        cases = (
+            (
+                lambda value: value.update(supersession=None),
+                "must record supersession authority",
+            ),
+            (
+                lambda value: value["supersession"].update(cause=" "),
+                "cause must contain non-whitespace text",
+            ),
+            (
+                lambda value: value["supersession"].update(
+                    created_at="2026-08-25T12:14:59Z"
+                ),
+                "timestamp must match updated_at",
+            ),
+            (
+                lambda value: value.update(status="reviewing"),
+                "round record: only a superseded round may record "
+                "supersession authority",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                changed = copy.deepcopy(data)
+                mutate(changed)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(
+                        changed,
+                        label="round record",
+                    )
+
 
 class ApprovalRecordTests(unittest.TestCase):
     def test_record_binds_all_approval_authority(self) -> None:
@@ -625,6 +688,41 @@ class ReviewRequestTests(unittest.TestCase):
         self.assertEqual(request.to_dict(), _request())
         self.assertEqual(request.round_number, 1)
         self.assertEqual(request.context_files[0].sha256, "e" * 64)
+
+    def test_request_without_recovery_field_remains_compatible(self) -> None:
+        value = _request()
+        value.pop("recovery_round_path")
+
+        request = ReviewRequest.from_dict(value)
+
+        self.assertIsNone(request.recovery_round_path)
+
+    def test_recovery_mode_depends_on_previous_applied_review(self) -> None:
+        value = _request()
+        value.update(
+            round=2,
+            mode="reconsideration",
+            recovery_round_path="input/recovery-round.json",
+            reviewer_name="asq-876543211234-r002-reviewer",
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "without a previous review must use mode new_revision",
+        ):
+            ReviewRequest.from_dict(value)
+
+        value.update(
+            previous_review_path="input/previous-review.json",
+            previous_response_path="input/previous-response.json",
+        )
+        request = ReviewRequest.from_dict(value)
+
+        self.assertIs(request.mode, SubmissionMode.RECONSIDERATION)
+        self.assertEqual(
+            request.recovery_round_path,
+            "input/recovery-round.json",
+        )
 
     def test_first_round_requires_new_revision_and_changed_head(self) -> None:
         cases = (
@@ -996,6 +1094,68 @@ class ReviewResponseTests(unittest.TestCase):
             rejected,
             review,
             SubmissionMode.RECONSIDERATION,
+        )
+
+
+class SubmissionSemanticsTests(unittest.TestCase):
+    def test_recovery_exception_preserves_both_submission_modes(self) -> None:
+        previous_head = "a" * 40
+        recovery_head = "b" * 40
+
+        validate_followup_submission_head(
+            SubmissionMode.NEW_REVISION,
+            head_oid=recovery_head,
+            previous_reviewed_head_oid=previous_head,
+            recovery_head_oid=recovery_head,
+        )
+        validate_followup_submission_head(
+            SubmissionMode.RECONSIDERATION,
+            head_oid=previous_head,
+            previous_reviewed_head_oid=previous_head,
+            recovery_head_oid=recovery_head,
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "new committed HEAD",
+        ):
+            validate_followup_submission_head(
+                SubmissionMode.NEW_REVISION,
+                head_oid=previous_head,
+                previous_reviewed_head_oid=previous_head,
+                recovery_head_oid=recovery_head,
+            )
+        with self.assertRaisesRegex(
+            ArtifactValidationError,
+            "exact previously reviewed HEAD",
+        ):
+            validate_followup_submission_head(
+                SubmissionMode.RECONSIDERATION,
+                head_oid=recovery_head,
+                previous_reviewed_head_oid=previous_head,
+                recovery_head_oid=recovery_head,
+            )
+
+    def test_unchanged_head_uses_reconsideration_response_semantics(
+        self,
+    ) -> None:
+        previous_head = "a" * 40
+
+        self.assertIs(
+            response_validation_mode(
+                SubmissionMode.NEW_REVISION,
+                head_oid=previous_head,
+                previous_reviewed_head_oid=previous_head,
+            ),
+            SubmissionMode.RECONSIDERATION,
+        )
+        self.assertIs(
+            response_validation_mode(
+                SubmissionMode.NEW_REVISION,
+                head_oid="b" * 40,
+                previous_reviewed_head_oid=previous_head,
+            ),
+            SubmissionMode.NEW_REVISION,
         )
 
 

@@ -22,6 +22,7 @@ from .artifacts import (
     HandoffStatus,
     PREVIOUS_RESPONSE_BUNDLE_PATH,
     PREVIOUS_REVIEW_BUNDLE_PATH,
+    RECOVERY_ROUND_BUNDLE_PATH,
     ReviewRequest,
     ReviewResponse,
     ReviewResult,
@@ -32,6 +33,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
     deterministic_reviewer_name,
+    response_validation_mode,
     validate_followup_submission_head,
     validate_review_response,
 )
@@ -284,6 +286,9 @@ def _prepare_submission_locked(
 
     previous: runs.AppliedReviewAuthority | None = None
     implementation_response: ImplementationResponse | None = None
+    response_mode = mode
+    recovering = False
+    recovery_round_content: bytes | None = None
     additional_bundle_contents: tuple[
         tuple[BundleArtifact, bytes], ...
     ] = ()
@@ -295,19 +300,66 @@ def _prepare_submission_locked(
         )
         round_number = 1
     else:
-        previous = _load_applied_changes_review(
-            run_directory,
-            active,
-        )
-        try:
-            validate_followup_submission_head(
-                mode,
-                head_oid=head_oid,
-                previous_reviewed_head_oid=previous.review.head_oid,
+        active_round = active.active_round
+        if active_round is None:
+            raise SubmissionError(
+                "a follow-up submission requires closed round history"
             )
-        except ArtifactValidationError as error:
-            raise SubmissionError(str(error)) from error
+        recovering = active_round.status in runs.RECOVERY_ROUND_STATUSES
+        if recovering:
+            previous = _find_applied_changes_review(
+                run_directory,
+                active,
+            )
+            if previous is None:
+                if mode is not SubmissionMode.NEW_REVISION:
+                    raise SubmissionError(
+                        "recovery without an applied prior review must use "
+                        "--mode new_revision"
+                    )
+                if head_oid == active.base_oid:
+                    raise SubmissionError(
+                        "recovery without an applied prior review requires a "
+                        "committed candidate whose HEAD differs from the "
+                        "fixed base"
+                    )
+            else:
+                try:
+                    validate_followup_submission_head(
+                        mode,
+                        head_oid=head_oid,
+                        previous_reviewed_head_oid=previous.review.head_oid,
+                        recovery_head_oid=active.current_head_oid,
+                    )
+                except ArtifactValidationError as error:
+                    raise SubmissionError(str(error)) from error
+            recovery_round_content = _read_file(
+                run_directory
+                / ROUNDS_DIRECTORY_NAME
+                / f"{active.current_round:03d}"
+                / ROUND_RECORD_FILE_NAME
+            )
+        else:
+            previous = _load_applied_changes_review(
+                run_directory,
+                active,
+            )
+            try:
+                validate_followup_submission_head(
+                    mode,
+                    head_oid=head_oid,
+                    previous_reviewed_head_oid=previous.review.head_oid,
+                )
+            except ArtifactValidationError as error:
+                raise SubmissionError(str(error)) from error
         round_number = active.current_round + 1
+
+    if previous is not None:
+        response_mode = response_validation_mode(
+            mode,
+            head_oid=head_oid,
+            previous_reviewed_head_oid=previous.review.head_oid,
+        )
 
     report = _capture_report(
         report_path,
@@ -317,8 +369,13 @@ def _prepare_submission_locked(
         previous_review_path = None
         previous_response_path = None
         if response_path is not None:
+            if is_first_round:
+                raise SubmissionError(
+                    "the first review round does not accept --response"
+                )
             raise SubmissionError(
-                "the first review round does not accept --response"
+                "a recovery submission without an applied previous review "
+                "does not accept --response"
             )
     else:
         previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
@@ -333,7 +390,7 @@ def _prepare_submission_locked(
             repository.worktree.invocation_directory,
             object_format=object_format,
             previous_review=previous.review,
-            mode=mode,
+            mode=response_mode,
         )
         additional_bundle_contents = (
             (
@@ -353,6 +410,25 @@ def _prepare_submission_locked(
                     ).hexdigest(),
                 ),
                 implementation_response.content,
+            ),
+        )
+    recovery_round_path: str | None = None
+    if recovering:
+        if recovery_round_content is None:
+            raise SubmissionError(
+                "recovery round authority disappeared during submission"
+            )
+        recovery_round_path = RECOVERY_ROUND_BUNDLE_PATH
+        additional_bundle_contents = (
+            *additional_bundle_contents,
+            (
+                BundleArtifact(
+                    path=recovery_round_path,
+                    sha256=hashlib.sha256(
+                        recovery_round_content
+                    ).hexdigest(),
+                ),
+                recovery_round_content,
             ),
         )
 
@@ -404,6 +480,7 @@ def _prepare_submission_locked(
         context_files=context_files,
         previous_review_path=previous_review_path,
         previous_response_path=previous_response_path,
+        recovery_round_path=recovery_round_path,
         resolution_paths=(),
         review_output_path="output/review.json",
         review_markdown_path="output/review.md",
@@ -838,6 +915,20 @@ def _load_applied_changes_review(
     run_directory: Path,
     active: runs.ActiveRunStatus,
 ) -> runs.AppliedReviewAuthority:
+    authority = _find_applied_changes_review(run_directory, active)
+    if authority is None:
+        raise SubmissionError(
+            "a correction-round request has no previous applied review"
+        )
+    return authority
+
+
+def _find_applied_changes_review(
+    run_directory: Path,
+    active: runs.ActiveRunStatus,
+) -> runs.AppliedReviewAuthority | None:
+    """Find and validate the latest applied changes-requested authority."""
+
     active_round = active.active_round
     if (
         active.current_round < 1
@@ -848,7 +939,7 @@ def _load_applied_changes_review(
             "a follow-up submission requires one applied prior review"
         )
     try:
-        authority = runs.latest_applied_review_before(
+        authority = runs.find_latest_applied_review_before(
             run_directory=run_directory,
             run_id=active.run_id,
             current_round=active.current_round + 1,
@@ -857,6 +948,8 @@ def _load_applied_changes_review(
         )
     except runs.RunStateError as error:
         raise SubmissionError(str(error)) from error
+    if authority is None:
+        return None
     round_record = authority.round_record
     if round_record.verdict is not ReviewVerdict.CHANGES_REQUESTED:
         raise SubmissionError(

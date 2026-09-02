@@ -14,6 +14,7 @@ import uuid
 
 from . import runs
 from .artifacts import (
+    ActiveRoundRecord,
     APPROVAL_FILE_NAME,
     ApprovalRecord,
     ArtifactValidationError,
@@ -22,23 +23,28 @@ from .artifacts import (
     REVIEW_MARKER_FILE_NAME,
     ReviewResult,
     ReviewRoundRecord,
+    ReviewSupersession,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
     RoundStatus,
 )
+from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
     AgentSquadError,
     InitializedRepository,
     REVIEW_DIRECTORY_NAME,
+    discover_git_worktree,
     is_agent_squad_runtime_path,
     load_initialized_repository,
     matches_allowed_generated_path,
     run_git,
 )
 from .review_submissions import (
+    MARKER_PATH,
     MarkerConfirmedReview,
     RETIRED_RESULTS_PATH,
     ReviewSubmissionError,
+    SUBMISSION_LOCK_PATH,
     load_marker_confirmed_review,
     retired_review_identity_digest,
     verify_flagged_tracked_files,
@@ -48,6 +54,7 @@ from .storage import (
     append_event,
     atomic_write,
     decode_json,
+    encode_event,
     encode_json,
     exclusive_file_lock,
     read_regular_tree,
@@ -57,6 +64,7 @@ from .storage import (
 
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
 RETIRED_APPLY_ATTEMPTS_DIRECTORY_NAME = "retired-apply-attempts"
+LATE_RESULTS_DIRECTORY = PurePosixPath("diagnostics/late-results")
 _PROVISIONAL_APPLY_ARTIFACT_NAMES = (
     REVIEW_RESULT_FILE_NAME,
     REVIEW_MARKDOWN_FILE_NAME,
@@ -92,6 +100,21 @@ class CompleteRunResult:
     run_id: str
     head_oid: str
     already_completed: bool
+    cleanup_warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SupersedeReviewResult:
+    """Durable outcome of invalidating one active review round."""
+
+    run_id: str
+    round_number: int
+    head_oid: str
+    actor: str
+    cause: str
+    reviewer_notice_sent: bool
+    reviewer_notice_error: str | None
+    late_result_id: str | None
     cleanup_warnings: tuple[str, ...]
 
 
@@ -147,6 +170,191 @@ def complete_run(start: Path) -> CompleteRunResult:
             f"could not acquire or use the local completion lock "
             f"{lock_path}: {error}"
         ) from error
+
+
+def supersede_review(
+    start: Path,
+    *,
+    reason: str,
+    herdr_client: HerdrClient | None = None,
+) -> SupersedeReviewResult:
+    """Supersede the active review and return its run to implementation."""
+
+    repository = load_initialized_repository(start)
+    cause = _supersede_cause(reason)
+    lock_path = repository.control_root / runs.LOCK_FILE_NAME
+    try:
+        with exclusive_file_lock(lock_path):
+            return _supersede_review_locked(
+                repository,
+                cause=cause,
+                herdr_client=herdr_client,
+            )
+    except AgentSquadError:
+        raise
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"could not acquire or use the local supersede lock "
+            f"{lock_path}: {error}"
+        ) from error
+
+
+def _supersede_review_locked(
+    repository: InitializedRepository,
+    *,
+    cause: str,
+    herdr_client: HerdrClient | None,
+) -> SupersedeReviewResult:
+    status = runs.inspect_status_locked(
+        repository.worktree.invocation_directory
+    )
+    active = status.active_run
+    if active is None:
+        raise ReviewApplicationError(
+            "there is no active run with a review to supersede"
+        )
+    active_round = active.active_round
+    if (
+        active.phase is not runs.RunPhase.REVIEWING
+        or active_round is None
+        or active_round.status is not RoundStatus.REVIEWING
+    ):
+        raise ReviewApplicationError(
+            f"run {active.run_id} is in phase {active.phase.value}; "
+            "supersede requires an active reviewing round"
+        )
+    _validate_implementation_identity(repository, active)
+
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    round_directory = (
+        run_directory / "rounds" / f"{active.current_round:03d}"
+    )
+    round_path = round_directory / "round.json"
+    run_path = run_directory / runs.RUN_RECORD_FILE_NAME
+    state_path = repository.control_root / runs.STATE_FILE_NAME
+    state = runs.load_json_object(state_path, "authoritative state")
+    run_record = runs.load_json_object(run_path, "active run record")
+    round_data = runs.load_json_object(round_path, "active round record")
+    original_state = state_path.read_bytes()
+    try:
+        round_record = ReviewRoundRecord.from_dict(
+            round_data,
+            label="active round record",
+        )
+    except ArtifactValidationError as error:
+        raise ReviewApplicationError(str(error)) from error
+    _assert_round_is_active(round_record, active)
+
+    timestamp = utc_timestamp()
+    actor = active.implementer_agent
+    supersession = ReviewSupersession(
+        created_at=timestamp,
+        actor=actor,
+        cause=cause,
+    )
+    next_round = replace(
+        round_record,
+        updated_at=timestamp,
+        status=RoundStatus.SUPERSEDED,
+        supersession=supersession,
+    )
+    next_active_round = replace(
+        active_round,
+        status=RoundStatus.SUPERSEDED,
+    )
+    next_run = copy.deepcopy(run_record)
+    next_run["phase"] = runs.RunPhase.IMPLEMENTING.value
+    next_state = copy.deepcopy(state)
+    next_state.update(
+        updated_at=timestamp,
+        phase=runs.RunPhase.IMPLEMENTING.value,
+        active_round=next_active_round.to_dict(),
+    )
+    superseded_event = {
+        "timestamp": timestamp,
+        "event": "review_superseded",
+        "run_id": active.run_id,
+        "round": active.current_round,
+        "request_id": active_round.request_id,
+        "head_oid": active.current_head_oid,
+        "actor": actor,
+        "cause": cause,
+    }
+    event_path = run_directory / runs.EVENT_LOG_FILE_NAME
+    original_events, staged_events = _stage_event_log(
+        event_path,
+        superseded_event,
+        identity_fields=("event", "run_id", "round"),
+    )
+    _validate_implementation_identity(repository, active)
+    _persist_authoritative_transition(
+        records=(
+            _StagedRecord(
+                path=round_path,
+                original=round_path.read_bytes(),
+                staged=encode_json(next_round.to_dict()),
+            ),
+            _StagedRecord(
+                path=run_path,
+                original=run_path.read_bytes(),
+                staged=encode_json(next_run),
+            ),
+            _StagedRecord(
+                path=event_path,
+                original=original_events,
+                staged=staged_events,
+            ),
+        ),
+        state_path=state_path,
+        original_state=original_state,
+        next_state=encode_json(next_state),
+        failure_message="could not persist superseded review state",
+    )
+
+    client = herdr_client or HerdrClient(repository.worktree.root)
+    reviewer_notice_sent = False
+    reviewer_notice_error: str | None = None
+    try:
+        client.discover(active.reviewer_kind, role="Reviewer")
+        reviewer_notice_sent = client.dispatch_reviewer_notice(
+            reviewer_name=active_round.reviewer_name,
+            reviewer_kind=active.reviewer_kind,
+            review_worktree=active_round.review_worktree,
+            prompt=_review_superseded_prompt(
+                run_id=active.run_id,
+                round_number=active.current_round,
+                cause=cause,
+            ),
+        )
+        if not reviewer_notice_sent:
+            reviewer_notice_error = (
+                f"Reviewer {active_round.reviewer_name!r} is not available"
+            )
+    except HerdrError as error:
+        reviewer_notice_error = format_herdr_error(str(error))
+
+    late_result_id, cleanup_warnings = (
+        _cleanup_superseded_review_resources(
+            repository,
+            active=active,
+            round_directory=round_directory,
+            round_record=next_round,
+        )
+    )
+    return SupersedeReviewResult(
+        run_id=active.run_id,
+        round_number=active.current_round,
+        head_oid=active.current_head_oid or round_record.head_oid,
+        actor=actor,
+        cause=cause,
+        reviewer_notice_sent=reviewer_notice_sent,
+        reviewer_notice_error=reviewer_notice_error,
+        late_result_id=late_result_id,
+        cleanup_warnings=cleanup_warnings,
+    )
 
 
 def _apply_review_locked(
@@ -1009,10 +1217,25 @@ def _archive_bundle(
     round_directory: Path,
     evidence: MarkerConfirmedReview,
 ) -> tuple[BundleArtifact, ...]:
-    archive_root = round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
     live_files = {
         item.path: item.content for item in evidence.bundle_files
     }
+    return _archive_bundle_files(
+        round_directory,
+        live_files,
+        evidence=evidence,
+    )
+
+
+def _archive_bundle_files(
+    round_directory: Path,
+    live_files: dict[PurePosixPath, bytes],
+    *,
+    evidence: MarkerConfirmedReview | None = None,
+) -> tuple[BundleArtifact, ...]:
+    """Persist and verify one complete review-bundle snapshot."""
+
+    archive_root = round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
     if os.path.lexists(archive_root):
         try:
             return _validate_existing_bundle_archive(
@@ -1020,7 +1243,7 @@ def _archive_bundle(
                 live_files=live_files,
             )
         except ReviewApplicationError:
-            if not _quarantine_retired_apply_attempt(
+            if evidence is None or not _quarantine_retired_apply_attempt(
                 round_directory,
                 archive_root=archive_root,
                 evidence=evidence,
@@ -1584,6 +1807,304 @@ def _validate_completion_cleanliness(
         )
 
 
+def _supersede_cause(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewApplicationError(
+            "supersede --reason must contain non-whitespace text"
+        )
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ReviewApplicationError(
+            "supersede --reason must be a single line without null bytes"
+        )
+    return value.strip()
+
+
+def _review_superseded_prompt(
+    *,
+    run_id: str,
+    round_number: int,
+    cause: str,
+) -> str:
+    return (
+        "AGENT_SQUAD/0.4.4 REVIEW_SUPERSEDED\n\n"
+        f"run_id: {run_id}\n"
+        f"round: {round_number}\n"
+        f"reason: {cause}\n\n"
+        "This round is no longer authoritative.\n"
+        "Stop work when safe and do not submit it as the current result."
+    )
+
+
+def _cleanup_superseded_review_resources(
+    repository: InitializedRepository,
+    *,
+    active: runs.ActiveRunStatus,
+    round_directory: Path,
+    round_record: ReviewRoundRecord,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Archive late evidence and remove only the superseded review worktree."""
+
+    active_round = active.active_round
+    if active_round is None:
+        return None, (
+            "superseded round did not retain its review-worktree identity",
+        )
+    review_worktree = active_round.review_worktree
+    if not os.path.lexists(review_worktree):
+        return None, ()
+    bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
+    output_root = bundle_root / "output"
+    late_result_id: str | None = None
+    try:
+        _require_cleanup_directory(bundle_root, "review bundle")
+        _require_cleanup_directory(output_root, "review bundle output")
+        lock_path = bundle_root.joinpath(*SUBMISSION_LOCK_PATH.parts)
+        with exclusive_file_lock(lock_path):
+            _validate_superseded_cleanup_target(
+                repository,
+                active=active,
+                active_round=active_round,
+                round_record=round_record,
+            )
+            evidence: MarkerConfirmedReview | None = None
+            marker_path = bundle_root.joinpath(*MARKER_PATH.parts)
+            if os.path.lexists(marker_path):
+                try:
+                    evidence = load_marker_confirmed_review(
+                        review_worktree,
+                        authoritative_results_root=round_directory,
+                        lock_held=True,
+                    )
+                    _validate_evidence(repository, active, evidence)
+                except AgentSquadError as error:
+                    raise ReviewApplicationError(
+                        "marker-confirmed late review evidence could not be "
+                        f"validated: {error}"
+                    ) from error
+                late_result_id = _archive_late_review(
+                    round_directory,
+                    evidence,
+                )
+                _ensure_event(
+                    round_directory.parents[1] / runs.EVENT_LOG_FILE_NAME,
+                    {
+                        "timestamp": utc_timestamp(),
+                        "event": "late_review_archived",
+                        "run_id": active.run_id,
+                        "round": active.current_round,
+                        "request_id": active_round.request_id,
+                        "result_id": late_result_id,
+                        "head_oid": evidence.review.head_oid,
+                    },
+                    identity_fields=(
+                        "event",
+                        "run_id",
+                        "round",
+                        "result_id",
+                    ),
+                )
+
+            if evidence is None:
+                bundle_files = read_regular_tree(
+                    bundle_root,
+                    label="superseded review bundle",
+                    error_type=ReviewApplicationError,
+                )
+                bundle_files.pop(SUBMISSION_LOCK_PATH, None)
+            else:
+                bundle_files = {
+                    item.path: item.content for item in evidence.bundle_files
+                }
+            bundle_manifest = _archive_bundle_files(
+                round_directory,
+                bundle_files,
+            )
+            archived_round = replace(
+                round_record,
+                bundle_archive=bundle_manifest,
+            )
+            atomic_write(
+                round_directory / "round.json",
+                encode_json(archived_round.to_dict()),
+                mode=0o600,
+            )
+
+            try:
+                shutil.rmtree(bundle_root)
+            except OSError as error:
+                raise ReviewApplicationError(
+                    f"could not remove superseded review bundle "
+                    f"{bundle_root}: {error}"
+                ) from error
+
+            return late_result_id, _remove_clean_review_worktree(
+                repository,
+                review_worktree,
+                inspect_ignored=True,
+                operational_failure_prefix=(
+                    f"retained review worktree {review_worktree} because "
+                    "safe superseded-round cleanup failed: "
+                ),
+            )
+    except (AgentSquadError, OSError) as error:
+        return late_result_id, (
+            f"retained review worktree {review_worktree} because safe "
+            f"superseded-round cleanup failed: {error}",
+        )
+
+
+def _validate_superseded_cleanup_target(
+    repository: InitializedRepository,
+    *,
+    active: runs.ActiveRunStatus,
+    active_round: ActiveRoundRecord,
+    round_record: ReviewRoundRecord,
+) -> None:
+    review_worktree = active_round.review_worktree
+    try:
+        resolved = review_worktree.resolve(strict=True)
+        review_root = repository.configuration.review_worktree_root.resolve(
+            strict=False
+        )
+    except (OSError, RuntimeError) as error:
+        raise ReviewApplicationError(
+            f"cannot resolve superseded review-worktree identity: {error}"
+        ) from error
+    expected = (
+        review_root
+        / active.repository.repository_id
+        / active.run_id
+        / f"round-{active.current_round:03d}"
+    )
+    if resolved != expected:
+        raise ReviewApplicationError(
+            "superseded review worktree does not match its deterministic path"
+        )
+    worktree = discover_git_worktree(resolved)
+    if worktree.root != resolved:
+        raise ReviewApplicationError(
+            "superseded cleanup target is not the review-worktree root"
+        )
+    if worktree.common_directory != active.repository.git_common_dir:
+        raise ReviewApplicationError(
+            "superseded review worktree belongs to a different repository"
+        )
+    if _current_head(
+        worktree.root,
+        active.git_object_format,
+        label="superseded review",
+    ) != round_record.head_oid:
+        raise ReviewApplicationError(
+            "superseded review worktree HEAD does not match its round"
+        )
+    branch = run_git(worktree.root, "symbolic-ref", "--quiet", "HEAD")
+    if branch.returncode != 1:
+        raise ReviewApplicationError(
+            "superseded review cleanup requires the detached review worktree"
+        )
+
+    bundle_root = worktree.root / REVIEW_DIRECTORY_NAME
+    for artifact in round_record.bundle_inputs:
+        relative = PurePosixPath(artifact.path)
+        path = bundle_root.joinpath(*relative.parts)
+        try:
+            status = path.lstat()
+            content = path.read_bytes()
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot validate superseded bundle input {path}: {error}"
+            ) from error
+        if not stat.S_ISREG(status.st_mode):
+            raise ReviewApplicationError(
+                "superseded bundle input must be a regular non-symlink "
+                f"file: {path}"
+            )
+        if hashlib.sha256(content).hexdigest() != artifact.sha256:
+            raise ReviewApplicationError(
+                f"superseded bundle input digest changed: {path}"
+            )
+
+
+def _require_cleanup_directory(path: Path, label: str) -> None:
+    try:
+        status = path.lstat()
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot inspect {label} {path}: {error}"
+        ) from error
+    if not stat.S_ISDIR(status.st_mode):
+        raise ReviewApplicationError(
+            f"{label} must be a normal directory: {path}"
+        )
+
+
+def _archive_late_review(
+    round_directory: Path,
+    evidence: MarkerConfirmedReview,
+) -> str:
+    files = {
+        PurePosixPath(REVIEW_RESULT_FILE_NAME): evidence.review_bytes,
+        PurePosixPath(REVIEW_MARKDOWN_FILE_NAME): (
+            evidence.review_markdown_bytes
+        ),
+        PurePosixPath(REVIEW_MARKER_FILE_NAME): evidence.marker_bytes,
+    }
+    late_root = round_directory
+    for part in LATE_RESULTS_DIRECTORY.parts:
+        late_root /= part
+        if os.path.lexists(late_root):
+            _require_cleanup_directory(late_root, "late-result archive")
+        else:
+            late_root.mkdir(mode=0o700)
+    destination = late_root / evidence.review.result_id
+    if os.path.lexists(destination):
+        _verify_late_review_archive(destination, files)
+        return evidence.review.result_id
+
+    staging: Path | None = Path(
+        tempfile.mkdtemp(prefix=".late-result.", dir=late_root)
+    )
+    try:
+        staging.chmod(0o700)
+        for relative, content in files.items():
+            atomic_write(
+                staging.joinpath(*relative.parts),
+                content,
+                mode=0o400,
+            )
+        _verify_late_review_archive(staging, files)
+        staging.replace(destination)
+        staging = None
+        destination.chmod(0o500)
+        _verify_late_review_archive(destination, files)
+    finally:
+        if staging is not None and os.path.lexists(staging):
+            shutil.rmtree(staging, ignore_errors=True)
+    return evidence.review.result_id
+
+
+def _verify_late_review_archive(
+    root: Path,
+    expected: dict[PurePosixPath, bytes],
+) -> None:
+    actual = read_regular_tree(
+        root,
+        label="late review archive",
+        error_type=ReviewApplicationError,
+    )
+    if set(actual) != set(expected):
+        raise ReviewApplicationError(
+            "late review archive does not contain the expected diagnostics"
+        )
+    for path, content in actual.items():
+        if hashlib.sha256(content).digest() != hashlib.sha256(
+            expected[path]
+        ).digest():
+            raise ReviewApplicationError(
+                f"late review archive digest mismatch for {path}"
+            )
+
+
 def _cleanup_review_resources(
     repository: InitializedRepository,
     active: runs.ActiveRunStatus,
@@ -1614,7 +2135,6 @@ def _cleanup_review_resources(
             f"evidence could not be revalidated: {error}",
         )
 
-    warnings: list[str] = []
     bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
     try:
         shutil.rmtree(bundle_root)
@@ -1622,13 +2142,31 @@ def _cleanup_review_resources(
         return (
             f"could not remove archived review bundle {bundle_root}: {error}",
         )
-    for configured in repository.configuration.allowed_generated_paths:
-        warning = _remove_generated_path(review_worktree, configured)
-        if warning is not None:
-            warnings.append(warning)
-    if warnings:
-        return tuple(warnings)
+    return _remove_clean_review_worktree(repository, review_worktree)
 
+
+def _remove_clean_review_worktree(
+    repository: InitializedRepository,
+    review_worktree: Path,
+    *,
+    inspect_ignored: bool = False,
+    operational_failure_prefix: str = "",
+) -> tuple[str, ...]:
+    """Remove scoped generated files, then a demonstrably clean worktree."""
+
+    generated_warnings = tuple(
+        warning
+        for configured in repository.configuration.allowed_generated_paths
+        if (
+            warning := _remove_generated_path(
+                review_worktree,
+                configured,
+            )
+        )
+        is not None
+    )
+    if generated_warnings:
+        return generated_warnings
     cleanliness = run_git(
         review_worktree,
         "status",
@@ -1640,7 +2178,8 @@ def _cleanup_review_resources(
     if cleanliness.returncode != 0:
         detail = cleanliness.stderr.strip() or "unknown Git error"
         return (
-            f"could not verify review worktree cleanup for "
+            f"{operational_failure_prefix}could not verify review worktree "
+            "cleanup for "
             f"{review_worktree}: {detail}",
         )
     if cleanliness.stdout:
@@ -1648,6 +2187,27 @@ def _cleanup_review_resources(
             f"retained review worktree {review_worktree} because files "
             "remain after scoped cleanup",
         )
+    if inspect_ignored:
+        ignored = run_git(
+            review_worktree,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+        )
+        if ignored.returncode != 0:
+            detail = ignored.stderr.strip() or "unknown Git error"
+            return (
+                f"{operational_failure_prefix}could not inspect ignored "
+                f"review-worktree files: {detail}",
+            )
+        if any(entry for entry in ignored.stdout.split("\0") if entry):
+            return (
+                f"retained review worktree {review_worktree} because "
+                "unconfigured ignored files remain after scoped cleanup",
+            )
     removed = run_git(
         repository.worktree.root,
         "worktree",
@@ -1657,7 +2217,8 @@ def _cleanup_review_resources(
     if removed.returncode != 0 and os.path.lexists(review_worktree):
         detail = removed.stderr.strip() or "unknown Git error"
         return (
-            f"could not remove review worktree {review_worktree}: {detail}",
+            f"{operational_failure_prefix}could not remove review worktree "
+            f"{review_worktree}: {detail}",
         )
     _remove_empty_review_parents(
         review_worktree.parent,
@@ -1763,14 +2324,36 @@ def _ensure_event(
 ) -> None:
     """Append one logical event unless the exact event already exists."""
 
+    original, staged = _stage_event_log(
+        path,
+        event,
+        identity_fields=identity_fields,
+    )
+    if staged != original:
+        append_event(path, event)
+
+
+def _stage_event_log(
+    path: Path,
+    event: dict[str, object],
+    *,
+    identity_fields: tuple[str, ...],
+) -> tuple[bytes, bytes]:
+    """Validate an event log and return its original and next contents."""
+
     if path.is_symlink() or not path.is_file():
         raise OSError(f"event log is not a regular non-symlink file: {path}")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        original = path.read_bytes()
+        text = original.decode("utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise OSError(f"cannot inspect event log {path}: {error}") from error
+    if original and not original.endswith(b"\n"):
+        raise ReviewApplicationError(
+            "event log must end with a newline before another event is added"
+        )
     matches: list[dict[str, object]] = []
-    for index, line in enumerate(lines, start=1):
+    for index, line in enumerate(text.splitlines(), start=1):
         try:
             candidate = decode_json(line)
         except InvalidJsonError as error:
@@ -1795,8 +2378,8 @@ def _ensure_event(
             raise ReviewApplicationError(
                 "event log contains a conflicting logical transition event"
             )
-        return
-    append_event(path, event)
+        return original, original
+    return original, original + encode_event(event)
 
 
 def _current_head(root: Path, object_format: str, *, label: str) -> str:

@@ -68,7 +68,7 @@ class SubmissionHelperTests(unittest.TestCase):
         )
         with mock.patch.object(
             submissions.runs,
-            "latest_applied_review_before",
+            "find_latest_applied_review_before",
             return_value=authority,
         ) as latest:
             result = submissions._load_applied_changes_review(

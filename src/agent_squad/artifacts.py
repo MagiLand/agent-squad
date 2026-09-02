@@ -19,6 +19,7 @@ REVIEW_RESULT_FILE_NAME = "review.json"
 ROUND_RESPONSE_FILE_NAME = "response.json"
 PREVIOUS_REVIEW_BUNDLE_PATH = "input/previous-review.json"
 PREVIOUS_RESPONSE_BUNDLE_PATH = "input/previous-response.json"
+RECOVERY_ROUND_BUNDLE_PATH = "input/recovery-round.json"
 
 
 class ArtifactValidationError(ValueError):
@@ -74,6 +75,15 @@ class RoundStatus(StrEnum):
     SUPERSEDED = "superseded"
     STALE = "stale"
     INVALID = "invalid"
+
+
+RECOVERY_ROUND_STATUSES = frozenset(
+    {
+        RoundStatus.SUPERSEDED,
+        RoundStatus.STALE,
+        RoundStatus.INVALID,
+    }
+)
 
 
 class HandoffStatus(StrEnum):
@@ -280,6 +290,64 @@ class ActiveRoundRecord:
             "result_id": self.result_id,
             "review_worktree": str(self.review_worktree),
             "reviewer_name": self.reviewer_name,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewSupersession:
+    """Authoritative actor and cause for one superseded review round."""
+
+    created_at: str
+    actor: str
+    cause: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        label: str,
+    ) -> "ReviewSupersession":
+        """Validate one persisted review-round supersession."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={"created_at", "actor", "cause"},
+            path=label,
+        )
+        actor = _require_meaningful_string(
+            data["actor"],
+            f"{label}.actor",
+        )
+        cause = _require_meaningful_string(
+            data["cause"],
+            f"{label}.cause",
+        )
+        if any(character in actor for character in "\x00\r\n"):
+            raise ArtifactValidationError(
+                f"{label}.actor must be a single line without null bytes"
+            )
+        if any(character in cause for character in "\x00\r\n"):
+            raise ArtifactValidationError(
+                f"{label}.cause must be a single line without null bytes"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            actor=actor,
+            cause=cause,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        """Return the stable machine-readable supersession record."""
+
+        return {
+            "created_at": self.created_at,
+            "actor": self.actor,
+            "cause": self.cause,
         }
 
 
@@ -1002,15 +1070,34 @@ def validate_review_response(
             )
 
 
+def response_validation_mode(
+    submission_mode: SubmissionMode,
+    *,
+    head_oid: str,
+    previous_reviewed_head_oid: str,
+) -> SubmissionMode:
+    """Return response semantics that preserve changed-revision claims."""
+
+    if head_oid == previous_reviewed_head_oid:
+        return SubmissionMode.RECONSIDERATION
+    return submission_mode
+
+
 def validate_followup_submission_head(
     mode: SubmissionMode,
     *,
     head_oid: str,
     previous_reviewed_head_oid: str,
+    recovery_head_oid: str | None = None,
 ) -> None:
     """Validate the candidate head against the applied reviewed head."""
 
     if mode is SubmissionMode.NEW_REVISION:
+        if (
+            recovery_head_oid is not None
+            and head_oid == recovery_head_oid
+        ):
+            return
         if head_oid == previous_reviewed_head_oid:
             raise ArtifactValidationError(
                 "a new_revision submission after changes_requested requires "
@@ -1259,6 +1346,7 @@ class ReviewRequest:
     context_files: tuple[BundleArtifact, ...]
     previous_review_path: str | None
     previous_response_path: str | None
+    recovery_round_path: str | None
     resolution_paths: tuple[str, ...]
     review_output_path: str
     review_markdown_path: str
@@ -1299,6 +1387,7 @@ class ReviewRequest:
                 "reviewer_name",
                 "allowed_generated_paths",
             },
+            optional={"recovery_round_path"},
             path="review request",
         )
         schema_version = _require_int(
@@ -1397,13 +1486,32 @@ class ReviewRequest:
                 "review request.previous_response_path must be "
                 f"{PREVIOUS_RESPONSE_BUNDLE_PATH} when present"
             )
+        recovery_round_path = _require_optional_bundle_path(
+            data.get("recovery_round_path"),
+            "review request.recovery_round_path",
+        )
+        if recovery_round_path not in (None, RECOVERY_ROUND_BUNDLE_PATH):
+            raise ArtifactValidationError(
+                "review request.recovery_round_path must be "
+                f"{RECOVERY_ROUND_BUNDLE_PATH} when present"
+            )
         if round_number == 1 and (
             previous_review_path is not None
             or previous_response_path is not None
+            or recovery_round_path is not None
         ):
             raise ArtifactValidationError(
                 "the first review round cannot reference previous review "
                 "artifacts"
+            )
+        if (
+            recovery_round_path is not None
+            and previous_review_path is None
+            and mode is not SubmissionMode.NEW_REVISION
+        ):
+            raise ArtifactValidationError(
+                "a recovery-round request without a previous review must "
+                "use mode new_revision"
             )
         resolution_paths = _require_path_list(
             data["resolution_paths"],
@@ -1464,6 +1572,7 @@ class ReviewRequest:
             context_files=contexts,
             previous_review_path=previous_review_path,
             previous_response_path=previous_response_path,
+            recovery_round_path=recovery_round_path,
             resolution_paths=resolution_paths,
             review_output_path=review_output_path,
             review_markdown_path=review_markdown_path,
@@ -1508,6 +1617,7 @@ class ReviewRequest:
             ],
             "previous_review_path": self.previous_review_path,
             "previous_response_path": self.previous_response_path,
+            "recovery_round_path": self.recovery_round_path,
             "resolution_paths": list(self.resolution_paths),
             "review_output_path": self.review_output_path,
             "review_markdown_path": self.review_markdown_path,
@@ -1535,6 +1645,7 @@ class ReviewRoundRecord:
     head_oid: str
     object_format: str
     status: RoundStatus
+    supersession: ReviewSupersession | None
     review_worktree: Path
     reviewer_name: str
     reviewer_kind: AgentKind
@@ -1579,6 +1690,7 @@ class ReviewRoundRecord:
             head_oid=request.head_oid,
             object_format=request.object_format,
             status=RoundStatus.REVIEWING,
+            supersession=None,
             review_worktree=review_worktree,
             reviewer_name=request.reviewer_name,
             reviewer_kind=request.reviewer_kind,
@@ -1637,6 +1749,7 @@ class ReviewRoundRecord:
                 "artifacts",
                 "warnings",
             },
+            optional={"supersession"},
             path=label,
         )
         schema_version = _require_int(
@@ -1710,6 +1823,41 @@ class ReviewRoundRecord:
             f"{label}.status",
             RoundStatus,
         )
+        supersession_value = data.get("supersession")
+        supersession = (
+            None
+            if supersession_value is None
+            else ReviewSupersession.from_dict(
+                supersession_value,
+                label=f"{label}.supersession",
+            )
+        )
+        if status is RoundStatus.SUPERSEDED:
+            if supersession is None:
+                raise ArtifactValidationError(
+                    f"{label} must record supersession authority when "
+                    "status is superseded"
+                )
+        elif supersession is not None:
+            raise ArtifactValidationError(
+                f"{label}: only a superseded round may record supersession "
+                "authority"
+            )
+        created_at = _require_timestamp(
+            data["created_at"],
+            f"{label}.created_at",
+        )
+        updated_at = _require_timestamp(
+            data["updated_at"],
+            f"{label}.updated_at",
+        )
+        if (
+            supersession is not None
+            and supersession.created_at != updated_at
+        ):
+            raise ArtifactValidationError(
+                f"{label} supersession timestamp must match updated_at"
+            )
         review_result = _require_optional_artifact(
             artifacts["review_result"],
             f"{label}.artifacts.review_result",
@@ -1767,14 +1915,8 @@ class ReviewRoundRecord:
                 )
 
         return cls(
-            created_at=_require_timestamp(
-                data["created_at"],
-                f"{label}.created_at",
-            ),
-            updated_at=_require_timestamp(
-                data["updated_at"],
-                f"{label}.updated_at",
-            ),
+            created_at=created_at,
+            updated_at=updated_at,
             run_id=_require_uuid(data["run_id"], f"{label}.run_id"),
             round_number=_require_positive_int(
                 data["round"],
@@ -1803,6 +1945,7 @@ class ReviewRoundRecord:
             ),
             object_format=object_format,
             status=status,
+            supersession=supersession,
             review_worktree=_require_absolute_path(
                 data["review_worktree"],
                 f"{label}.review_worktree",
@@ -1856,6 +1999,11 @@ class ReviewRoundRecord:
             "head_oid": self.head_oid,
             "git_object_format": self.object_format,
             "status": self.status.value,
+            "supersession": (
+                self.supersession.to_dict()
+                if self.supersession is not None
+                else None
+            ),
             "review_worktree": str(self.review_worktree),
             "reviewer": {
                 "name": self.reviewer_name,
