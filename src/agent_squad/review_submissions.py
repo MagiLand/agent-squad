@@ -64,6 +64,10 @@ class ReviewSubmissionError(AgentSquadError):
     """Raised when a Reviewer result cannot be marked safely."""
 
 
+class RetiredReviewIdentityError(ReviewSubmissionError):
+    """Raised when a retired result ID contradicts durable history."""
+
+
 _VALIDATOR = JsonValidator(ReviewSubmissionError)
 
 
@@ -393,14 +397,22 @@ def load_marker_confirmed_review(
             _assert_result_identity(request, review)
             _assert_fresh_result_id(previous_review, review)
             review_digest = hashlib.sha256(review_bytes).hexdigest()
-            retired_ledger = _load_retired_review_ledger(
-                (
-                    bundle_root
-                    if authoritative_results_root is None
-                    else authoritative_results_root
-                ),
-                request=request,
-            )
+            try:
+                retired_ledger = _load_retired_review_ledger(
+                    (
+                        bundle_root
+                        if authoritative_results_root is None
+                        else authoritative_results_root
+                    ),
+                    request=request,
+                )
+            except ReviewSubmissionError as error:
+                if authoritative_results_root is None:
+                    raise
+                raise RetiredReviewIdentityError(
+                    "authoritative retired review identities are invalid: "
+                    f"{error}"
+                ) from error
             _assert_retired_result_reuse(
                 retired_ledger,
                 result_id=review.result_id,
@@ -1310,7 +1322,7 @@ def _assert_retired_result_reuse(
         None,
     )
     if retired is not None and retired.review_sha256 != review_digest:
-        raise ReviewSubmissionError(
+        raise RetiredReviewIdentityError(
             "retired review result ID may be reused only with its original "
             "review digest; corrected review content needs a new result ID"
         )

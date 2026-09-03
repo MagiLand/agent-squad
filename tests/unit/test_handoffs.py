@@ -206,7 +206,7 @@ class InvalidEvidencePreservationTests(unittest.TestCase):
         control_root: Path,
         captured: dict[str, bytes],
     ) -> str:
-        return handoffs._archive_invalid_review_evidence(
+        return handoffs.archive_invalid_review_evidence(
             control_root,
             run_id=RUN_ID,
             round_number=1,

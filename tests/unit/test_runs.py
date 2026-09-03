@@ -142,6 +142,9 @@ def _write_history_round(
         "git_object_format": object_format,
         "status": status,
         "supersession": None,
+        "classification_reason": None,
+        "diagnostic_id": None,
+        "observed_head_oid": None,
         "review_worktree": f"/review/round-{round_number:03d}",
         "reviewer": {
             "name": (
@@ -165,6 +168,23 @@ def _write_history_round(
         },
         "warnings": [],
     }
+    if status == "invalid":
+        record["verdict"] = None
+        record["classification_reason"] = (
+            "review result failed independent validation"
+        )
+        record["diagnostic_id"] = "e" * 64
+        artifacts = record["artifacts"]
+        assert isinstance(artifacts, dict)
+        artifacts["review_result"] = None
+        artifacts["review_markdown"] = None
+        artifacts["review_marker"] = None
+        artifacts["bundle_archive"] = []
+    elif status == "stale":
+        record["classification_reason"] = (
+            "implementation HEAD advanced during review"
+        )
+        record["observed_head_oid"] = "c" * len(head_oid)
     round_directory = run_directory / "rounds" / f"{round_number:03d}"
     round_directory.mkdir(parents=True)
     (round_directory / "review.json").write_bytes(review_bytes)
@@ -1182,6 +1202,9 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
             "git_object_format": "sha1",
             "status": "applied",
             "supersession": None,
+            "classification_reason": None,
+            "diagnostic_id": None,
+            "observed_head_oid": None,
             "review_worktree": "/review",
             "reviewer": {
                 "name": "asq-123456781234-r001-reviewer",
@@ -1218,8 +1241,6 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
     def _non_applied_round(
         self,
         status: RoundStatus,
-        *,
-        retain_artifacts: bool,
     ) -> ReviewRoundRecord:
         value = self._round_dict("approved")
         value["status"] = status.value
@@ -1229,7 +1250,20 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
                 "actor": "codex-main",
                 "cause": "fixture supersession",
             }
-        if not retain_artifacts:
+        elif status is RoundStatus.STALE:
+            value["classification_reason"] = (
+                "implementation HEAD advanced during review"
+            )
+            value["observed_head_oid"] = "c" * 40
+            artifacts = value["artifacts"]
+            assert isinstance(artifacts, dict)
+            artifacts["approval"] = None
+        else:
+            value["classification_reason"] = (
+                "review result failed independent validation"
+            )
+            value["diagnostic_id"] = "e" * 64
+            value["verdict"] = None
             artifacts = value["artifacts"]
             assert isinstance(artifacts, dict)
             for key in (
@@ -1251,26 +1285,19 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
             RoundStatus.SUPERSEDED,
             RoundStatus.INVALID,
         ):
-            for retain_artifacts in (False, True):
-                with self.subTest(
-                    status=status,
-                    retain_artifacts=retain_artifacts,
+            with self.subTest(status=status):
+                round_record = self._non_applied_round(status)
+                with self.assertRaisesRegex(
+                    runs.RunStateError,
+                    "must reference an applied round",
                 ):
-                    round_record = self._non_applied_round(
-                        status,
-                        retain_artifacts=retain_artifacts,
+                    runs._validate_approval_artifacts(
+                        run_directory=Path("/run"),
+                        round_record=round_record,
+                        run_id=round_record.run_id,
+                        record=SimpleNamespace(),
+                        approved_head_oid="a" * 40,
                     )
-                    with self.assertRaisesRegex(
-                        runs.RunStateError,
-                        "must reference an applied round",
-                    ):
-                        runs._validate_approval_artifacts(
-                            run_directory=Path("/run"),
-                            round_record=round_record,
-                            run_id=round_record.run_id,
-                            record=SimpleNamespace(),
-                            approved_head_oid="a" * 40,
-                        )
 
     def test_approval_validator_keeps_reachable_authority_guards(
         self,

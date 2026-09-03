@@ -1926,26 +1926,65 @@ def validate_applied_review_round(
             f"applied round {round_number} status does not match "
             "authoritative history"
         )
+    return _validate_archived_review_round(
+        round_directory=round_directory,
+        round_record=round_record,
+        round_number=round_number,
+        classification="applied",
+    )
+
+
+def validate_stale_review_round(
+    *,
+    round_directory: Path,
+    round_record: ReviewRoundRecord,
+    round_number: int,
+) -> AppliedReviewAuthority:
+    """Validate a stale round and its archived review evidence."""
+
+    if round_record.status is not RoundStatus.STALE:
+        raise RunStateError(
+            f"stale round {round_number} status does not match "
+            "authoritative history"
+        )
+    return _validate_archived_review_round(
+        round_directory=round_directory,
+        round_record=round_record,
+        round_number=round_number,
+        classification="stale",
+    )
+
+
+def _validate_archived_review_round(
+    *,
+    round_directory: Path,
+    round_record: ReviewRoundRecord,
+    round_number: int,
+    classification: str,
+) -> AppliedReviewAuthority:
+    """Validate canonical review evidence retained by a closed round."""
+
     review_artifact = round_record.review_result
     if review_artifact is None:
         raise RunStateError(
-            f"applied round {round_number} must record "
+            f"{classification} round {round_number} must record "
             f"{REVIEW_RESULT_FILE_NAME}"
         )
     if review_artifact.path != REVIEW_RESULT_FILE_NAME:
         raise RunStateError(
-            f"applied round {round_number} review result path must be "
+            f"{classification} round {round_number} review result path "
+            "must be "
             f"{REVIEW_RESULT_FILE_NAME}"
         )
     review_path = _captured_path(
         round_directory,
         review_artifact.path,
-        f"applied round {round_number} review result",
+        f"{classification} round {round_number} review result",
     )
     _verify_captured_digest(
         review_path,
         review_artifact.sha256,
-        f"applied round {round_number} review result",
+        f"{classification} round {round_number} review result",
     )
     try:
         review_bytes = review_path.read_bytes()
@@ -1955,7 +1994,8 @@ def validate_applied_review_round(
         )
     except OSError as error:
         raise RunStateError(
-            f"cannot read applied round {round_number} review result: "
+            f"cannot read {classification} round {round_number} review "
+            "result: "
             f"{error}"
         ) from error
     except (
@@ -1964,7 +2004,8 @@ def validate_applied_review_round(
         ArtifactValidationError,
     ) as error:
         raise RunStateError(
-            f"applied round {round_number} review result is invalid: "
+            f"{classification} round {round_number} review result is "
+            "invalid: "
             f"{error}"
         ) from error
     review_comparisons = (
@@ -1979,7 +2020,8 @@ def validate_applied_review_round(
     for actual, expected, label in review_comparisons:
         if actual != expected:
             raise RunStateError(
-                f"applied round {round_number} review {label} does not "
+                f"{classification} round {round_number} review {label} "
+                "does not "
                 "match authoritative history"
             )
     return AppliedReviewAuthority(

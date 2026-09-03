@@ -153,6 +153,9 @@ def _round_record() -> dict[str, object]:
         "git_object_format": "sha1",
         "status": "reviewing",
         "supersession": None,
+        "classification_reason": None,
+        "diagnostic_id": None,
+        "observed_head_oid": None,
         "review_worktree": "/tmp/review",
         "reviewer": {
             "name": "asq-87654321-r001-reviewer",
@@ -489,6 +492,84 @@ class ReviewRoundRecordTests(unittest.TestCase):
                         changed,
                         label="round record",
                     )
+
+    def test_stale_and_invalid_rounds_bind_classification_authority(
+        self,
+    ) -> None:
+        stale = _round_record()
+        stale.update(
+            result_id="abcdefab-1234-5678-9234-567812345678",
+            verdict="approved",
+            status="stale",
+            classification_reason=(
+                "implementation HEAD advanced before review application"
+            ),
+            observed_head_oid="c" * 40,
+        )
+        stale_artifacts = stale["artifacts"]
+        assert isinstance(stale_artifacts, dict)
+        stale_artifacts.update(
+            review_result={"path": "review.json", "sha256": "1" * 64},
+            review_markdown={"path": "review.md", "sha256": "2" * 64},
+            review_marker={
+                "path": "review-marker.json",
+                "sha256": "3" * 64,
+            },
+            bundle_archive=[
+                {
+                    "path": "bundle/output/review.json",
+                    "sha256": "1" * 64,
+                }
+            ],
+        )
+        stale_record = ReviewRoundRecord.from_dict(
+            stale,
+            label="round record",
+        )
+        self.assertIs(stale_record.status, RoundStatus.STALE)
+        self.assertEqual(stale_record.observed_head_oid, "c" * 40)
+
+        invalid = _round_record()
+        invalid.update(
+            result_id="abcdefab-1234-5678-9234-567812345678",
+            status="invalid",
+            classification_reason=(
+                "review result failed independent validation"
+            ),
+            diagnostic_id="e" * 64,
+        )
+        invalid_record = ReviewRoundRecord.from_dict(
+            invalid,
+            label="round record",
+        )
+        self.assertIs(invalid_record.status, RoundStatus.INVALID)
+        self.assertEqual(invalid_record.diagnostic_id, "e" * 64)
+
+        cases = (
+            (
+                copy.deepcopy(stale),
+                lambda value: value.update(observed_head_oid="b" * 40),
+                "must differ from head_oid",
+            ),
+            (
+                copy.deepcopy(invalid),
+                lambda value: value.update(diagnostic_id=None),
+                "must record its invalid reason and diagnostic ID",
+            ),
+            (
+                copy.deepcopy(invalid),
+                lambda value: value.update(verdict="approved"),
+                "cannot record a verdict for an invalid result",
+            ),
+        )
+        for data, mutate, message in cases:
+            with self.subTest(message=message):
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(data, label="round record")
 
     def test_superseded_round_requires_actor_timestamp_and_cause(self) -> None:
         data = _round_record()

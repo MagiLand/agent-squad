@@ -228,7 +228,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     self.assertIn(message, result.stderr)
                     self.assertNotIn("Traceback", result.stderr)
 
-    def test_invalid_marker_evidence_remains_visible_in_status(self) -> None:
+    def test_invalid_marker_evidence_is_visible_then_classified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             prepared, review = _marker_confirmed_review(root)
@@ -272,10 +272,21 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 data_home=prepared.data_home,
                 env_overrides=prepared.environment,
             )
-            self.assertEqual(applied.returncode, 1)
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertIn("classified invalid", applied.stdout)
             self.assertIn(
                 "review worktree contains tracked changes or unexpected",
-                applied.stderr,
+                applied.stdout,
+            )
+            classified_state = json.loads(
+                (
+                    prepared.repository / ".agent-squad/state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(classified_state["phase"], "implementing")
+            self.assertEqual(
+                classified_state["active_round"]["status"],
+                "invalid",
             )
 
     def test_lost_notification_is_discovered_applied_and_completed(
@@ -435,10 +446,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
     ) -> None:
         cases = (
             "foreign result ID",
-            "rewritten result",
-            "changed implementation head",
             "changed implementation branch",
-            "hidden tracked review change",
         )
         for case in cases:
             with self.subTest(case=case):
@@ -464,48 +472,10 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                         result_id = (
                             "99999999-9999-4999-8999-999999999999"
                         )
-                    elif case == "rewritten result":
-                        review_path = prepared.bundle / "output/review.json"
-                        changed = json.loads(
-                            review_path.read_text(encoding="utf-8")
-                        )
-                        changed["summary"] = "Marker-confirmed rewrite."
-                        review_path.write_text(
-                            f"{json.dumps(changed, indent=2)}\n",
-                            encoding="utf-8",
-                        )
-                    elif case == "changed implementation head":
-                        run(
-                            [
-                                "git",
-                                "-c",
-                                "commit.gpgSign=false",
-                                "commit",
-                                "--allow-empty",
-                                "--no-verify",
-                                "-m",
-                                "test: advance implementation head",
-                            ],
-                            cwd=prepared.repository,
-                        )
-                    elif case == "changed implementation branch":
+                    else:
                         run(
                             ["git", "switch", "-c", "other-branch"],
                             cwd=prepared.repository,
-                        )
-                    else:
-                        run(
-                            [
-                                "git",
-                                "update-index",
-                                "--assume-unchanged",
-                                "feature.txt",
-                            ],
-                            cwd=prepared.review_worktree,
-                        )
-                        (prepared.review_worktree / "feature.txt").write_text(
-                            "tampered review content\n",
-                            encoding="utf-8",
                         )
 
                     applied = run_cli(
@@ -521,6 +491,464 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     self.assertEqual(state_path.read_bytes(), state_before)
                     self.assertEqual(round_path.read_bytes(), round_before)
                     self.assertFalse((round_path.parent / "bundle").exists())
+
+    def test_advanced_implementation_head_is_stale_and_replays_safely(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            original_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            run_id = str(original_state["active_run_id"])
+            round_directory = (
+                control_root / "runs" / run_id / "rounds/001"
+            )
+            round_path = round_directory / "round.json"
+            events_path = control_root / "runs" / run_id / "events.jsonl"
+            original_budget = original_state["review_budget"]
+
+            run(
+                [
+                    "git",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--allow-empty",
+                    "--no-verify",
+                    "-m",
+                    "test: advance implementation head",
+                ],
+                cwd=prepared.repository,
+            )
+            observed_head = run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=prepared.repository,
+            ).stdout.strip()
+
+            classified = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(classified.returncode, 0, classified.stderr)
+            self.assertIn("classified stale", classified.stdout)
+            self.assertIn(
+                f"Observed implementation head: {observed_head}",
+                classified.stdout,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            round_record = json.loads(
+                round_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["active_round"]["status"], "stale")
+            self.assertEqual(
+                state["active_round"]["result_id"],
+                review["result_id"],
+            )
+            self.assertEqual(state["review_budget"], original_budget)
+            self.assertIsNone(state["approved_head_oid"])
+            self.assertEqual(round_record["status"], "stale")
+            self.assertEqual(round_record["verdict"], "approved")
+            self.assertEqual(
+                round_record["observed_head_oid"],
+                observed_head,
+            )
+            self.assertIn(
+                str(review["head_oid"]),
+                round_record["classification_reason"],
+            )
+            self.assertTrue((round_directory / "bundle").is_dir())
+            self.assertFalse(prepared.review_worktree.exists())
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(events[-1]["event"], "review_stale")
+            self.assertEqual(
+                events[-1]["observed_head_oid"],
+                observed_head,
+            )
+
+            state_before_replay = state_path.read_bytes()
+            round_before_replay = round_path.read_bytes()
+            events_before_replay = events_path.read_bytes()
+            replay = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertIn("already classified stale", replay.stdout)
+            self.assertEqual(state_path.read_bytes(), state_before_replay)
+            self.assertEqual(round_path.read_bytes(), round_before_replay)
+            self.assertEqual(events_path.read_bytes(), events_before_replay)
+
+            recovery_report = root / "recovery-report.md"
+            recovery_report.write_text(
+                "# Recovery report\n\nThe advanced revision is ready.\n",
+                encoding="utf-8",
+            )
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(recovery_report),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            second_round = (
+                control_root / "runs" / run_id / "rounds/002/round.json"
+            )
+            newer_state = state_path.read_bytes()
+            newer_round = second_round.read_bytes()
+            newer_events = events_path.read_bytes()
+
+            historical = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(historical.returncode, 0, historical.stderr)
+            self.assertIn("already classified stale", historical.stdout)
+            self.assertEqual(state_path.read_bytes(), newer_state)
+            self.assertEqual(second_round.read_bytes(), newer_round)
+            self.assertEqual(events_path.read_bytes(), newer_events)
+
+    def test_marker_owned_invalid_result_is_archived_and_replays_safely(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            original_state = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            run_id = str(original_state["active_run_id"])
+            round_directory = (
+                control_root / "runs" / run_id / "rounds/001"
+            )
+            round_path = round_directory / "round.json"
+            events_path = control_root / "runs" / run_id / "events.jsonl"
+            original_budget = original_state["review_budget"]
+            review_path = prepared.bundle / "output/review.json"
+            rewritten = json.loads(review_path.read_text(encoding="utf-8"))
+            rewritten["summary"] = "Marker-confirmed content was rewritten."
+            review_path.write_text(
+                f"{json.dumps(rewritten, indent=2)}\n",
+                encoding="utf-8",
+            )
+
+            state_before_foreign = state_path.read_bytes()
+            round_before_foreign = round_path.read_bytes()
+            events_before_foreign = events_path.read_bytes()
+            foreign = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                "99999999-9999-4999-8999-999999999999",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(foreign.returncode, 1)
+            self.assertIn(
+                "does not match the active Reviewer-local marker",
+                foreign.stderr,
+            )
+            self.assertEqual(state_path.read_bytes(), state_before_foreign)
+            self.assertEqual(round_path.read_bytes(), round_before_foreign)
+            self.assertEqual(events_path.read_bytes(), events_before_foreign)
+            self.assertFalse(
+                (round_directory / "diagnostics/invalid-results").exists()
+            )
+
+            classified = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(classified.returncode, 0, classified.stderr)
+            self.assertIn("classified invalid", classified.stdout)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            round_record = json.loads(
+                round_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["active_round"]["status"], "invalid")
+            self.assertEqual(state["review_budget"], original_budget)
+            self.assertIsNone(state["approved_head_oid"])
+            self.assertEqual(round_record["status"], "invalid")
+            self.assertEqual(
+                round_record["result_id"],
+                review["result_id"],
+            )
+            self.assertIsNone(round_record["verdict"])
+            diagnostic_id = str(round_record["diagnostic_id"])
+            diagnostic = (
+                round_directory
+                / "diagnostics/invalid-results"
+                / diagnostic_id
+            )
+            self.assertIn(str(diagnostic), classified.stdout)
+            self.assertEqual(
+                {path.name for path in diagnostic.iterdir()},
+                {
+                    "review.json",
+                    "review.md",
+                    "local-state.json",
+                    "validation-error.json",
+                },
+            )
+            validation_error = json.loads(
+                (diagnostic / "validation-error.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(validation_error["diagnostic_id"], diagnostic_id)
+            self.assertEqual(
+                validation_error["reason"],
+                round_record["classification_reason"],
+            )
+            self.assertIn("review digest", validation_error["reason"])
+            self.assertTrue(prepared.review_worktree.exists())
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(events[-1]["event"], "review_invalid")
+            self.assertEqual(events[-1]["diagnostic_id"], diagnostic_id)
+
+            state_before_replay = state_path.read_bytes()
+            round_before_replay = round_path.read_bytes()
+            events_before_replay = events_path.read_bytes()
+            diagnostic_before_replay = {
+                path.name: path.read_bytes() for path in diagnostic.iterdir()
+            }
+            replay = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(replay.returncode, 0, replay.stderr)
+            self.assertIn("already classified invalid", replay.stdout)
+            self.assertEqual(state_path.read_bytes(), state_before_replay)
+            self.assertEqual(round_path.read_bytes(), round_before_replay)
+            self.assertEqual(events_path.read_bytes(), events_before_replay)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in diagnostic.iterdir()
+                },
+                diagnostic_before_replay,
+            )
+
+            recovery_report = root / "recovery-report.md"
+            recovery_report.write_text(
+                "# Recovery report\n\nThe candidate is ready for a new review.\n",
+                encoding="utf-8",
+            )
+            submitted = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(recovery_report),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            second_round = (
+                control_root / "runs" / run_id / "rounds/002/round.json"
+            )
+            newer_state = state_path.read_bytes()
+            newer_round = second_round.read_bytes()
+            newer_events = events_path.read_bytes()
+
+            historical = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(historical.returncode, 0, historical.stderr)
+            self.assertIn("already classified invalid", historical.stdout)
+            self.assertEqual(state_path.read_bytes(), newer_state)
+            self.assertEqual(second_round.read_bytes(), newer_round)
+            self.assertEqual(events_path.read_bytes(), newer_events)
+
+    def test_hidden_tracked_review_change_is_classified_invalid(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, review = _marker_confirmed_review(
+                Path(temporary_directory)
+            )
+            run(
+                [
+                    "git",
+                    "update-index",
+                    "--assume-unchanged",
+                    "feature.txt",
+                ],
+                cwd=prepared.review_worktree,
+            )
+            (prepared.review_worktree / "feature.txt").write_text(
+                "tampered review content\n",
+                encoding="utf-8",
+            )
+
+            classified = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(classified.returncode, 0, classified.stderr)
+            self.assertIn("classified invalid", classified.stdout)
+            self.assertIn("tracked", classified.stdout.lower())
+            state = json.loads(
+                (prepared.repository / ".agent-squad/state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["active_round"]["status"], "invalid")
+            self.assertEqual(
+                state["review_budget"]["completed_change_reviews"],
+                0,
+            )
+            self.assertTrue(prepared.review_worktree.exists())
+
+    def test_classification_commit_failure_reuses_preserved_evidence(
+        self,
+    ) -> None:
+        for classification in ("stale", "invalid"):
+            with self.subTest(classification=classification):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_review(root)
+                    if classification == "stale":
+                        run(
+                            [
+                                "git",
+                                "-c",
+                                "commit.gpgSign=false",
+                                "commit",
+                                "--allow-empty",
+                                "--no-verify",
+                                "-m",
+                                "test: advance implementation head",
+                            ],
+                            cwd=prepared.repository,
+                        )
+                    else:
+                        review_path = prepared.bundle / "output/review.json"
+                        changed = json.loads(
+                            review_path.read_text(encoding="utf-8")
+                        )
+                        changed["summary"] = "Rewritten after marking."
+                        review_path.write_text(
+                            f"{json.dumps(changed, indent=2)}\n",
+                            encoding="utf-8",
+                        )
+
+                    control_root = prepared.repository / ".agent-squad"
+                    state_path = control_root / "state.json"
+                    state = json.loads(
+                        state_path.read_text(encoding="utf-8")
+                    )
+                    run_directory = (
+                        control_root / "runs" / str(state["active_run_id"])
+                    )
+                    round_path = run_directory / "rounds/001/round.json"
+                    events_path = run_directory / "events.jsonl"
+                    state_before = state_path.read_bytes()
+                    round_before = round_path.read_bytes()
+                    events_before = events_path.read_bytes()
+                    real_atomic_write = review_applications.atomic_write
+
+                    def fail_state_commit(path, content, *, mode):
+                        if (
+                            path.resolve() == state_path.resolve()
+                            and b'"phase": "implementing"' in content
+                        ):
+                            raise OSError(
+                                "injected classification commit failure"
+                            )
+                        real_atomic_write(path, content, mode=mode)
+
+                    with (
+                        mock.patch.object(
+                            review_applications,
+                            "atomic_write",
+                            side_effect=fail_state_commit,
+                        ),
+                        self.assertRaisesRegex(
+                            review_applications.ReviewApplicationError,
+                            "injected classification commit failure",
+                        ),
+                    ):
+                        review_applications.apply_review(
+                            prepared.repository,
+                            result_id=str(review["result_id"]),
+                        )
+
+                    self.assertEqual(state_path.read_bytes(), state_before)
+                    self.assertEqual(round_path.read_bytes(), round_before)
+                    self.assertEqual(events_path.read_bytes(), events_before)
+                    if classification == "stale":
+                        preserved = run_directory / "rounds/001/bundle"
+                        self.assertTrue(preserved.is_dir())
+                    else:
+                        diagnostics = (
+                            run_directory
+                            / "rounds/001/diagnostics/invalid-results"
+                        )
+                        self.assertEqual(len(list(diagnostics.iterdir())), 1)
+
+                    retried = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    self.assertIs(
+                        retried.classification,
+                        runs.RoundStatus(classification),
+                    )
+                    self.assertFalse(retried.replayed)
+                    if classification == "invalid":
+                        self.assertEqual(len(list(diagnostics.iterdir())), 1)
 
     def test_approved_archive_and_authority_tampering_is_rejected(
         self,
@@ -1215,6 +1643,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             run_directory = root / "run"
             round_directory = run_directory / "rounds/001"
             round_directory.mkdir(parents=True)
+            (run_directory / "events.jsonl").write_bytes(b"")
             approval_content = b'{"approved":true}\n'
             approval_path = round_directory / "approval.json"
             approval_path.write_bytes(approval_content)
@@ -1227,6 +1656,10 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 round_number=1,
                 approval=approval_artifact,
                 bundle_archive=(),
+                classification_reason=None,
+                observed_head_oid=None,
+                updated_at="2026-08-29T00:00:00Z",
+                request_id="abcdefab-1234-5678-9234-567812345678",
             )
             authority = SimpleNamespace(
                 review=SimpleNamespace(
@@ -1278,6 +1711,10 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 round_number=1,
                 approval=None,
                 bundle_archive=(),
+                classification_reason=None,
+                observed_head_oid=None,
+                updated_at="2026-08-29T00:00:00Z",
+                request_id="abcdefab-1234-5678-9234-567812345678",
             )
             with (
                 mock.patch.object(

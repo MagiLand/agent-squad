@@ -23,10 +23,16 @@ from .artifacts import (
     REVIEW_MARKER_FILE_NAME,
     ReviewResult,
     ReviewRoundRecord,
+    ReviewerLocalMarker,
     ReviewSupersession,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
     RoundStatus,
+)
+from .handoffs import (
+    HandoffRecoveryError,
+    archive_invalid_review_evidence,
+    validate_invalid_review_diagnostic,
 )
 from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
@@ -43,6 +49,7 @@ from .review_submissions import (
     MARKER_PATH,
     MarkerConfirmedReview,
     RETIRED_RESULTS_PATH,
+    RetiredReviewIdentityError,
     ReviewSubmissionError,
     SUBMISSION_LOCK_PATH,
     load_marker_confirmed_review,
@@ -66,6 +73,7 @@ from .submissions import review_worktree_path
 BUNDLE_ARCHIVE_DIRECTORY_NAME = "bundle"
 RETIRED_APPLY_ATTEMPTS_DIRECTORY_NAME = "retired-apply-attempts"
 LATE_RESULTS_DIRECTORY = PurePosixPath("diagnostics/late-results")
+INVALID_RESULTS_DIRECTORY = PurePosixPath("diagnostics/invalid-results")
 _PROVISIONAL_APPLY_ARTIFACT_NAMES = (
     REVIEW_RESULT_FILE_NAME,
     REVIEW_MARKDOWN_FILE_NAME,
@@ -85,10 +93,14 @@ class ApplyReviewResult:
     run_id: str
     round_number: int
     result_id: str
-    verdict: ReviewVerdict
+    classification: RoundStatus
+    verdict: ReviewVerdict | None
     head_oid: str
+    observed_head_oid: str | None
     approval_path: Path | None
-    bundle_archive: Path
+    bundle_archive: Path | None
+    diagnostic_path: Path | None
+    reason: str | None
     replayed: bool
     next_action: str
     cleanup_warnings: tuple[str, ...]
@@ -126,6 +138,24 @@ class _StagedRecord:
     path: Path
     original: bytes
     staged: bytes
+
+
+@dataclass(frozen=True)
+class _ActiveReviewRecords:
+    """Validated mutable records for one active review transition."""
+
+    run_directory: Path
+    round_directory: Path
+    round_path: Path
+    run_path: Path
+    state_path: Path
+    event_path: Path
+    round_record: ReviewRoundRecord
+    run_record: dict[str, object]
+    state: dict[str, object]
+    original_round: bytes
+    original_run: bytes
+    original_state: bytes
 
 
 def apply_review(
@@ -365,26 +395,32 @@ def _apply_review_locked(
     presented_result_id: str | None,
 ) -> ApplyReviewResult:
     status = runs.inspect_status_locked(
-        repository.worktree.invocation_directory
+        repository.worktree.invocation_directory,
+        validate_live_review_bundle=False,
     )
     active = status.active_run
     if active is None:
         raise ReviewApplicationError(
             "there is no active run with a review result to apply"
         )
-    active_result_id = (
-        active.active_round.result_id
-        if active.active_round is not None
-        else None
-    )
-    if (
-        presented_result_id is not None
-        and presented_result_id != active_result_id
-    ):
+    active_round = active.active_round
+    marker: ReviewerLocalMarker | None = None
+    selected_result_id = presented_result_id
+    if selected_result_id is None:
+        if active.phase is runs.RunPhase.REVIEWING:
+            if active_round is None:
+                raise ReviewApplicationError(
+                    "reviewing state lost its active round"
+                )
+            marker = _load_active_result_marker(active_round)
+            selected_result_id = marker.result_id
+        elif active_round is not None:
+            selected_result_id = active_round.result_id
+    if selected_result_id is not None:
         historical = _historical_result_replay(
             repository,
             active,
-            result_id=presented_result_id,
+            result_id=selected_result_id,
             next_action=status.next_action,
         )
         if historical is not None:
@@ -406,38 +442,21 @@ def _apply_review_locked(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "apply-review requires an active reviewing round"
         )
-    unapplied_review = active.unapplied_review
-    if isinstance(unapplied_review, runs.InvalidUnappliedReviewResult):
-        raise ReviewApplicationError(unapplied_review.reason)
-    if unapplied_review is None:
+    if active_round is None:
         raise ReviewApplicationError(
-            "the active round has no valid marker-confirmed result to "
-            "apply"
+            "reviewing state lost its active round before validation"
         )
-    ready = unapplied_review
-    selected_result_id = presented_result_id or ready.result_id
-    if selected_result_id != ready.result_id:
+    if marker is None:
+        marker = _load_active_result_marker(active_round)
+    if selected_result_id is None:
+        selected_result_id = marker.result_id
+    if selected_result_id != marker.result_id:
         raise ReviewApplicationError(
             f"result ID {selected_result_id} does not match the active "
             "Reviewer-local marker; no state was changed"
         )
 
     _validate_implementation_identity(repository, active)
-    current_head = _current_head(
-        repository.worktree.root,
-        active.git_object_format,
-        label="implementation",
-    )
-    if current_head != active.current_head_oid:
-        raise ReviewApplicationError(
-            f"implementation HEAD is {current_head}, expected the reviewed "
-            f"head {active.current_head_oid}; no review result was applied"
-        )
-    active_round = active.active_round
-    if active_round is None:
-        raise ReviewApplicationError(
-            "reviewing state lost its active round before validation"
-        )
     run_directory = runs.safe_run_directory(
         repository.control_root,
         active.run_id,
@@ -450,15 +469,44 @@ def _apply_review_locked(
             active_round.review_worktree,
             authoritative_results_root=round_directory,
         )
+    except RetiredReviewIdentityError as error:
+        raise ReviewApplicationError(str(error)) from error
     except ReviewSubmissionError as error:
-        raise ReviewApplicationError(
-            f"review result failed independent validation: {error}"
-        ) from error
-    _validate_evidence(repository, active, evidence)
+        return _classify_invalid_review(
+            repository,
+            active,
+            result_id=selected_result_id,
+            reason=f"review result failed independent validation: {error}",
+        )
+    try:
+        _validate_evidence(repository, active, evidence)
+    except ReviewApplicationError as error:
+        return _classify_invalid_review(
+            repository,
+            active,
+            result_id=selected_result_id,
+            reason=str(error),
+        )
     if evidence.review.result_id != selected_result_id:
-        raise ReviewApplicationError(
-            "validated review result ID changed during application; no state "
-            "was changed"
+        return _classify_invalid_review(
+            repository,
+            active,
+            result_id=selected_result_id,
+            reason=(
+                "validated review result ID changed during application"
+            ),
+        )
+    current_head = _current_head(
+        repository.worktree.root,
+        active.git_object_format,
+        label="implementation",
+    )
+    if current_head != active.current_head_oid:
+        return _classify_stale_review(
+            repository,
+            active,
+            evidence=evidence,
+            observed_head_oid=current_head,
         )
     if evidence.review.verdict not in {
         ReviewVerdict.APPROVED,
@@ -648,12 +696,379 @@ def _apply_review_locked(
         run_id=active.run_id,
         round_number=active.current_round,
         result_id=evidence.review.result_id,
+        classification=RoundStatus.APPLIED,
         verdict=evidence.review.verdict,
         head_oid=evidence.review.head_oid,
+        observed_head_oid=None,
         approval_path=approval_path,
         bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
+        diagnostic_path=None,
+        reason=None,
         replayed=False,
         next_action=next_action,
+        cleanup_warnings=cleanup_warnings,
+    )
+
+
+def _load_active_result_marker(
+    active_round: ActiveRoundRecord,
+) -> ReviewerLocalMarker:
+    """Load the active marker far enough to establish result ownership."""
+
+    marker_path = (
+        active_round.review_worktree / REVIEW_DIRECTORY_NAME / MARKER_PATH
+    )
+    try:
+        marker_status = marker_path.lstat()
+        if not stat.S_ISREG(marker_status.st_mode):
+            raise ReviewApplicationError(
+                "the active review marker must be a regular non-symlink file"
+            )
+        marker_value = decode_json(marker_path.read_text(encoding="utf-8"))
+        return ReviewerLocalMarker.from_dict(marker_value)
+    except ReviewApplicationError:
+        raise
+    except (
+        OSError,
+        UnicodeDecodeError,
+        InvalidJsonError,
+        ArtifactValidationError,
+    ) as error:
+        raise ReviewApplicationError(
+            "the active round has no valid marker-confirmed result to "
+            f"apply: {error}"
+        ) from error
+
+
+def _classify_stale_review(
+    repository: InitializedRepository,
+    active: runs.ActiveRunStatus,
+    *,
+    evidence: MarkerConfirmedReview,
+    observed_head_oid: str,
+) -> ApplyReviewResult:
+    """Archive a valid result whose implementation revision has advanced."""
+
+    records = _load_active_review_records(repository, active)
+    reason = (
+        f"implementation HEAD advanced from {records.round_record.head_oid} "
+        f"to {observed_head_oid} before review application"
+    )
+    bundle_manifest = _archive_bundle(records.round_directory, evidence)
+    result_artifact = _write_immutable_artifact(
+        records.round_directory / REVIEW_RESULT_FILE_NAME,
+        evidence.review_bytes,
+        path=REVIEW_RESULT_FILE_NAME,
+    )
+    markdown_artifact = _write_immutable_artifact(
+        records.round_directory / REVIEW_MARKDOWN_FILE_NAME,
+        evidence.review_markdown_bytes,
+        path=REVIEW_MARKDOWN_FILE_NAME,
+    )
+    marker_artifact = _write_immutable_artifact(
+        records.round_directory / REVIEW_MARKER_FILE_NAME,
+        evidence.marker_bytes,
+        path=REVIEW_MARKER_FILE_NAME,
+    )
+    return _persist_review_classification(
+        repository,
+        active,
+        records=records,
+        classification=RoundStatus.STALE,
+        result_id=evidence.review.result_id,
+        verdict=evidence.review.verdict,
+        reason=reason,
+        observed_head_oid=observed_head_oid,
+        diagnostic_id=None,
+        review_result=result_artifact,
+        review_markdown=markdown_artifact,
+        review_marker=marker_artifact,
+        bundle_archive=bundle_manifest,
+    )
+
+
+def _classify_invalid_review(
+    repository: InitializedRepository,
+    active: runs.ActiveRunStatus,
+    *,
+    result_id: str,
+    reason: str,
+) -> ApplyReviewResult:
+    """Preserve and classify invalid evidence owned by the active marker."""
+
+    records = _load_active_review_records(repository, active)
+    active_round = active.active_round
+    if active_round is None:
+        raise ReviewApplicationError(
+            "reviewing state lost its active round before invalidation"
+        )
+    bundle_root = active_round.review_worktree / REVIEW_DIRECTORY_NAME
+    submission_lock = bundle_root.joinpath(*SUBMISSION_LOCK_PATH.parts)
+    try:
+        with exclusive_file_lock(submission_lock):
+            current_marker = _load_active_result_marker(active_round)
+            if current_marker.result_id != result_id:
+                raise ReviewApplicationError(
+                    "the active review marker changed during validation; "
+                    "no state was changed"
+                )
+            captured = _capture_invalid_review_evidence(bundle_root)
+            diagnostic_id = archive_invalid_review_evidence(
+                repository.control_root,
+                run_id=active.run_id,
+                round_number=active.current_round,
+                request_id=active_round.request_id,
+                reason=reason,
+                captured=captured,
+            )
+    except (HandoffRecoveryError, OSError) as error:
+        raise ReviewApplicationError(
+            f"could not archive invalid review evidence: {error}"
+        ) from error
+    return _persist_review_classification(
+        repository,
+        active,
+        records=records,
+        classification=RoundStatus.INVALID,
+        result_id=result_id,
+        verdict=None,
+        reason=reason,
+        observed_head_oid=None,
+        diagnostic_id=diagnostic_id,
+        review_result=None,
+        review_markdown=None,
+        review_marker=None,
+        bundle_archive=(),
+    )
+
+
+def _capture_invalid_review_evidence(
+    bundle_root: Path,
+) -> dict[str, bytes]:
+    """Capture safe regular diagnostic files without following links."""
+
+    candidates = (
+        (
+            REVIEW_RESULT_FILE_NAME,
+            PurePosixPath("output") / REVIEW_RESULT_FILE_NAME,
+        ),
+        (
+            REVIEW_MARKDOWN_FILE_NAME,
+            PurePosixPath("output") / REVIEW_MARKDOWN_FILE_NAME,
+        ),
+        (MARKER_PATH.name, MARKER_PATH),
+    )
+    captured: dict[str, bytes] = {}
+    for name, relative_path in candidates:
+        path = bundle_root.joinpath(*relative_path.parts)
+        try:
+            path_status = path.lstat()
+            if stat.S_ISREG(path_status.st_mode):
+                captured[name] = path.read_bytes()
+        except OSError:
+            continue
+    return captured
+
+
+def _load_active_review_records(
+    repository: InitializedRepository,
+    active: runs.ActiveRunStatus,
+) -> _ActiveReviewRecords:
+    """Load and bind every authoritative record for one classification."""
+
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    round_directory = (
+        run_directory / "rounds" / f"{active.current_round:03d}"
+    )
+    round_path = round_directory / "round.json"
+    run_path = run_directory / runs.RUN_RECORD_FILE_NAME
+    state_path = repository.control_root / runs.STATE_FILE_NAME
+    original_round = round_path.read_bytes()
+    original_run = run_path.read_bytes()
+    original_state = state_path.read_bytes()
+    round_data = runs.load_json_object(round_path, "active round record")
+    run_record = runs.load_json_object(run_path, "active run record")
+    state = runs.load_json_object(state_path, "authoritative state")
+    if (
+        round_path.read_bytes() != original_round
+        or run_path.read_bytes() != original_run
+        or state_path.read_bytes() != original_state
+    ):
+        raise ReviewApplicationError(
+            "authoritative review state changed while it was being loaded"
+        )
+    try:
+        round_record = ReviewRoundRecord.from_dict(
+            round_data,
+            label="active round record",
+        )
+    except ArtifactValidationError as error:
+        raise ReviewApplicationError(str(error)) from error
+    _assert_round_is_active(round_record, active)
+    return _ActiveReviewRecords(
+        run_directory=run_directory,
+        round_directory=round_directory,
+        round_path=round_path,
+        run_path=run_path,
+        state_path=state_path,
+        event_path=run_directory / runs.EVENT_LOG_FILE_NAME,
+        round_record=round_record,
+        run_record=run_record,
+        state=state,
+        original_round=original_round,
+        original_run=original_run,
+        original_state=original_state,
+    )
+
+
+def _persist_review_classification(
+    repository: InitializedRepository,
+    active: runs.ActiveRunStatus,
+    *,
+    records: _ActiveReviewRecords,
+    classification: RoundStatus,
+    result_id: str,
+    verdict: ReviewVerdict | None,
+    reason: str,
+    observed_head_oid: str | None,
+    diagnostic_id: str | None,
+    review_result: BundleArtifact | None,
+    review_markdown: BundleArtifact | None,
+    review_marker: BundleArtifact | None,
+    bundle_archive: tuple[BundleArtifact, ...],
+) -> ApplyReviewResult:
+    """Commit one stale or invalid transition without consuming budget."""
+
+    if classification not in {RoundStatus.STALE, RoundStatus.INVALID}:
+        raise ReviewApplicationError(
+            "review classification must be stale or invalid"
+        )
+    active_round = active.active_round
+    if active_round is None:
+        raise ReviewApplicationError(
+            "reviewing state lost its active round before classification"
+        )
+    timestamp = utc_timestamp()
+    next_round = replace(
+        records.round_record,
+        updated_at=timestamp,
+        result_id=result_id,
+        verdict=verdict,
+        status=classification,
+        classification_reason=reason,
+        diagnostic_id=diagnostic_id,
+        observed_head_oid=observed_head_oid,
+        review_result=review_result,
+        review_markdown=review_markdown,
+        review_marker=review_marker,
+        approval=None,
+        bundle_archive=bundle_archive,
+    )
+    next_active_round = replace(
+        active_round,
+        status=classification,
+        result_id=result_id,
+    )
+    next_run = copy.deepcopy(records.run_record)
+    next_run["phase"] = runs.RunPhase.IMPLEMENTING.value
+    next_state = copy.deepcopy(records.state)
+    next_state.update(
+        updated_at=timestamp,
+        phase=runs.RunPhase.IMPLEMENTING.value,
+        approved_head_oid=None,
+        active_round=next_active_round.to_dict(),
+    )
+    event = {
+        "timestamp": timestamp,
+        "event": f"review_{classification.value}",
+        "run_id": active.run_id,
+        "round": active.current_round,
+        "request_id": active_round.request_id,
+        "result_id": result_id,
+        "head_oid": records.round_record.head_oid,
+        "reason": reason,
+    }
+    if observed_head_oid is not None:
+        event["observed_head_oid"] = observed_head_oid
+    if diagnostic_id is not None:
+        event["diagnostic_id"] = diagnostic_id
+    original_events, staged_events = _stage_event_log(
+        records.event_path,
+        event,
+        identity_fields=("event", "run_id", "round", "result_id"),
+    )
+    _validate_implementation_identity(repository, active)
+    if observed_head_oid is not None and _current_head(
+        repository.worktree.root,
+        active.git_object_format,
+        label="implementation",
+    ) != observed_head_oid:
+        raise ReviewApplicationError(
+            "implementation HEAD changed while the stale result was being "
+            "archived; no classification was applied"
+        )
+    _persist_authoritative_transition(
+        records=(
+            _StagedRecord(
+                path=records.round_path,
+                original=records.original_round,
+                staged=encode_json(next_round.to_dict()),
+            ),
+            _StagedRecord(
+                path=records.run_path,
+                original=records.original_run,
+                staged=encode_json(next_run),
+            ),
+            _StagedRecord(
+                path=records.event_path,
+                original=original_events,
+                staged=staged_events,
+            ),
+        ),
+        state_path=records.state_path,
+        original_state=records.original_state,
+        next_state=encode_json(next_state),
+        failure_message=(
+            f"could not persist {classification.value} review state"
+        ),
+    )
+    cleanup_warnings = (
+        _cleanup_review_resources(repository, active)
+        if classification is RoundStatus.STALE
+        else (
+            "retained invalid-review worktree "
+            f"{active_round.review_worktree} for diagnostic recovery",
+        )
+    )
+    diagnostic_path = (
+        None
+        if diagnostic_id is None
+        else records.round_directory.joinpath(
+            *INVALID_RESULTS_DIRECTORY.parts,
+        )
+        / diagnostic_id
+    )
+    return ApplyReviewResult(
+        run_id=active.run_id,
+        round_number=active.current_round,
+        result_id=result_id,
+        classification=classification,
+        verdict=verdict,
+        head_oid=records.round_record.head_oid,
+        observed_head_oid=observed_head_oid,
+        approval_path=None,
+        bundle_archive=(
+            records.round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
+            if bundle_archive
+            else None
+        ),
+        diagnostic_path=diagnostic_path,
+        reason=reason,
+        replayed=False,
+        next_action="continue implementing the captured task",
         cleanup_warnings=cleanup_warnings,
     )
 
@@ -679,14 +1094,50 @@ def _historical_result_replay(
     if matched is None:
         return None
     round_directory, round_record = matched
-    if round_record.status is not RoundStatus.APPLIED:
-        raise ReviewApplicationError(
-            f"result ID {result_id} was previously classified "
-            f"{round_record.status.value} in round "
-            f"{round_record.round_number}; no state was changed"
+    if round_record.status is RoundStatus.INVALID:
+        diagnostic_id = round_record.diagnostic_id
+        reason = round_record.classification_reason
+        if diagnostic_id is None or reason is None:
+            raise ReviewApplicationError(
+                "historical invalid result is missing its diagnostic "
+                "authority"
+            )
+        diagnostic_path = (
+            round_directory.joinpath(*INVALID_RESULTS_DIRECTORY.parts)
+            / diagnostic_id
         )
+        try:
+            validate_invalid_review_diagnostic(
+                diagnostic_path,
+                run_id=active.run_id,
+                round_number=round_record.round_number,
+                request_id=round_record.request_id,
+                diagnostic_id=diagnostic_id,
+                reason=reason,
+            )
+        except HandoffRecoveryError as error:
+            raise ReviewApplicationError(str(error)) from error
+        return ApplyReviewResult(
+            run_id=active.run_id,
+            round_number=round_record.round_number,
+            result_id=result_id,
+            classification=RoundStatus.INVALID,
+            verdict=None,
+            head_oid=round_record.head_oid,
+            observed_head_oid=None,
+            approval_path=None,
+            bundle_archive=None,
+            diagnostic_path=diagnostic_path,
+            reason=reason,
+            replayed=True,
+            next_action=next_action,
+            cleanup_warnings=(),
+        )
+    validator = runs.validate_applied_review_round
+    if round_record.status is RoundStatus.STALE:
+        validator = runs.validate_stale_review_round
     try:
-        authority = runs.validate_applied_review_round(
+        authority = validator(
             round_directory=round_directory,
             round_record=round_record,
             round_number=round_record.round_number,
@@ -699,7 +1150,15 @@ def _historical_result_replay(
         label="historical",
     )
     approval_path: Path | None = None
-    if authority.review.verdict is ReviewVerdict.APPROVED:
+    if round_record.status is RoundStatus.STALE:
+        if round_record.classification_reason is None or (
+            round_record.observed_head_oid is None
+        ):
+            raise ReviewApplicationError(
+                "historical stale result is missing its classification "
+                "authority"
+            )
+    elif authority.review.verdict is ReviewVerdict.APPROVED:
         approval_artifact = round_record.approval
         if approval_artifact is None:
             raise ReviewApplicationError(
@@ -717,16 +1176,45 @@ def _historical_result_replay(
             f"historical applied verdict {authority.review.verdict.value} "
             "is not supported by this command version"
         )
+    if (
+        round_record.status is RoundStatus.APPLIED
+        and active.current_round == round_record.round_number
+        and active.active_round is not None
+        and active.active_round.result_id == result_id
+    ):
+        try:
+            _ensure_event(
+                run_directory / runs.EVENT_LOG_FILE_NAME,
+                _review_applied_event(
+                    timestamp=round_record.updated_at,
+                    run_id=active.run_id,
+                    round_number=round_record.round_number,
+                    request_id=round_record.request_id,
+                    result_id=result_id,
+                    verdict=authority.review.verdict,
+                    head_oid=authority.review.head_oid,
+                ),
+                identity_fields=("event", "run_id", "round", "result_id"),
+            )
+        except OSError as error:
+            raise ReviewApplicationError(
+                "the applied result is authoritative, but its missing event "
+                f"could not be recovered: {error}"
+            ) from error
     return ApplyReviewResult(
         run_id=active.run_id,
         round_number=round_record.round_number,
         result_id=result_id,
+        classification=round_record.status,
         verdict=authority.review.verdict,
         head_oid=authority.review.head_oid,
+        observed_head_oid=round_record.observed_head_oid,
         approval_path=approval_path,
         bundle_archive=(
             round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME
         ),
+        diagnostic_path=None,
+        reason=round_record.classification_reason,
         replayed=True,
         next_action=next_action,
         cleanup_warnings=(),
@@ -804,10 +1292,14 @@ def _approved_replay(
         run_id=active.run_id,
         round_number=active.current_round,
         result_id=active_round.result_id,
+        classification=RoundStatus.APPLIED,
         verdict=ReviewVerdict.APPROVED,
         head_oid=approval.head_oid,
+        observed_head_oid=None,
         approval_path=round_directory / APPROVAL_FILE_NAME,
         bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
+        diagnostic_path=None,
+        reason=None,
         replayed=True,
         next_action="agent-squad complete",
         cleanup_warnings=(),
@@ -916,10 +1408,14 @@ def _changes_requested_replay(
         run_id=active.run_id,
         round_number=active.current_round,
         result_id=active_round.result_id,
+        classification=RoundStatus.APPLIED,
         verdict=ReviewVerdict.CHANGES_REQUESTED,
         head_oid=review.head_oid,
+        observed_head_oid=None,
         approval_path=None,
         bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
+        diagnostic_path=None,
+        reason=None,
         replayed=True,
         next_action=runs.CORRECTION_SUBMIT_NEXT_ACTION,
         cleanup_warnings=cleanup_warnings,
@@ -2201,8 +2697,8 @@ def _cleanup_review_resources(
         _validate_evidence(repository, active, evidence)
     except AgentSquadError as error:
         return (
-            f"retained review worktree {review_worktree} because its applied "
-            f"evidence could not be revalidated: {error}",
+            f"retained review worktree {review_worktree} because its "
+            f"archived evidence could not be revalidated: {error}",
         )
 
     bundle_root = review_worktree / REVIEW_DIRECTORY_NAME
