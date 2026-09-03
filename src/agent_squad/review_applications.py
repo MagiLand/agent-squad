@@ -49,6 +49,7 @@ from .review_submissions import (
     MARKER_PATH,
     MarkerConfirmedReview,
     RETIRED_RESULTS_PATH,
+    ReviewEvidenceAccessError,
     RetiredReviewIdentityError,
     ReviewSubmissionError,
     SUBMISSION_LOCK_PATH,
@@ -426,16 +427,33 @@ def _apply_review_locked(
         if historical is not None:
             return historical
     if active.phase is runs.RunPhase.APPROVED:
-        return _approved_replay(
-            repository,
-            active,
-            presented_result_id=presented_result_id,
+        if presented_result_id is not None:
+            raise ReviewApplicationError(
+                f"result ID {presented_result_id} is not the result that "
+                "approved the active run; no state was changed"
+            )
+        raise ReviewApplicationError(
+            "the approved result is missing from authoritative round history"
         )
     if active.phase is runs.RunPhase.IMPLEMENTING:
-        return _changes_requested_replay(
-            repository,
-            active,
-            presented_result_id=presented_result_id,
+        if (
+            active_round is not None
+            and active_round.status is RoundStatus.APPLIED
+            and active_round.result_id is not None
+        ):
+            if presented_result_id is not None:
+                raise ReviewApplicationError(
+                    f"result ID {presented_result_id} is not the result that "
+                    "returned the active run to implementation; no state was "
+                    "changed"
+                )
+            raise ReviewApplicationError(
+                "the applied changes-requested result is missing from "
+                "authoritative round history"
+            )
+        raise ReviewApplicationError(
+            f"run {active.run_id} is in phase {active.phase.value}; "
+            "apply-review requires an active reviewing round"
         )
     if active.phase is not runs.RunPhase.REVIEWING:
         raise ReviewApplicationError(
@@ -469,7 +487,7 @@ def _apply_review_locked(
             active_round.review_worktree,
             authoritative_results_root=round_directory,
         )
-    except RetiredReviewIdentityError as error:
+    except (RetiredReviewIdentityError, ReviewEvidenceAccessError) as error:
         raise ReviewApplicationError(str(error)) from error
     except ReviewSubmissionError as error:
         return _classify_invalid_review(
@@ -1218,207 +1236,6 @@ def _historical_result_replay(
         replayed=True,
         next_action=next_action,
         cleanup_warnings=(),
-    )
-
-
-def _approved_replay(
-    repository: InitializedRepository,
-    active: runs.ActiveRunStatus,
-    *,
-    presented_result_id: str | None,
-) -> ApplyReviewResult:
-    active_round = active.active_round
-    approval = active.approval
-    if active_round is None or active_round.result_id is None or (
-        approval is None
-    ):
-        raise ReviewApplicationError(
-            "approved state is missing its applied result authority"
-        )
-    if presented_result_id is not None and (
-        presented_result_id != active_round.result_id
-    ):
-        raise ReviewApplicationError(
-            f"result ID {presented_result_id} is not the result that approved "
-            "the active run; no state was changed"
-        )
-    run_directory = runs.safe_run_directory(
-        repository.control_root,
-        active.run_id,
-    )
-    matched = _find_recorded_review_round(
-        active,
-        run_directory,
-        result_id=active_round.result_id,
-    )
-    if matched is None:
-        raise ReviewApplicationError(
-            "the approved result is missing from authoritative round history"
-        )
-    round_directory, round_record = matched
-    comparisons = (
-        (round_record.round_number, active.current_round, "round number"),
-        (round_record.request_id, approval.request_id, "request ID"),
-        (round_record.result_id, approval.result_id, "result ID"),
-        (round_record.head_oid, approval.head_oid, "head OID"),
-        (round_record.status, RoundStatus.APPLIED, "status"),
-        (round_record.verdict, ReviewVerdict.APPROVED, "verdict"),
-    )
-    for actual, expected, label in comparisons:
-        if actual != expected:
-            raise ReviewApplicationError(
-                f"approved round {label} does not match authoritative state"
-            )
-    try:
-        _ensure_event(
-            run_directory / runs.EVENT_LOG_FILE_NAME,
-            _review_applied_event(
-                timestamp=round_record.updated_at,
-                run_id=approval.run_id,
-                round_number=approval.round_number,
-                request_id=approval.request_id,
-                result_id=approval.result_id,
-                verdict=ReviewVerdict.APPROVED,
-                head_oid=approval.head_oid,
-            ),
-            identity_fields=("event", "run_id", "round", "result_id"),
-        )
-    except OSError as error:
-        raise ReviewApplicationError(
-            "the approval is authoritative, but its missing event could not "
-            f"be recovered: {error}"
-        ) from error
-    return ApplyReviewResult(
-        run_id=active.run_id,
-        round_number=active.current_round,
-        result_id=active_round.result_id,
-        classification=RoundStatus.APPLIED,
-        verdict=ReviewVerdict.APPROVED,
-        head_oid=approval.head_oid,
-        observed_head_oid=None,
-        approval_path=round_directory / APPROVAL_FILE_NAME,
-        bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
-        diagnostic_path=None,
-        reason=None,
-        replayed=True,
-        next_action="agent-squad complete",
-        cleanup_warnings=(),
-    )
-
-
-def _changes_requested_replay(
-    repository: InitializedRepository,
-    active: runs.ActiveRunStatus,
-    *,
-    presented_result_id: str | None,
-) -> ApplyReviewResult:
-    active_round = active.active_round
-    if (
-        active_round is None
-        or active_round.status is not RoundStatus.APPLIED
-        or active_round.result_id is None
-    ):
-        raise ReviewApplicationError(
-            f"run {active.run_id} is in phase {active.phase.value}; "
-            "apply-review requires an active reviewing round"
-        )
-    if presented_result_id is not None and (
-        presented_result_id != active_round.result_id
-    ):
-        raise ReviewApplicationError(
-            f"result ID {presented_result_id} is not the result that returned "
-            "the active run to implementation; no state was changed"
-        )
-    run_directory = runs.safe_run_directory(
-        repository.control_root,
-        active.run_id,
-    )
-    matched = _find_recorded_review_round(
-        active,
-        run_directory,
-        result_id=active_round.result_id,
-    )
-    if matched is None:
-        raise ReviewApplicationError(
-            "the applied changes-requested result is missing from "
-            "authoritative round history"
-        )
-    round_directory, round_record = matched
-    comparisons = (
-        (round_record.round_number, active.current_round, "round number"),
-        (round_record.request_id, active_round.request_id, "request ID"),
-        (round_record.result_id, active_round.result_id, "result ID"),
-        (round_record.head_oid, active.current_head_oid, "head OID"),
-        (round_record.status, RoundStatus.APPLIED, "status"),
-        (
-            round_record.verdict,
-            ReviewVerdict.CHANGES_REQUESTED,
-            "verdict",
-        ),
-    )
-    for actual, expected, label in comparisons:
-        if actual != expected:
-            raise ReviewApplicationError(
-                f"applied changes-requested round {label} does not match "
-                "authoritative state"
-            )
-    try:
-        authority = runs.validate_applied_review_round(
-            round_directory=round_directory,
-            round_record=round_record,
-            round_number=active.current_round,
-        )
-    except runs.RunStateError as error:
-        raise ReviewApplicationError(str(error)) from error
-    review = authority.review
-    if (
-        review.request_id != active_round.request_id
-        or review.result_id != active_round.result_id
-        or review.verdict is not ReviewVerdict.CHANGES_REQUESTED
-    ):
-        raise ReviewApplicationError(
-            "applied review result does not match authoritative state"
-        )
-    _verify_bundle_tree(
-        round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
-        round_record.bundle_archive,
-        label="existing",
-    )
-    try:
-        _ensure_event(
-            run_directory / runs.EVENT_LOG_FILE_NAME,
-            _review_applied_event(
-                timestamp=round_record.updated_at,
-                run_id=active.run_id,
-                round_number=active.current_round,
-                request_id=active_round.request_id,
-                result_id=active_round.result_id,
-                verdict=ReviewVerdict.CHANGES_REQUESTED,
-                head_oid=review.head_oid,
-            ),
-            identity_fields=("event", "run_id", "round", "result_id"),
-        )
-    except OSError as error:
-        raise ReviewApplicationError(
-            "the changes-requested result is authoritative, but its missing "
-            f"event could not be recovered: {error}"
-        ) from error
-    cleanup_warnings = _cleanup_review_resources(repository, active)
-    return ApplyReviewResult(
-        run_id=active.run_id,
-        round_number=active.current_round,
-        result_id=active_round.result_id,
-        classification=RoundStatus.APPLIED,
-        verdict=ReviewVerdict.CHANGES_REQUESTED,
-        head_oid=review.head_oid,
-        observed_head_oid=None,
-        approval_path=None,
-        bundle_archive=round_directory / BUNDLE_ARCHIVE_DIRECTORY_NAME,
-        diagnostic_path=None,
-        reason=None,
-        replayed=True,
-        next_action=runs.CORRECTION_SUBMIT_NEXT_ACTION,
-        cleanup_warnings=cleanup_warnings,
     )
 
 

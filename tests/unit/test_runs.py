@@ -1053,6 +1053,15 @@ class AppliedReviewHistoryTests(unittest.TestCase):
                 )
             )
             assert round_record.review_result is not None
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "stale round 1 status does not match authoritative history",
+            ):
+                runs.validate_stale_review_round(
+                    round_directory=round_directory,
+                    round_record=round_record,
+                    round_number=1,
+                )
             cases = (
                 (
                     replace(round_record, status=RoundStatus.INVALID),

@@ -15,7 +15,6 @@ from .artifacts import (
     ArtifactValidationError,
     BundleArtifact,
     DeveloperResolution,
-    RECOVERY_ROUND_BUNDLE_PATH,
     RECOVERY_ROUND_STATUSES,
     ReviewRequest,
     ReviewResponse,
@@ -23,8 +22,6 @@ from .artifacts import (
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
-    RoundStatus,
-    SubmissionMode,
     deterministic_reviewer_name,
     response_validation_mode,
     validate_followup_submission_head,
@@ -62,6 +59,10 @@ ADVISORY_IGNORED_ROOT_ENTRIES = frozenset({RETIRED_RESULTS_PATH.name})
 
 class ReviewSubmissionError(AgentSquadError):
     """Raised when a Reviewer result cannot be marked safely."""
+
+
+class ReviewEvidenceAccessError(ReviewSubmissionError):
+    """Raised when review evidence cannot be read or inspected reliably."""
 
 
 class RetiredReviewIdentityError(ReviewSubmissionError):
@@ -454,6 +455,7 @@ def load_marker_confirmed_review(
                 bundle_root,
                 label="review bundle",
                 error_type=ReviewSubmissionError,
+                access_error_type=ReviewEvidenceAccessError,
                 ignored_root_entries=(
                     frozenset()
                     if authoritative_results_root is None
@@ -491,7 +493,7 @@ def load_marker_confirmed_review(
     except ArtifactValidationError as error:
         raise ReviewSubmissionError(str(error)) from error
     except OSError as error:
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"cannot validate the marker-confirmed review result: {error}"
         ) from error
 
@@ -566,7 +568,7 @@ def _validate_worktree_integrity(
         )
     if branch.returncode != 1:
         detail = branch.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not verify detached review HEAD: {detail}"
         )
     base_commit = run_git(
@@ -592,7 +594,7 @@ def _validate_worktree_integrity(
         )
     if ancestor.returncode != 0:
         detail = ancestor.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not verify the requested review range: {detail}"
         )
 
@@ -610,7 +612,7 @@ def _validate_worktree_integrity(
         raise ReviewSubmissionError("review worktree index differs from HEAD")
     if index_diff.returncode != 0:
         detail = index_diff.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not verify the review worktree index: {detail}"
         )
     worktree_diff = run_git(
@@ -628,7 +630,7 @@ def _validate_worktree_integrity(
         )
     if worktree_diff.returncode != 0:
         detail = worktree_diff.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not verify tracked review content: {detail}"
         )
     verify_flagged_tracked_files(worktree.root, request.object_format)
@@ -643,7 +645,7 @@ def _validate_worktree_integrity(
     )
     if visible.returncode != 0:
         detail = visible.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not inspect review worktree output: {detail}"
         )
     unexpected_visible = _unexpected_worktree_entries(
@@ -663,9 +665,15 @@ def _validate_worktree_integrity(
         "--",
         str(PurePosixPath(REVIEW_DIRECTORY_NAME) / REQUEST_PATH),
     )
-    if ignored.returncode != 0:
+    if ignored.returncode == 1:
         raise ReviewSubmissionError(
             ".agent-squad-review is not Git-excluded in the review worktree"
+        )
+    if ignored.returncode != 0:
+        detail = ignored.stderr.strip() or "unknown Git error"
+        raise ReviewEvidenceAccessError(
+            "could not verify that .agent-squad-review is Git-excluded: "
+            f"{detail}"
         )
 
 
@@ -701,7 +709,7 @@ def verify_flagged_tracked_files(
     )
     if tracked.returncode != 0:
         detail = tracked.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not inspect tracked-file flags: {detail}"
         )
     for record in tracked.stdout.split("\0"):
@@ -734,7 +742,7 @@ def verify_flagged_tracked_files(
                 f"tracked review file is missing: {path_text}"
             ) from error
         except OSError as error:
-            raise ReviewSubmissionError(
+            raise ReviewEvidenceAccessError(
                 f"cannot inspect tracked review file {path_text}: {error}"
             ) from error
 
@@ -745,8 +753,12 @@ def verify_flagged_tracked_files(
                 )
             try:
                 content = os.fsencode(os.readlink(path))
-            except OSError as error:
+            except FileNotFoundError as error:
                 raise ReviewSubmissionError(
+                    f"cannot read tracked review symlink {path_text}: {error}"
+                ) from error
+            except OSError as error:
+                raise ReviewEvidenceAccessError(
                     f"cannot read tracked review symlink {path_text}: {error}"
                 ) from error
             actual_oid = _blob_oid(content, object_format)
@@ -770,7 +782,7 @@ def verify_flagged_tracked_files(
             )
             if hashed.returncode != 0:
                 detail = hashed.stderr.strip() or "unknown Git error"
-                raise ReviewSubmissionError(
+                raise ReviewEvidenceAccessError(
                     f"could not hash tracked review file {path_text}: "
                     f"{detail}"
                 )
@@ -794,8 +806,13 @@ def _tracked_path(repository_root: Path, path_text: str) -> Path:
         relative_directory /= part
         try:
             status = current.lstat()
-        except OSError as error:
+        except FileNotFoundError as error:
             raise ReviewSubmissionError(
+                "cannot inspect tracked review directory "
+                f"{relative_directory}: {error}"
+            ) from error
+        except OSError as error:
+            raise ReviewEvidenceAccessError(
                 "cannot inspect tracked review directory "
                 f"{relative_directory}: {error}"
             ) from error
@@ -827,6 +844,7 @@ def _validate_bundle_inputs(
         input_root,
         label="review bundle",
         error_type=ReviewSubmissionError,
+        access_error_type=ReviewEvidenceAccessError,
     )
     actual_paths = set(input_tree.files)
     actual_directories = set(input_tree.directories)
@@ -1416,8 +1434,12 @@ def _validate_bundle_root_entries(
     }
     try:
         entries = list(bundle_root.iterdir())
-    except OSError as error:
+    except FileNotFoundError as error:
         raise ReviewSubmissionError(
+            f"cannot inspect review bundle root: {error}"
+        ) from error
+    except OSError as error:
+        raise ReviewEvidenceAccessError(
             f"cannot inspect review bundle root: {error}"
         ) from error
     unexpected = sorted(
@@ -1455,6 +1477,7 @@ def _validate_output_tree(output_root: Path) -> None:
         output_root,
         label="review bundle output",
         error_type=ReviewSubmissionError,
+        access_error_type=ReviewEvidenceAccessError,
     )
 
 
@@ -1513,7 +1536,7 @@ def _lstat_or_reject(path: Path, label: str) -> os.stat_result:
     except FileNotFoundError as error:
         raise ReviewSubmissionError(f"{label} is missing: {path}") from error
     except OSError as error:
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"cannot inspect {label}: {error}"
         ) from error
 
@@ -1524,7 +1547,14 @@ def _read_regular_file(path: Path, label: str) -> bytes:
         raise ReviewSubmissionError(
             f"{label} must be a regular non-symlink file: {path}"
         )
-    return path.read_bytes()
+    try:
+        return path.read_bytes()
+    except FileNotFoundError as error:
+        raise ReviewSubmissionError(f"{label} is missing: {path}") from error
+    except OSError as error:
+        raise ReviewEvidenceAccessError(
+            f"cannot read {label}: {error}"
+        ) from error
 
 
 def _require_normal_directory(path: Path, label: str) -> None:
@@ -1543,10 +1573,10 @@ def _git_output(
     result = run_git(working_directory, *arguments)
     if result.returncode != 0:
         detail = result.stderr.strip() or "unknown Git error"
-        raise ReviewSubmissionError(f"could not {action}: {detail}")
+        raise ReviewEvidenceAccessError(f"could not {action}: {detail}")
     output = result.stdout.strip()
     if not output:
-        raise ReviewSubmissionError(
+        raise ReviewEvidenceAccessError(
             f"could not {action}: Git returned no value"
         )
     return output

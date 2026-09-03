@@ -20,7 +20,12 @@ from tests.integration.test_review_submissions import (
 
 add_src_to_path()
 
-from agent_squad import review_applications, runs, submissions  # noqa: E402
+from agent_squad import (  # noqa: E402
+    review_applications,
+    review_submissions,
+    runs,
+    submissions,
+)
 
 
 def _marker_confirmed_review(
@@ -288,6 +293,200 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                 classified_state["active_round"]["status"],
                 "invalid",
             )
+
+    def test_evidence_access_failures_leave_the_result_retryable(self) -> None:
+        for failure_kind in ("filesystem", "git"):
+            with self.subTest(failure_kind=failure_kind):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared, review = _marker_confirmed_review(root)
+                    control_root = prepared.repository / ".agent-squad"
+                    state_path = control_root / "state.json"
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    run_directory = (
+                        control_root
+                        / "runs"
+                        / str(state["active_run_id"])
+                    )
+                    round_path = run_directory / "rounds/001/round.json"
+                    run_path = run_directory / "run.json"
+                    events_path = run_directory / "events.jsonl"
+                    originals = (
+                        state_path.read_bytes(),
+                        round_path.read_bytes(),
+                        run_path.read_bytes(),
+                        events_path.read_bytes(),
+                    )
+
+                    if failure_kind == "filesystem":
+                        request_path = prepared.bundle / "input/request.json"
+                        real_read_bytes = Path.read_bytes
+
+                        def fail_evidence_read(path):
+                            if path == request_path:
+                                raise PermissionError(
+                                    "simulated evidence read failure"
+                                )
+                            return real_read_bytes(path)
+
+                        failure = mock.patch.object(
+                            Path,
+                            "read_bytes",
+                            new=fail_evidence_read,
+                        )
+                        message = "simulated evidence read failure"
+                    else:
+                        real_run_git = review_submissions.run_git
+
+                        def fail_evidence_git(start, *arguments):
+                            if (
+                                Path(start) == prepared.review_worktree
+                                and arguments
+                                == ("rev-parse", "--show-object-format")
+                            ):
+                                return SimpleNamespace(
+                                    returncode=128,
+                                    stdout="",
+                                    stderr="simulated Git inspection failure",
+                                )
+                            return real_run_git(start, *arguments)
+
+                        failure = mock.patch.object(
+                            review_submissions,
+                            "run_git",
+                            side_effect=fail_evidence_git,
+                        )
+                        message = "simulated Git inspection failure"
+
+                    with failure, self.assertRaisesRegex(
+                        review_applications.ReviewApplicationError,
+                        message,
+                    ):
+                        review_applications.apply_review(
+                            prepared.repository,
+                            result_id=str(review["result_id"]),
+                        )
+
+                    self.assertEqual(
+                        (
+                            state_path.read_bytes(),
+                            round_path.read_bytes(),
+                            run_path.read_bytes(),
+                            events_path.read_bytes(),
+                        ),
+                        originals,
+                    )
+                    self.assertFalse(
+                        (
+                            round_path.parent
+                            / "diagnostics/invalid-results"
+                        ).exists()
+                    )
+
+                    retried = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+
+                    self.assertIs(
+                        retried.classification,
+                        runs.RoundStatus.APPLIED,
+                    )
+                    self.assertIs(retried.verdict, runs.ReviewVerdict.APPROVED)
+                    self.assertFalse(retried.replayed)
+
+    def test_invalid_authoritative_retired_ledger_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_retired_review(root)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            round_directory = run_directory / "rounds/001"
+            round_path = round_directory / "round.json"
+            run_path = run_directory / "run.json"
+            events_path = run_directory / "events.jsonl"
+            authority = round_directory / "retired-results.json"
+            authority.write_bytes(b'{"schema_version":\n')
+            diagnostics_root = round_directory / "diagnostics/invalid-results"
+            diagnostics_before = {
+                path.relative_to(diagnostics_root): path.read_bytes()
+                for path in diagnostics_root.rglob("*")
+                if path.is_file()
+            }
+            originals = (
+                state_path.read_bytes(),
+                round_path.read_bytes(),
+                run_path.read_bytes(),
+                events_path.read_bytes(),
+            )
+
+            with self.assertRaisesRegex(
+                review_applications.ReviewApplicationError,
+                "authoritative retired review identities are invalid",
+            ):
+                review_applications.apply_review(
+                    prepared.repository,
+                    result_id=str(review["result_id"]),
+                )
+
+            self.assertEqual(
+                (
+                    state_path.read_bytes(),
+                    round_path.read_bytes(),
+                    run_path.read_bytes(),
+                    events_path.read_bytes(),
+                ),
+                originals,
+            )
+            self.assertEqual(
+                {
+                    path.relative_to(diagnostics_root): path.read_bytes()
+                    for path in diagnostics_root.rglob("*")
+                    if path.is_file()
+                },
+                diagnostics_before,
+            )
+
+    def test_active_round_replay_uses_historical_authority(self) -> None:
+        for verdict in ("approved", "changes_requested"):
+            with self.subTest(verdict=verdict):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared, review = _marker_confirmed_review(
+                        Path(temporary_directory),
+                        verdict=verdict,
+                    )
+                    first = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    self.assertFalse(first.replayed)
+                    historical_replay = (
+                        review_applications._historical_result_replay
+                    )
+
+                    with mock.patch.object(
+                        review_applications,
+                        "_historical_result_replay",
+                        wraps=historical_replay,
+                    ) as historical:
+                        replayed = review_applications.apply_review(
+                            prepared.repository,
+                        )
+
+                    historical.assert_called_once()
+                    self.assertTrue(replayed.replayed)
+                    self.assertIs(
+                        replayed.classification,
+                        runs.RoundStatus.APPLIED,
+                    )
+                    self.assertIs(
+                        replayed.verdict,
+                        runs.ReviewVerdict(verdict),
+                    )
 
     def test_lost_notification_is_discovered_applied_and_completed(
         self,
@@ -570,7 +769,9 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             self.assertFalse(prepared.review_worktree.exists())
             events = [
                 json.loads(line)
-                for line in events_path.read_text(encoding="utf-8").splitlines()
+                for line in events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
             ]
             self.assertEqual(events[-1]["event"], "review_stale")
             self.assertEqual(
@@ -736,7 +937,9 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             self.assertTrue(prepared.review_worktree.exists())
             events = [
                 json.loads(line)
-                for line in events_path.read_text(encoding="utf-8").splitlines()
+                for line in events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
             ]
             self.assertEqual(events[-1]["event"], "review_invalid")
             self.assertEqual(events[-1]["diagnostic_id"], diagnostic_id)
@@ -770,7 +973,8 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
 
             recovery_report = root / "recovery-report.md"
             recovery_report.write_text(
-                "# Recovery report\n\nThe candidate is ready for a new review.\n",
+                "# Recovery report\n\n"
+                "The candidate is ready for a new review.\n",
                 encoding="utf-8",
             )
             submitted = run_cli(

@@ -1053,8 +1053,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             ),
             (
                 "unlistable bundle input directory",
-                "review bundle input files do not match the request "
-                "(missing: input/context/notes.md)",
+                "cannot inspect review bundle:",
             ),
             (
                 "extra bundle input directory",

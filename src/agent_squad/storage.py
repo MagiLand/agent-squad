@@ -113,6 +113,7 @@ def inspect_regular_tree(
     *,
     label: str,
     error_type: type[Exception],
+    access_error_type: type[Exception] | None = None,
 ) -> RegularTree:
     """Inspect a normal tree while rejecting links and case collisions."""
 
@@ -120,6 +121,7 @@ def inspect_regular_tree(
         root,
         label=label,
         error_type=error_type,
+        access_error_type=access_error_type,
         capture_contents=False,
     )
     return tree
@@ -130,6 +132,7 @@ def read_regular_tree(
     *,
     label: str,
     error_type: type[Exception],
+    access_error_type: type[Exception] | None = None,
     ignored_root_entries: frozenset[str] = frozenset(),
 ) -> dict[PurePosixPath, bytes]:
     """Read regular files without entering explicitly ignored root entries."""
@@ -138,6 +141,7 @@ def read_regular_tree(
         root,
         label=label,
         error_type=error_type,
+        access_error_type=access_error_type,
         capture_contents=True,
         ignored_root_entries=ignored_root_entries,
     )
@@ -149,15 +153,21 @@ def _scan_regular_tree(
     *,
     label: str,
     error_type: type[Exception],
+    access_error_type: type[Exception] | None,
     capture_contents: bool,
     ignored_root_entries: frozenset[str] = frozenset(),
 ) -> tuple[RegularTree, dict[PurePosixPath, bytes]]:
     """Walk one regular tree and optionally capture file contents."""
 
+    access_failure = access_error_type or error_type
     try:
         root_status = root.lstat()
-    except OSError as error:
+    except FileNotFoundError as error:
         raise error_type(f"cannot inspect {label} {root}: {error}") from error
+    except OSError as error:
+        raise access_failure(
+            f"cannot inspect {label} {root}: {error}"
+        ) from error
     if not stat.S_ISDIR(root_status.st_mode):
         raise error_type(f"{label} must be a normal directory: {root}")
 
@@ -165,7 +175,20 @@ def _scan_regular_tree(
     contents: dict[PurePosixPath, bytes] = {}
     directories: set[PurePosixPath] = set()
     folded: dict[str, PurePosixPath] = {}
-    for directory, names, filenames in os.walk(root, followlinks=False):
+
+    def reject_walk_error(error: OSError) -> None:
+        failure_type = (
+            error_type
+            if isinstance(error, FileNotFoundError)
+            else access_failure
+        )
+        raise failure_type(f"cannot inspect {label}: {error}") from error
+
+    for directory, names, filenames in os.walk(
+        root,
+        followlinks=False,
+        onerror=reject_walk_error,
+    ):
         current = Path(directory)
         if current == root and ignored_root_entries:
             names[:] = [
@@ -180,8 +203,12 @@ def _scan_regular_tree(
             path = current / name
             try:
                 status = path.lstat()
-            except OSError as error:
+            except FileNotFoundError as error:
                 raise error_type(
+                    f"cannot inspect {label} directory {path}: {error}"
+                ) from error
+            except OSError as error:
+                raise access_failure(
                     f"cannot inspect {label} directory {path}: {error}"
                 ) from error
             if not stat.S_ISDIR(status.st_mode):
@@ -201,8 +228,12 @@ def _scan_regular_tree(
             path = current / name
             try:
                 status = path.lstat()
-            except OSError as error:
+            except FileNotFoundError as error:
                 raise error_type(
+                    f"cannot inspect {label} file {path}: {error}"
+                ) from error
+            except OSError as error:
+                raise access_failure(
                     f"cannot inspect {label} file {path}: {error}"
                 ) from error
             if not stat.S_ISREG(status.st_mode):
@@ -221,8 +252,12 @@ def _scan_regular_tree(
             if capture_contents:
                 try:
                     contents[relative] = path.read_bytes()
-                except OSError as error:
+                except FileNotFoundError as error:
                     raise error_type(
+                        f"cannot read {label} file {path}: {error}"
+                    ) from error
+                except OSError as error:
+                    raise access_failure(
                         f"cannot read {label} file {path}: {error}"
                     ) from error
     return (

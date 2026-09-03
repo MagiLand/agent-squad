@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from tests._support import add_src_to_path
 
@@ -128,6 +129,35 @@ class RegularTreeTests(unittest.TestCase):
                     PurePosixPath("second.txt"): b"second\n",
                 },
             )
+
+    def test_reports_operational_tree_read_failures_separately(self) -> None:
+        class AccessError(ValueError):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            unreadable = root / "result.json"
+            unreadable.write_bytes(b"{}\n")
+            real_read_bytes = Path.read_bytes
+
+            def fail_read(path):
+                if path == unreadable:
+                    raise PermissionError("simulated access failure")
+                return real_read_bytes(path)
+
+            with (
+                mock.patch.object(Path, "read_bytes", new=fail_read),
+                self.assertRaisesRegex(
+                    AccessError,
+                    "simulated access failure",
+                ),
+            ):
+                read_regular_tree(
+                    root,
+                    label="fixture tree",
+                    error_type=ValueError,
+                    access_error_type=AccessError,
+                )
 
     def test_ignores_a_named_root_entry_without_traversing_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
