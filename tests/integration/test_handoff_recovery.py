@@ -1370,7 +1370,7 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
                 run_id=active.run_id,
                 active_round=active_round,
             )
-            original_archive = handoffs._archive_invalid_review_evidence
+            original_archive = handoffs.archive_invalid_review_evidence
             archive_ready = Event()
             release_recovery = Event()
 
@@ -1416,7 +1416,7 @@ print(result.marker_created)
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     with mock.patch.object(
                         handoffs,
-                        "_archive_invalid_review_evidence",
+                        "archive_invalid_review_evidence",
                         paused_archive,
                     ):
                         future = executor.submit(

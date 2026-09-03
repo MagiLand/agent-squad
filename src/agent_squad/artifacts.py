@@ -1646,6 +1646,9 @@ class ReviewRoundRecord:
     object_format: str
     status: RoundStatus
     supersession: ReviewSupersession | None
+    classification_reason: str | None
+    diagnostic_id: str | None
+    observed_head_oid: str | None
     review_worktree: Path
     reviewer_name: str
     reviewer_kind: AgentKind
@@ -1691,6 +1694,9 @@ class ReviewRoundRecord:
             object_format=request.object_format,
             status=RoundStatus.REVIEWING,
             supersession=None,
+            classification_reason=None,
+            diagnostic_id=None,
+            observed_head_oid=None,
             review_worktree=review_worktree,
             reviewer_name=request.reviewer_name,
             reviewer_kind=request.reviewer_kind,
@@ -1749,7 +1755,12 @@ class ReviewRoundRecord:
                 "artifacts",
                 "warnings",
             },
-            optional={"supersession"},
+            optional={
+                "supersession",
+                "classification_reason",
+                "diagnostic_id",
+                "observed_head_oid",
+            },
             path=label,
         )
         schema_version = _require_int(
@@ -1843,6 +1854,34 @@ class ReviewRoundRecord:
                 f"{label}: only a superseded round may record supersession "
                 "authority"
             )
+        classification_reason_value = data.get("classification_reason")
+        classification_reason = (
+            None
+            if classification_reason_value is None
+            else _require_meaningful_string(
+                classification_reason_value,
+                f"{label}.classification_reason",
+            )
+        )
+        diagnostic_id_value = data.get("diagnostic_id")
+        diagnostic_id = (
+            None
+            if diagnostic_id_value is None
+            else _require_digest(
+                diagnostic_id_value,
+                f"{label}.diagnostic_id",
+            )
+        )
+        observed_head_value = data.get("observed_head_oid")
+        observed_head_oid = (
+            None
+            if observed_head_value is None
+            else _require_oid(
+                observed_head_value,
+                object_format,
+                f"{label}.observed_head_oid",
+            )
+        )
         created_at = _require_timestamp(
             data["created_at"],
             f"{label}.created_at",
@@ -1895,6 +1934,23 @@ class ReviewRoundRecord:
                     f"{label} cannot record result artifacts before "
                     "classification"
                 )
+        if status in {
+            RoundStatus.PREPARED,
+            RoundStatus.REVIEWING,
+            RoundStatus.APPLIED,
+            RoundStatus.SUPERSEDED,
+        } and any(
+            value is not None
+            for value in (
+                classification_reason,
+                diagnostic_id,
+                observed_head_oid,
+            )
+        ):
+            raise ArtifactValidationError(
+                f"{label} may record classification details only when "
+                "status is stale or invalid"
+            )
         if status is RoundStatus.APPLIED:
             if result_id is None or verdict is None:
                 raise ArtifactValidationError(
@@ -1912,6 +1968,58 @@ class ReviewRoundRecord:
                 raise ArtifactValidationError(
                     f"{label} approval artifact must exist exactly for an "
                     "approved result"
+                )
+        if status is RoundStatus.STALE:
+            if result_id is None or verdict is None:
+                raise ArtifactValidationError(
+                    f"{label} must record its stale result and verdict"
+                )
+            if any(item is None for item in result_artifacts):
+                raise ArtifactValidationError(
+                    f"{label} must record every stale result artifact"
+                )
+            if not bundle_archive:
+                raise ArtifactValidationError(
+                    f"{label} must record the complete stale bundle archive"
+                )
+            if approval is not None:
+                raise ArtifactValidationError(
+                    f"{label} cannot record approval authority for a stale "
+                    "result"
+                )
+            if classification_reason is None or observed_head_oid is None:
+                raise ArtifactValidationError(
+                    f"{label} must record its stale reason and observed HEAD"
+                )
+            if observed_head_oid == data["head_oid"]:
+                raise ArtifactValidationError(
+                    f"{label}.observed_head_oid must differ from head_oid"
+                )
+            if diagnostic_id is not None:
+                raise ArtifactValidationError(
+                    f"{label} cannot record invalid-result diagnostics for "
+                    "a stale result"
+                )
+        if status is RoundStatus.INVALID:
+            if classification_reason is None or diagnostic_id is None:
+                raise ArtifactValidationError(
+                    f"{label} must record its invalid reason and diagnostic ID"
+                )
+            if verdict is not None:
+                raise ArtifactValidationError(
+                    f"{label} cannot record a verdict for an invalid result"
+                )
+            if any(item is not None for item in result_artifacts) or (
+                approval is not None or bundle_archive
+            ):
+                raise ArtifactValidationError(
+                    f"{label} must store invalid evidence only in its "
+                    "diagnostic archive"
+                )
+            if observed_head_oid is not None:
+                raise ArtifactValidationError(
+                    f"{label} cannot record an observed HEAD for an invalid "
+                    "result"
                 )
 
         return cls(
@@ -1946,6 +2054,9 @@ class ReviewRoundRecord:
             object_format=object_format,
             status=status,
             supersession=supersession,
+            classification_reason=classification_reason,
+            diagnostic_id=diagnostic_id,
+            observed_head_oid=observed_head_oid,
             review_worktree=_require_absolute_path(
                 data["review_worktree"],
                 f"{label}.review_worktree",
@@ -2004,6 +2115,9 @@ class ReviewRoundRecord:
                 if self.supersession is not None
                 else None
             ),
+            "classification_reason": self.classification_reason,
+            "diagnostic_id": self.diagnostic_id,
+            "observed_head_oid": self.observed_head_oid,
             "review_worktree": str(self.review_worktree),
             "reviewer": {
                 "name": self.reviewer_name,

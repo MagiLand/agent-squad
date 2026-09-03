@@ -1231,8 +1231,10 @@ class SubmitCommandTests(unittest.TestCase):
                 env_overrides=environment,
             )
             self.assertNotEqual(applied.returncode, 0)
-            self.assertIn("bundle input input/task.md", applied.stderr)
-            self.assertIn("digest does not match", applied.stderr)
+            self.assertIn(
+                "no valid marker-confirmed result to apply",
+                applied.stderr,
+            )
 
     def test_status_rejects_live_round_mislabeled_as_implementing(
         self,

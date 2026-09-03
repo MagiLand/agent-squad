@@ -386,7 +386,7 @@ def _preserve_invalid_review_evidence(
                 for name, path in candidates
                 if path in bundle_files
             }
-            diagnostic_id = _archive_invalid_review_evidence(
+            diagnostic_id = archive_invalid_review_evidence(
                 control_root,
                 run_id=active.run_id,
                 round_number=active_round.round_number,
@@ -473,7 +473,7 @@ def _preserve_invalid_review_evidence(
     return diagnostic_id
 
 
-def _archive_invalid_review_evidence(
+def archive_invalid_review_evidence(
     control_root: Path,
     *,
     run_id: str,
@@ -553,6 +553,47 @@ def _archive_invalid_review_evidence(
         captured=captured,
     )
     return diagnostic_id
+
+
+def validate_invalid_review_diagnostic(
+    root: Path,
+    *,
+    run_id: str,
+    round_number: int,
+    request_id: str,
+    diagnostic_id: str,
+    reason: str,
+) -> None:
+    """Validate one recorded invalid-result diagnostic from history."""
+
+    files = read_regular_tree(
+        root,
+        label="invalid-result diagnostic",
+        error_type=HandoffRecoveryError,
+    )
+    allowed_evidence = {
+        REVIEW_RESULT_FILE_NAME,
+        REVIEW_MARKDOWN_FILE_NAME,
+        MARKER_PATH.name,
+    }
+    captured: dict[str, bytes] = {}
+    for path, content in files.items():
+        if path == PurePosixPath("validation-error.json"):
+            continue
+        if len(path.parts) != 1 or path.name not in allowed_evidence:
+            raise HandoffRecoveryError(
+                "invalid-result diagnostic contains unexpected evidence"
+            )
+        captured[path.name] = content
+    _verify_invalid_review_diagnostic(
+        root,
+        run_id=run_id,
+        round_number=round_number,
+        request_id=request_id,
+        diagnostic_id=diagnostic_id,
+        reason=reason,
+        captured=captured,
+    )
 
 
 def _invalid_review_diagnostic_id(

@@ -153,6 +153,9 @@ def _round_record() -> dict[str, object]:
         "git_object_format": "sha1",
         "status": "reviewing",
         "supersession": None,
+        "classification_reason": None,
+        "diagnostic_id": None,
+        "observed_head_oid": None,
         "review_worktree": "/tmp/review",
         "reviewer": {
             "name": "asq-87654321-r001-reviewer",
@@ -489,6 +492,246 @@ class ReviewRoundRecordTests(unittest.TestCase):
                         changed,
                         label="round record",
                     )
+
+    def test_stale_and_invalid_rounds_bind_classification_authority(
+        self,
+    ) -> None:
+        stale = _round_record()
+        stale.update(
+            result_id="abcdefab-1234-5678-9234-567812345678",
+            verdict="approved",
+            status="stale",
+            classification_reason=(
+                "implementation HEAD advanced before review application"
+            ),
+            observed_head_oid="c" * 40,
+        )
+        stale_artifacts = stale["artifacts"]
+        assert isinstance(stale_artifacts, dict)
+        stale_artifacts.update(
+            review_result={"path": "review.json", "sha256": "1" * 64},
+            review_markdown={"path": "review.md", "sha256": "2" * 64},
+            review_marker={
+                "path": "review-marker.json",
+                "sha256": "3" * 64,
+            },
+            bundle_archive=[
+                {
+                    "path": "bundle/output/review.json",
+                    "sha256": "1" * 64,
+                }
+            ],
+        )
+        stale_record = ReviewRoundRecord.from_dict(
+            stale,
+            label="round record",
+        )
+        self.assertIs(stale_record.status, RoundStatus.STALE)
+        self.assertEqual(stale_record.observed_head_oid, "c" * 40)
+
+        invalid = _round_record()
+        invalid.update(
+            result_id="abcdefab-1234-5678-9234-567812345678",
+            status="invalid",
+            classification_reason=(
+                "review result failed independent validation"
+            ),
+            diagnostic_id="e" * 64,
+        )
+        invalid_record = ReviewRoundRecord.from_dict(
+            invalid,
+            label="round record",
+        )
+        self.assertIs(invalid_record.status, RoundStatus.INVALID)
+        self.assertEqual(invalid_record.diagnostic_id, "e" * 64)
+
+        applied = copy.deepcopy(stale)
+        applied.update(
+            status="applied",
+            classification_reason=None,
+            observed_head_oid=None,
+        )
+        applied_artifacts = applied["artifacts"]
+        assert isinstance(applied_artifacts, dict)
+        applied_artifacts["approval"] = {
+            "path": "approval.json",
+            "sha256": "4" * 64,
+        }
+        superseded = _round_record()
+        superseded.update(
+            status="superseded",
+            supersession={
+                "created_at": superseded["updated_at"],
+                "actor": "codex-main",
+                "cause": "The requested revision is no longer relevant.",
+            },
+        )
+
+        cases = (
+            (
+                "prepared classification details",
+                {**_round_record(), "status": "prepared"},
+                lambda value: value.update(classification_reason="unexpected"),
+                "may record classification details only",
+            ),
+            (
+                "reviewing classification details",
+                _round_record(),
+                lambda value: value.update(classification_reason="unexpected"),
+                "may record classification details only",
+            ),
+            (
+                "applied classification details",
+                applied,
+                lambda value: value.update(classification_reason="unexpected"),
+                "may record classification details only",
+            ),
+            (
+                "superseded classification details",
+                superseded,
+                lambda value: value.update(classification_reason="unexpected"),
+                "may record classification details only",
+            ),
+            (
+                "stale result ID",
+                stale,
+                lambda value: value.update(result_id=None),
+                "must record its stale result and verdict",
+            ),
+            (
+                "stale verdict",
+                stale,
+                lambda value: value.update(verdict=None),
+                "must record its stale result and verdict",
+            ),
+            (
+                "stale result artifact",
+                stale,
+                lambda value: value["artifacts"].update(
+                    review_result=None
+                ),
+                "must record every stale result artifact",
+            ),
+            (
+                "stale bundle archive",
+                stale,
+                lambda value: value["artifacts"].update(bundle_archive=[]),
+                "must record the complete stale bundle archive",
+            ),
+            (
+                "stale approval",
+                stale,
+                lambda value: value["artifacts"].update(
+                    approval={"path": "approval.json", "sha256": "4" * 64}
+                ),
+                "cannot record approval authority for a stale result",
+            ),
+            (
+                "stale reason",
+                stale,
+                lambda value: value.update(classification_reason=None),
+                "must record its stale reason and observed HEAD",
+            ),
+            (
+                "stale observed HEAD",
+                stale,
+                lambda value: value.update(observed_head_oid=None),
+                "must record its stale reason and observed HEAD",
+            ),
+            (
+                "stale matching observed HEAD",
+                copy.deepcopy(stale),
+                lambda value: value.update(observed_head_oid="b" * 40),
+                "must differ from head_oid",
+            ),
+            (
+                "stale diagnostic ID",
+                stale,
+                lambda value: value.update(diagnostic_id="d" * 64),
+                "cannot record invalid-result diagnostics for a stale result",
+            ),
+            (
+                "invalid reason",
+                invalid,
+                lambda value: value.update(classification_reason=None),
+                "must record its invalid reason and diagnostic ID",
+            ),
+            (
+                "invalid diagnostic ID",
+                invalid,
+                lambda value: value.update(diagnostic_id=None),
+                "must record its invalid reason and diagnostic ID",
+            ),
+            (
+                "invalid verdict",
+                invalid,
+                lambda value: value.update(verdict="approved"),
+                "cannot record a verdict for an invalid result",
+            ),
+            (
+                "invalid review result artifact",
+                invalid,
+                lambda value: value["artifacts"].update(
+                    review_result={"path": "review.json", "sha256": "1" * 64}
+                ),
+                "must store invalid evidence only in its diagnostic archive",
+            ),
+            (
+                "invalid review Markdown artifact",
+                invalid,
+                lambda value: value["artifacts"].update(
+                    review_markdown={"path": "review.md", "sha256": "2" * 64}
+                ),
+                "must store invalid evidence only in its diagnostic archive",
+            ),
+            (
+                "invalid review marker artifact",
+                invalid,
+                lambda value: value["artifacts"].update(
+                    review_marker={
+                        "path": "review-marker.json",
+                        "sha256": "3" * 64,
+                    }
+                ),
+                "must store invalid evidence only in its diagnostic archive",
+            ),
+            (
+                "invalid approval artifact",
+                invalid,
+                lambda value: value["artifacts"].update(
+                    approval={"path": "approval.json", "sha256": "4" * 64}
+                ),
+                "must store invalid evidence only in its diagnostic archive",
+            ),
+            (
+                "invalid bundle archive",
+                invalid,
+                lambda value: value["artifacts"].update(
+                    bundle_archive=[
+                        {
+                            "path": "bundle/output/review.json",
+                            "sha256": "1" * 64,
+                        }
+                    ]
+                ),
+                "must store invalid evidence only in its diagnostic archive",
+            ),
+            (
+                "invalid observed HEAD",
+                invalid,
+                lambda value: value.update(observed_head_oid="c" * 40),
+                "cannot record an observed HEAD for an invalid result",
+            ),
+        )
+        for case, base, mutate, message in cases:
+            with self.subTest(case=case):
+                data = copy.deepcopy(base)
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    ReviewRoundRecord.from_dict(data, label="round record")
 
     def test_superseded_round_requires_actor_timestamp_and_cause(self) -> None:
         data = _round_record()

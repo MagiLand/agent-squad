@@ -18,7 +18,6 @@ from agent_squad.artifacts import (  # noqa: E402
     BundleArtifact,
     RoundStatus,
     SubmissionMode,
-    ReviewVerdict,
 )
 from agent_squad.initialization import AgentKind  # noqa: E402
 
@@ -661,117 +660,68 @@ class RoundReplayGuardTests(unittest.TestCase):
         ):
             review_applications._assert_round_is_active(record, missing)
 
-    def test_approved_replay_rejects_missing_mismatched_and_event_failure(
-        self,
-    ) -> None:
-        repository = SimpleNamespace(control_root=Path("/control"))
-        missing = SimpleNamespace(active_round=None, approval=None)
-        with self.assertRaisesRegex(
-            review_applications.ReviewApplicationError,
-            "missing its applied result authority",
-        ):
-            review_applications._approved_replay(
-                repository,
-                missing,
-                presented_result_id=None,
-            )
-
-        approval = SimpleNamespace(
-            created_at="2026-08-28T00:00:00Z",
-            run_id=RUN_ID,
-            round_number=1,
-            request_id=REQUEST_ID,
-            result_id=RESULT_ID,
-            head_oid="b" * 40,
+    def test_closed_phase_refuses_result_missing_from_history(self) -> None:
+        repository = SimpleNamespace(
+            worktree=SimpleNamespace(invocation_directory=Path("/repo"))
         )
-        active = SimpleNamespace(
-            active_round=SimpleNamespace(result_id=RESULT_ID),
-            approval=approval,
-            run_id=RUN_ID,
-            current_round=1,
-            base_oid="a" * 40,
-            git_object_format="sha1",
-        )
-        round_record = SimpleNamespace(
-            round_number=1,
-            request_id=REQUEST_ID,
-            result_id=RESULT_ID,
-            head_oid="b" * 40,
+        active_round = SimpleNamespace(
             status=RoundStatus.APPLIED,
-            verdict=ReviewVerdict.APPROVED,
-            updated_at="2026-08-28T00:00:01Z",
+            result_id=RESULT_ID,
         )
-        with self.assertRaisesRegex(
-            review_applications.ReviewApplicationError,
-            "is not the result that approved",
-        ):
-            review_applications._approved_replay(
-                repository,
-                active,
-                presented_result_id=REQUEST_ID,
-            )
-
-        mismatches = (
-            ("round_number", 2, "round number"),
-            ("request_id", RUN_ID, "request ID"),
-            ("result_id", RUN_ID, "result ID"),
-            ("head_oid", "c" * 40, "head OID"),
-            ("status", RoundStatus.INVALID, "status"),
-            ("verdict", ReviewVerdict.CHANGES_REQUESTED, "verdict"),
+        cases = (
+            (
+                runs.RunPhase.APPROVED,
+                REQUEST_ID,
+                "is not the result that approved",
+            ),
+            (
+                runs.RunPhase.APPROVED,
+                None,
+                "approved result is missing from authoritative round history",
+            ),
+            (
+                runs.RunPhase.IMPLEMENTING,
+                REQUEST_ID,
+                "is not the result that returned",
+            ),
+            (
+                runs.RunPhase.IMPLEMENTING,
+                None,
+                "changes-requested result is missing from authoritative",
+            ),
         )
-        for field, value, label in mismatches:
-            with self.subTest(field=field):
-                mismatched_round_record = copy.copy(round_record)
-                setattr(mismatched_round_record, field, value)
+        for phase, presented_result_id, message in cases:
+            with self.subTest(phase=phase, result_id=presented_result_id):
+                active = SimpleNamespace(
+                    active_round=active_round,
+                    run_id=RUN_ID,
+                    phase=phase,
+                )
+                status = SimpleNamespace(
+                    active_run=active,
+                    next_action="next action",
+                )
                 with (
                     mock.patch.object(
                         review_applications.runs,
-                        "safe_run_directory",
-                        return_value=Path("/run"),
+                        "inspect_status_locked",
+                        return_value=status,
                     ),
                     mock.patch.object(
-                        review_applications.runs,
-                        "find_recorded_review_round",
-                        return_value=(Path("/round"), mismatched_round_record),
-                    ),
+                        review_applications,
+                        "_historical_result_replay",
+                        return_value=None,
+                    ) as historical,
                     self.assertRaisesRegex(
                         review_applications.ReviewApplicationError,
-                        f"approved round {label} does not match "
-                        "authoritative state",
+                        message,
                     ),
                 ):
-                    review_applications._approved_replay(
+                    review_applications._apply_review_locked(
                         repository,
-                        active,
-                        presented_result_id=RESULT_ID,
+                        presented_result_id=presented_result_id,
                     )
-
-        with (
-            mock.patch.object(
-                review_applications.runs,
-                "safe_run_directory",
-                return_value=Path("/run"),
-            ),
-            mock.patch.object(
-                review_applications.runs,
-                "find_recorded_review_round",
-                return_value=(Path("/round"), round_record),
-            ),
-            mock.patch.object(
-                review_applications,
-                "_ensure_event",
-                side_effect=OSError("disk full"),
-            ),
-            self.assertRaisesRegex(
-                review_applications.ReviewApplicationError,
-                "missing event could not be recovered",
-            ),
-        ):
-            review_applications._approved_replay(
-                repository,
-                active,
-                presented_result_id=RESULT_ID,
-            )
+                historical.assert_called_once()
 
 
 if __name__ == "__main__":

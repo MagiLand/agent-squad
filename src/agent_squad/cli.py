@@ -8,7 +8,12 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .artifacts import HandoffStatus, ReviewVerdict, SubmissionMode
+from .artifacts import (
+    HandoffStatus,
+    ReviewVerdict,
+    RoundStatus,
+    SubmissionMode,
+)
 from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import apply_review, complete_run, supersede_review
@@ -425,18 +430,45 @@ def _run_apply_review(arguments: argparse.Namespace) -> int:
         _invocation_directory(),
         result_id=arguments.result_id,
     )
+    if result.classification is not RoundStatus.APPLIED:
+        action = "already classified" if result.replayed else "classified"
+        print(
+            f"Review result {result.result_id} {action} "
+            f"{result.classification.value} for run {result.run_id}"
+        )
+        print(f"Round: {result.round_number}")
+        print(f"Classification: {result.classification.value}")
+        print(f"Reviewed head: {result.head_oid}")
+        if result.observed_head_oid is not None:
+            print(f"Observed implementation head: {result.observed_head_oid}")
+        if result.bundle_archive is not None:
+            print(f"Archived review bundle: {result.bundle_archive}")
+        if result.diagnostic_path is not None:
+            print(f"Validation diagnostics: {result.diagnostic_path}")
+        if result.reason is not None:
+            print(f"Reason: {result.reason}")
+        print(f"Next action: {result.next_action}")
+        for warning in result.cleanup_warnings:
+            print(f"agent-squad: warning: {warning}", file=sys.stderr)
+        return 0
+
     action = "already applied" if result.replayed else "applied"
     print(
         f"Review result {result.result_id} {action} for run "
         f"{result.run_id}"
     )
     print(f"Round: {result.round_number}")
-    print(f"Verdict: {result.verdict.value}")
-    if result.verdict is ReviewVerdict.APPROVED:
+    verdict = result.verdict
+    if verdict is None:
+        raise AgentSquadError("applied result is missing its verdict")
+    print(f"Verdict: {verdict.value}")
+    if verdict is ReviewVerdict.APPROVED:
         print(f"Approved head: {result.head_oid}")
         print(f"Approval authority: {result.approval_path}")
     else:
         print(f"Reviewed head: {result.head_oid}")
+    if result.bundle_archive is None:
+        raise AgentSquadError("applied result is missing its bundle archive")
     print(f"Archived review bundle: {result.bundle_archive}")
     print(f"Next action: {result.next_action}")
     for warning in result.cleanup_warnings:
