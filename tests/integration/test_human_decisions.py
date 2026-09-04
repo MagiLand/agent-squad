@@ -1171,6 +1171,27 @@ class HumanDecisionCommandTests(unittest.TestCase):
                 json.loads(state_path.read_text(encoding="utf-8"))["phase"],
                 "approved",
             )
+            completed = run_cli(
+                prepared.repository,
+                "complete",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Completed Agent Squad run", completed.stdout)
+
+            completion_replay = run_cli(
+                prepared.repository,
+                "complete",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(
+                completion_replay.returncode,
+                0,
+                completion_replay.stderr,
+            )
+            self.assertIn("already completed", completion_replay.stdout)
 
     def test_status_rejects_resolution_request_and_manifest_mismatches(
         self,

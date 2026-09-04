@@ -678,6 +678,11 @@ def load_completed_run(
         active_round = ActiveRoundRecord.from_dict(state["active_round"])
     except ArtifactValidationError as error:
         raise RunStateError(str(error)) from error
+    completed_escalations = load_escalation_history(
+        run_directory=run_directory,
+        run_id=run_id,
+        object_format=record.object_format,
+    )
     review_artifacts = _validate_active_review_artifacts(
         run_directory=run_directory,
         record=record,
@@ -685,6 +690,11 @@ def load_completed_run(
         current_round=round_number,
         current_head_oid=current_head_oid,
         active_round=active_round,
+        resolutions=load_developer_resolution_history(
+            run_directory=run_directory,
+            run_id=run_id,
+            escalations=completed_escalations,
+        ),
         validate_live_worktree=False,
     )
     round_record = review_artifacts.round_record
