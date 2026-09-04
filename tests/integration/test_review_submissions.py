@@ -828,6 +828,76 @@ class ReviewSubmitCommandTests(unittest.TestCase):
             self.assertEqual(submitted.returncode, 0, submitted.stderr)
             self.assertEqual(len(_result_prompt_events(prepared)), 1)
 
+    def test_previous_review_verdict_controls_required_bundle_inputs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared, _ = _prepare_multi_input_round(
+                Path(temporary_directory)
+            )
+            previous_review_path = (
+                prepared.bundle / "input/previous-review.json"
+            )
+            original_previous = json.loads(
+                previous_review_path.read_text(encoding="utf-8")
+            )
+
+            def candidate(
+                verdict: str,
+                **request_updates: object,
+            ) -> tuple[ReviewRequest, dict[str, object]]:
+                request_value = copy.deepcopy(prepared.request)
+                request_value.update(request_updates)
+                previous = _review_result(original_previous, verdict)
+                return ReviewRequest.from_dict(request_value), previous
+
+            wrong_mode_request, wrong_mode_review = candidate(
+                "needs_human",
+                mode="reconsideration",
+                previous_response_path=None,
+            )
+            wrong_mode_review["head_oid"] = wrong_mode_request.head_oid
+            cases = (
+                (
+                    candidate(
+                        "changes_requested",
+                        previous_response_path=None,
+                    ),
+                    "changes_requested must reference the previous review "
+                    "and response",
+                ),
+                (
+                    (wrong_mode_request, wrong_mode_review),
+                    "request after needs_human must use new_revision",
+                ),
+                (
+                    candidate("needs_human"),
+                    "needs_human result does not accept a previous response",
+                ),
+                (
+                    candidate(
+                        "needs_human",
+                        previous_response_path=None,
+                        resolution_paths=[],
+                    ),
+                    "request after needs_human must include a Developer "
+                    "resolution",
+                ),
+                (
+                    candidate("approved"),
+                    "follow-up request cannot use a previous review with "
+                    "verdict approved",
+                ),
+            )
+            for (request, previous), message in cases:
+                with self.subTest(message=message):
+                    _write_json_fixture(previous_review_path, previous)
+                    with self.assertRaisesRegex(
+                        ReviewSubmissionError,
+                        message,
+                    ):
+                        _validate_bundle_inputs(prepared.bundle, request)
+
     def test_new_revision_bundle_cannot_reuse_the_reviewed_head(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             prepared, _ = _prepare_multi_input_round(

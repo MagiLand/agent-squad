@@ -28,6 +28,7 @@ from .runs import (
     IncompleteReviewOutput,
     InvalidUnappliedReviewResult,
     RETRY_HANDOFF_NEXT_ACTION,
+    RESUME_NEXT_ACTION,
     RunPhase,
     UnavailableReviewEvidence,
     inspect_status,
@@ -646,7 +647,7 @@ def _run_escalate(arguments: argparse.Namespace) -> int:
             )
     for warning in result.cleanup_warnings:
         print(f"agent-squad: warning: {warning}", file=sys.stderr)
-    print("Next action: agent-squad resume --resolution <resolution.md>")
+    print(f"Next action: {RESUME_NEXT_ACTION}")
     return 0
 
 

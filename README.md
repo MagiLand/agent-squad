@@ -129,6 +129,8 @@ agent-squad resume \
 
 `--applies-to-finding` may be repeated and must identify findings belonging to the active escalation. `--extend-rounds` is optional and increases the authoritative review budget. Resume stores a hashed resolution linked to the active escalation, clears that escalation, and returns the run to `implementing`. Every later review bundle includes every resolution in creation order, so a fresh Reviewer receives the complete decision history and treats the latest relevant resolution as authoritative.
 
+A Developer resolution must settle the captured task rather than silently rewrite it. If the decision materially changes the objective or acceptance criteria, the protocol requires cancelling and restarting with a new task snapshot. Cancellation is not available in this increment. Likewise, an escalation raised after approval can be recorded and resolved, but the resumed run cannot yet submit a new revision. Issue #14 owns both lifecycle transitions; until it lands, post-approval escalation preserves the decision record but is not a continuation path.
+
 ## Apply a review, correct findings, and complete
 
 From the detached review worktree, the Reviewer writes the structured result and Markdown companion, then submits them:

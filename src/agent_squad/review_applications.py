@@ -1344,7 +1344,6 @@ def _apply_review_locked(
     next_budget = active.review_budget
     next_action = "agent-squad complete"
     approved_head_oid: str | None = evidence.review.head_oid
-    active_escalation_id: str | None = None
     if evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
         completed_change_reviews = (
             active.review_budget.completed_change_reviews + 1
@@ -1358,7 +1357,7 @@ def _apply_review_locked(
         approved_head_oid = None
     elif evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
         next_phase = runs.RunPhase.NEEDS_HUMAN
-        next_action = "agent-squad resume --resolution <resolution.md>"
+        next_action = runs.RESUME_NEXT_ACTION
         approved_head_oid = None
 
     next_round = replace(
@@ -1385,7 +1384,7 @@ def _apply_review_locked(
         updated_at=timestamp,
         phase=next_phase.value,
         approved_head_oid=approved_head_oid,
-        active_escalation_id=active_escalation_id,
+        active_escalation_id=None,
         active_round=next_active_round.to_dict(),
         review_budget=next_budget.to_dict(),
     )
@@ -1406,7 +1405,6 @@ def _apply_review_locked(
     if evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
         escalation_number = len(active.escalations) + 1
         escalation_id = str(uuid.uuid4())
-        active_escalation_id = escalation_id
         stem = f"{escalation_number:03d}-escalation"
         escalation_directory = run_directory / ESCALATIONS_DIRECTORY_NAME
         escalation_path = escalation_directory / f"{stem}.json"
@@ -2329,6 +2327,40 @@ def _validate_evidence(
             raise ReviewApplicationError(
                 f"review evidence {label} does not match authoritative state"
             )
+    _validate_resolution_bundle_inputs(active, evidence)
+
+
+def _validate_resolution_bundle_inputs(
+    active: runs.ActiveRunStatus,
+    evidence: MarkerConfirmedReview,
+) -> None:
+    """Bind every reviewed resolution file to canonical run history."""
+
+    request = evidence.request
+    bundle_files = {item.path: item.content for item in evidence.bundle_files}
+    resolutions_by_name = {
+        authority.path.name: authority for authority in active.resolutions
+    }
+    for path_text in request.resolution_paths:
+        record_path = PurePosixPath(path_text)
+        authority = resolutions_by_name.get(record_path.name)
+        record_bytes = bundle_files.get(record_path)
+        if authority is None or record_bytes is None or hashlib.sha256(
+            record_bytes
+        ).digest() != hashlib.sha256(authority.record_bytes).digest():
+            raise ReviewApplicationError(
+                "review bundle Developer resolution record does not match "
+                f"the authoritative run copy: {record_path}"
+            )
+        companion_path = record_path.parent / authority.companion_path.name
+        companion_bytes = bundle_files.get(companion_path)
+        if companion_bytes is None or hashlib.sha256(
+            companion_bytes
+        ).hexdigest() != authority.record.resolution_sha256:
+            raise ReviewApplicationError(
+                "review bundle Developer resolution companion does not "
+                f"match the authoritative run copy: {companion_path}"
+            )
 
 
 def _assert_round_is_active(
@@ -2968,28 +3000,18 @@ def _capture_markdown(
     label: str,
     default: bytes | None = None,
 ) -> _CapturedMarkdown:
-    """Capture one non-empty UTF-8 Markdown file without following links."""
+    """Capture one non-empty UTF-8 Markdown input."""
 
     if path is None:
         if default is None:
             raise ReviewApplicationError(f"{label} is required")
         content = default
     else:
-        candidate = path if path.is_absolute() else invocation_directory / path
-        try:
-            resolved = candidate.resolve(strict=True)
-            with resolved.open("rb") as source:
-                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-                    raise ReviewApplicationError(
-                        f"{label} must be a regular file: {resolved}"
-                    )
-                content = source.read()
-        except ReviewApplicationError:
-            raise
-        except (OSError, RuntimeError) as error:
-            raise ReviewApplicationError(
-                f"cannot read {label} {candidate}: {error}"
-            ) from error
+        content = _read_input_bytes(
+            path,
+            invocation_directory=invocation_directory,
+            label=label,
+        )
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -3106,6 +3128,12 @@ def _capture_escalation_response(
         )
     authority_path = previous.round_directory / ROUND_RESPONSE_FILE_NAME
     original: bytes | None = None
+    already_referenced = any(
+        authority.record.response_id is not None
+        and authority.record.round_number
+        == previous.round_record.round_number
+        for authority in active.escalations
+    )
     if os.path.lexists(authority_path):
         if authority_path.is_symlink() or not authority_path.is_file():
             raise ReviewApplicationError(
@@ -3121,12 +3149,17 @@ def _capture_escalation_response(
             ) from error
         if (
             previous.round_record.round_number < active.current_round
-            and original != content
-        ):
+            or already_referenced
+        ) and original != content:
             raise ReviewApplicationError(
                 "the applied review already has an authoritative response; "
                 "escalate cannot overwrite it"
             )
+    elif already_referenced:
+        raise ReviewApplicationError(
+            "the applied review's escalation-referenced response is "
+            "missing; escalate cannot replace it"
+        )
     return _CapturedEscalationResponse(
         response=response,
         content=content,

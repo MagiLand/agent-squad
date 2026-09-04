@@ -81,6 +81,7 @@ TASK_FILE_NAME = "task.md"
 EVENT_LOG_FILE_NAME = "events.jsonl"
 CONTEXT_DIRECTORY_NAME = "context"
 RETRY_HANDOFF_NEXT_ACTION = "agent-squad retry-handoff"
+RESUME_NEXT_ACTION = "agent-squad resume --resolution <resolution.md>"
 CORRECTION_SUBMIT_NEXT_ACTION = (
     "agent-squad submit --report <report.md> --response <response.json> "
     "--mode <new_revision|reconsideration> after addressing every "
@@ -2105,22 +2106,13 @@ def load_developer_resolution_history(
     *,
     run_directory: Path,
     run_id: str,
-    escalations: tuple[EscalationAuthority, ...] | None = None,
+    escalations: tuple[EscalationAuthority, ...],
 ) -> tuple[DeveloperResolutionAuthority, ...]:
     """Load every canonical Developer resolution in creation order."""
 
-    escalation_history = (
-        escalations
-        if escalations is not None
-        else load_escalation_history(
-            run_directory=run_directory,
-            run_id=run_id,
-            object_format=_run_record_object_format(run_directory),
-        )
-    )
     escalations_by_id = {
         authority.record.escalation_id: authority.record
-        for authority in escalation_history
+        for authority in escalations
     }
     root = run_directory / RESOLUTIONS_DIRECTORY_NAME
     contents = _read_numbered_artifact_directory(
@@ -2262,17 +2254,6 @@ def _decode_authoritative_json_bytes(
 
 def _timestamp_value(value: str) -> datetime:
     return datetime.fromisoformat(f"{value[:-1]}+00:00")
-
-
-def _run_record_object_format(run_directory: Path) -> str:
-    record = load_json_object(
-        run_directory / RUN_RECORD_FILE_NAME,
-        "active run record",
-    )
-    return _require_object_format(
-        record.get("git_object_format"),
-        "run record.git_object_format",
-    )
 
 
 def _validate_active_escalation(
@@ -3340,7 +3321,7 @@ def _next_action(
     if phase is RunPhase.APPROVED:
         return "agent-squad complete"
     if phase is RunPhase.NEEDS_HUMAN:
-        return "agent-squad resume --resolution <resolution.md>"
+        return RESUME_NEXT_ACTION
     raise RunStateError(
         f"phase {phase.value} is not supported by this implementation "
         "increment"

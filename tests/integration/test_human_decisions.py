@@ -31,6 +31,86 @@ from agent_squad import review_applications  # noqa: E402
 
 
 class HumanDecisionCommandTests(unittest.TestCase):
+    def _prepare_resolved_needs_human_round(
+        self,
+        root: Path,
+    ) -> SimpleNamespace:
+        prepared, first_review = _marker_confirmed_review(
+            root,
+            verdict="needs_human",
+        )
+        applied = run_cli(
+            prepared.repository,
+            "apply-review",
+            "--result-id",
+            str(first_review["result_id"]),
+            data_home=prepared.data_home,
+            env_overrides=prepared.environment,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        resolution_path = root / "resolution.md"
+        resolution_path.write_text(
+            "# Resolution\n\nUse strict compatibility.\n",
+            encoding="utf-8",
+        )
+        resumed = run_cli(
+            prepared.repository,
+            "resume",
+            "--resolution",
+            str(resolution_path),
+            data_home=prepared.data_home,
+            env_overrides=prepared.environment,
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        (prepared.repository / "feature.txt").write_text(
+            "candidate with strict compatibility\n",
+            encoding="utf-8",
+        )
+        run(["git", "add", "feature.txt"], cwd=prepared.repository)
+        run(
+            [
+                "git",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                "fix: apply developer resolution",
+            ],
+            cwd=prepared.repository,
+        )
+        report_path = root / "resolved-report.md"
+        report_path.write_text(
+            "# Implementation Report\n\nApplied the Developer decision.\n",
+            encoding="utf-8",
+        )
+        submitted = run_cli(
+            prepared.repository,
+            "submit",
+            "--report",
+            str(report_path),
+            "--mode",
+            "new_revision",
+            data_home=prepared.data_home,
+            env_overrides=prepared.environment,
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        control_root = prepared.repository / ".agent-squad"
+        state_path = control_root / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        run_directory = control_root / "runs" / str(state["active_run_id"])
+        review_worktree = Path(
+            str(state["active_round"]["review_worktree"])
+        )
+        return SimpleNamespace(
+            prepared=prepared,
+            first_review=first_review,
+            state_path=state_path,
+            run_directory=run_directory,
+            review_worktree=review_worktree,
+            bundle=review_worktree / ".agent-squad-review",
+        )
+
     def test_direct_escalation_and_developer_resolution_resume_the_run(
         self,
     ) -> None:
@@ -584,6 +664,124 @@ class HumanDecisionCommandTests(unittest.TestCase):
                 invalid_resolution.stderr,
             )
 
+    def test_escalate_cannot_replace_a_referenced_escalation_response(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(
+                root,
+                verdict="changes_requested",
+            )
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            response_path = root / "response.json"
+            response = _write_fixed_response(
+                response_path,
+                prepared,
+                review,
+            )
+            response["responses"][0].update(
+                disposition="needs_human",
+                changed_files=[],
+                evidence=[],
+                verification="",
+                rationale="Choose the compatibility policy.",
+            )
+            response_path.write_text(
+                f"{json.dumps(response, indent=2)}\n",
+                encoding="utf-8",
+            )
+            escalated = run_cli(
+                prepared.repository,
+                "escalate",
+                "--response",
+                str(response_path),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(escalated.returncode, 0, escalated.stderr)
+            control_root = prepared.repository / ".agent-squad"
+            state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            response_copy = run_directory / "rounds/001/response.json"
+            referenced_response = response_copy.read_bytes()
+            resolution_path = root / "resolution.md"
+            resolution_path.write_text(
+                "# Resolution\n\nUse strict compatibility.\n",
+                encoding="utf-8",
+            )
+            resumed = run_cli(
+                prepared.repository,
+                "resume",
+                "--resolution",
+                str(resolution_path),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+
+            response["response_id"] = (
+                "66666666-6666-4666-8666-666666666666"
+            )
+            response["responses"][0]["rationale"] = (
+                "Choose a different compatibility policy."
+            )
+            response_path.write_text(
+                f"{json.dumps(response, indent=2)}\n",
+                encoding="utf-8",
+            )
+            replacement = run_cli(
+                prepared.repository,
+                "escalate",
+                "--response",
+                str(response_path),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(replacement.returncode, 1)
+            self.assertIn(
+                "escalate cannot overwrite it",
+                replacement.stderr,
+            )
+            self.assertEqual(response_copy.read_bytes(), referenced_response)
+            self.assertFalse(
+                (
+                    run_directory / "escalations/002-escalation.json"
+                ).exists()
+            )
+            response_copy.unlink()
+            missing_authority = run_cli(
+                prepared.repository,
+                "escalate",
+                "--response",
+                str(response_path),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(missing_authority.returncode, 1)
+            self.assertIn(
+                "escalation-referenced response is missing",
+                missing_authority.stderr,
+            )
+            self.assertFalse(
+                (
+                    run_directory / "escalations/002-escalation.json"
+                ).exists()
+            )
+
     def test_subsequent_review_bundle_contains_every_developer_resolution(
         self,
     ) -> None:
@@ -847,6 +1045,28 @@ class HumanDecisionCommandTests(unittest.TestCase):
             )
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
 
+            guard_report = root / "guard-report.md"
+            guard_report.write_text(
+                "# Implementation Report\n\n"
+                "Resolved without a new revision.\n",
+                encoding="utf-8",
+            )
+            wrong_mode = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(guard_report),
+                "--mode",
+                "reconsideration",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(wrong_mode.returncode, 1)
+            self.assertIn(
+                "resolved needs_human review must use --mode new_revision",
+                wrong_mode.stderr,
+            )
+
             (prepared.repository / "feature.txt").write_text(
                 "candidate with strict compatibility\n",
                 encoding="utf-8",
@@ -868,6 +1088,26 @@ class HumanDecisionCommandTests(unittest.TestCase):
             report.write_text(
                 "# Implementation Report\n\nApplied the Developer decision.\n",
                 encoding="utf-8",
+            )
+            unexpected_response = root / "unexpected-response.json"
+            unexpected_response.write_text("{}\n", encoding="utf-8")
+            with_response = run_cli(
+                prepared.repository,
+                "submit",
+                "--report",
+                str(report),
+                "--response",
+                str(unexpected_response),
+                "--mode",
+                "new_revision",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(with_response.returncode, 1)
+            self.assertIn(
+                "resolved by the recorded Developer resolution and does "
+                "not accept --response",
+                with_response.stderr,
             )
             submitted = run_cli(
                 prepared.repository,
@@ -930,6 +1170,266 @@ class HumanDecisionCommandTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(state_path.read_text(encoding="utf-8"))["phase"],
                 "approved",
+            )
+
+    def test_status_rejects_resolution_request_and_manifest_mismatches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared_round = self._prepare_resolved_needs_human_round(
+                Path(temporary_directory)
+            )
+            prepared = prepared_round.prepared
+            run_directory = prepared_round.run_directory
+            state_path = prepared_round.state_path
+            round_path = run_directory / "rounds/002/round.json"
+            request_path = run_directory / "rounds/002/request.json"
+            resolution = json.loads(
+                (
+                    run_directory / "resolutions/001-resolution.json"
+                ).read_text(encoding="utf-8")
+            )
+            original_state = state_path.read_bytes()
+            original_round = round_path.read_bytes()
+            original_request = request_path.read_bytes()
+
+            def restore() -> None:
+                state_path.write_bytes(original_state)
+                round_path.write_bytes(original_round)
+                request_path.chmod(0o600)
+                request_path.write_bytes(original_request)
+                request_path.chmod(0o400)
+
+            def rewrite(
+                mutate_request=None,
+                mutate_round=None,
+                mutate_state=None,
+            ) -> None:
+                request = json.loads(original_request)
+                round_record = json.loads(original_round)
+                state = json.loads(original_state)
+                if mutate_request is not None:
+                    mutate_request(request)
+                if mutate_round is not None:
+                    mutate_round(round_record)
+                if mutate_state is not None:
+                    mutate_state(state)
+                request_bytes = (
+                    f"{json.dumps(request, indent=2)}\n".encode("utf-8")
+                )
+                request_digest = hashlib.sha256(request_bytes).hexdigest()
+                round_record["artifacts"]["request"]["sha256"] = (
+                    request_digest
+                )
+                for artifact in round_record["artifacts"]["bundle_inputs"]:
+                    if artifact["path"] == "input/request.json":
+                        artifact["sha256"] = request_digest
+                request_path.chmod(0o600)
+                request_path.write_bytes(request_bytes)
+                request_path.chmod(0o400)
+                round_path.write_text(
+                    f"{json.dumps(round_record, indent=2)}\n",
+                    encoding="utf-8",
+                )
+                state_path.write_text(
+                    f"{json.dumps(state, indent=2)}\n",
+                    encoding="utf-8",
+                )
+
+            def omit_resolution_companion(round_record) -> None:
+                artifacts = round_record["artifacts"]["bundle_inputs"]
+                round_record["artifacts"]["bundle_inputs"] = [
+                    artifact
+                    for artifact in artifacts
+                    if artifact["path"]
+                    != "input/resolutions/001-resolution.md"
+                ]
+
+            def replace_manifest_digest(round_record, path: str) -> None:
+                for artifact in round_record["artifacts"]["bundle_inputs"]:
+                    if artifact["path"] == path:
+                        artifact["sha256"] = "f" * 64
+
+            def use_reconsideration(request) -> None:
+                request["mode"] = "reconsideration"
+                request["head_oid"] = prepared_round.first_review["head_oid"]
+
+            def use_reconsideration_round(round_record) -> None:
+                round_record["mode"] = "reconsideration"
+                round_record["head_oid"] = (
+                    prepared_round.first_review["head_oid"]
+                )
+
+            def use_reconsideration_state(state) -> None:
+                state["current_head_oid"] = (
+                    prepared_round.first_review["head_oid"]
+                )
+                state["active_round"]["mode"] = "reconsideration"
+
+            cases = (
+                (
+                    "resolution timestamp exclusion",
+                    lambda: rewrite(
+                        mutate_request=lambda request: request.update(
+                            created_at=resolution["created_at"]
+                        )
+                    ),
+                    "request after needs_human must include a Developer "
+                    "resolution",
+                ),
+                (
+                    "resolution path list",
+                    lambda: rewrite(
+                        mutate_request=lambda request: request.update(
+                            resolution_paths=[]
+                        )
+                    ),
+                    "Developer resolutions do not match authoritative run "
+                    "history",
+                ),
+                (
+                    "resolution bundle manifest",
+                    lambda: rewrite(
+                        mutate_round=omit_resolution_companion
+                    ),
+                    "prior-artifact manifest does not match the request",
+                ),
+                (
+                    "resolution record digest",
+                    lambda: rewrite(
+                        mutate_round=lambda record: replace_manifest_digest(
+                            record,
+                            "input/resolutions/001-resolution.json",
+                        )
+                    ),
+                    "resolution bundle input does not match its "
+                    "authoritative record",
+                ),
+                (
+                    "resolution companion digest",
+                    lambda: rewrite(
+                        mutate_round=lambda record: replace_manifest_digest(
+                            record,
+                            "input/resolutions/001-resolution.md",
+                        )
+                    ),
+                    "resolution companion bundle input does not match its "
+                    "authoritative digest",
+                ),
+                (
+                    "needs-human request mode",
+                    lambda: rewrite(
+                        mutate_request=use_reconsideration,
+                        mutate_round=use_reconsideration_round,
+                        mutate_state=use_reconsideration_state,
+                    ),
+                    "request after needs_human must use new_revision",
+                ),
+            )
+            for label, mutate, message in cases:
+                with self.subTest(case=label):
+                    restore()
+                    mutate()
+                    status = run_cli(
+                        prepared.repository,
+                        "status",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(status.returncode, 1)
+                    self.assertIn(message, status.stderr)
+            restore()
+
+    def test_apply_rejects_a_self_consistent_forged_bundle_resolution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared_round = self._prepare_resolved_needs_human_round(
+                root
+            )
+            prepared = prepared_round.prepared
+            state_path = prepared_round.state_path
+            run_directory = prepared_round.run_directory
+            canonical_record = (
+                run_directory / "resolutions/001-resolution.json"
+            )
+            canonical_companion = (
+                run_directory / "resolutions/001-resolution.md"
+            )
+            original_record = canonical_record.read_bytes()
+            original_companion = canonical_companion.read_bytes()
+            second_worktree = prepared_round.review_worktree
+            bundle = prepared_round.bundle
+            bundle_record = (
+                bundle / "input/resolutions/001-resolution.json"
+            )
+            bundle_companion = (
+                bundle / "input/resolutions/001-resolution.md"
+            )
+            forged_companion = (
+                b"# Resolution\n\nUse permissive compatibility.\n"
+            )
+            forged_record = json.loads(
+                bundle_record.read_text(encoding="utf-8")
+            )
+            forged_record["resolution_sha256"] = hashlib.sha256(
+                forged_companion
+            ).hexdigest()
+            bundle_record.chmod(0o600)
+            bundle_companion.chmod(0o600)
+            bundle_record.write_text(
+                f"{json.dumps(forged_record, indent=2)}\n",
+                encoding="utf-8",
+            )
+            bundle_companion.write_bytes(forged_companion)
+            second_round = SimpleNamespace(
+                repository=prepared.repository,
+                data_home=prepared.data_home,
+                environment=prepared.environment,
+                review_worktree=second_worktree,
+                bundle=bundle,
+                request=json.loads(
+                    (bundle / "input/request.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+            )
+            second_review = _write_review(second_round)
+            reviewed = run_cli(
+                second_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+
+            reapplied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(second_review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(reapplied.returncode, 0, reapplied.stderr)
+            self.assertIn("classified invalid", reapplied.stdout)
+            self.assertIn(
+                "resolution record does not match the authoritative run "
+                "copy",
+                reapplied.stdout,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["active_round"]["status"], "invalid")
+            self.assertEqual(canonical_record.read_bytes(), original_record)
+            self.assertEqual(
+                canonical_companion.read_bytes(),
+                original_companion,
+            )
+            self.assertFalse(
+                (run_directory / "rounds/002/bundle").exists()
             )
 
     def test_needs_human_application_rolls_back_as_one_transition(

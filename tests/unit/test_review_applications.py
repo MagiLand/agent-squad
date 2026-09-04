@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -306,6 +306,7 @@ class GitAuthorityTests(unittest.TestCase):
             implementer_agent="codex-main",
             implementer_kind=AgentKind.CODEX,
             reviewer_kind=AgentKind.CLAUDE,
+            resolutions=(),
         )
         request = SimpleNamespace(
             run_id=RUN_ID,
@@ -321,6 +322,7 @@ class GitAuthorityTests(unittest.TestCase):
             reviewer_kind=AgentKind.CLAUDE,
             reviewer_name=active_round.reviewer_name,
             allowed_generated_paths=(),
+            resolution_paths=(),
         )
         evidence = SimpleNamespace(
             worktree=SimpleNamespace(
@@ -333,6 +335,7 @@ class GitAuthorityTests(unittest.TestCase):
                 request_id=REQUEST_ID,
                 result_id=RESULT_ID,
             ),
+            bundle_files=(),
         )
         repository = SimpleNamespace(
             configuration=SimpleNamespace(allowed_generated_paths=())
@@ -410,6 +413,68 @@ class GitAuthorityTests(unittest.TestCase):
                     message,
                 ):
                     review_applications._validate_evidence(*copied)
+
+    def test_review_bundle_resolutions_match_authoritative_digests(
+        self,
+    ) -> None:
+        record_path = PurePosixPath(
+            "input/resolutions/001-resolution.json"
+        )
+        companion_path = PurePosixPath(
+            "input/resolutions/001-resolution.md"
+        )
+        record_bytes = b'{"resolution_id":"one"}\n'
+        companion_bytes = b"# Resolution\n"
+        authority = SimpleNamespace(
+            path=Path(record_path.name),
+            companion_path=Path(companion_path.name),
+            record_bytes=record_bytes,
+            record=SimpleNamespace(
+                resolution_sha256=hashlib.sha256(
+                    companion_bytes
+                ).hexdigest()
+            ),
+        )
+        active = SimpleNamespace(resolutions=(authority,))
+        request = SimpleNamespace(resolution_paths=(str(record_path),))
+
+        def evidence(
+            record: bytes = record_bytes,
+            companion: bytes = companion_bytes,
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                request=request,
+                bundle_files=(
+                    SimpleNamespace(path=record_path, content=record),
+                    SimpleNamespace(path=companion_path, content=companion),
+                ),
+            )
+
+        review_applications._validate_resolution_bundle_inputs(
+            active,
+            evidence(),
+        )
+        for label, candidate, message in (
+            (
+                "record",
+                evidence(record=b"forged record\n"),
+                "resolution record does not match",
+            ),
+            (
+                "companion",
+                evidence(companion=b"forged resolution\n"),
+                "resolution companion does not match",
+            ),
+        ):
+            with self.subTest(file=label):
+                with self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    message,
+                ):
+                    review_applications._validate_resolution_bundle_inputs(
+                        active,
+                        candidate,
+                    )
 
     def test_implementation_identity_rejects_each_changed_component(
         self,
