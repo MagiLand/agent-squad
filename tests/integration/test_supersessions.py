@@ -13,6 +13,7 @@ from unittest import mock
 
 from tests._support import add_src_to_path, run, run_cli
 from tests.integration.test_review_applications import (
+    _assert_invalid_review_apply,
     _write_fixed_response,
     _write_rejected_response,
 )
@@ -198,6 +199,63 @@ def _write_ignored_reviewer_file(prepared: _PreparedRound) -> Path:
 
 
 class SupersedeReviewTests(unittest.TestCase):
+    def test_apply_rejects_changed_or_missing_recovery_round_authority(
+        self,
+    ) -> None:
+        for damage in ("semantic tampering", "missing"):
+            with self.subTest(damage=damage):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    _, recovered = _start_recovery_round(root)
+                    authority_path = (
+                        recovered.bundle / "input/recovery-round.json"
+                    )
+                    if damage == "semantic tampering":
+                        authority = json.loads(
+                            authority_path.read_text(encoding="utf-8")
+                        )
+                        authority["supersession"]["cause"] = (
+                            "Changed recovery reason."
+                        )
+                        authority_path.chmod(0o600)
+                        authority_path.write_bytes(
+                            review_applications.encode_json(authority)
+                        )
+                        review = _write_review(recovered)
+                        submitted = run_cli(
+                            recovered.review_worktree,
+                            "review-submit",
+                            data_home=recovered.data_home,
+                            env_overrides=recovered.environment,
+                        )
+                        self.assertEqual(
+                            submitted.returncode,
+                            0,
+                            submitted.stderr,
+                        )
+                    else:
+                        review = _write_review(recovered)
+                        submitted = run_cli(
+                            recovered.review_worktree,
+                            "review-submit",
+                            data_home=recovered.data_home,
+                            env_overrides=recovered.environment,
+                        )
+                        self.assertEqual(
+                            submitted.returncode,
+                            0,
+                            submitted.stderr,
+                        )
+                        authority_path.unlink()
+
+                    _assert_invalid_review_apply(
+                        self,
+                        recovered,
+                        review,
+                        expected_reason="input/recovery-round.json",
+                        round_number=2,
+                    )
+
     def test_reason_must_be_nonempty_single_line_before_state_changes(
         self,
     ) -> None:

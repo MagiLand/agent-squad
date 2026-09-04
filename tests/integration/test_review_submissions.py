@@ -84,6 +84,7 @@ def _prepare_round(
     review_limit: int | None = None,
     include_tracked_symlink: bool = False,
     include_nested_tracked_file: bool = False,
+    with_context: bool = False,
 ) -> _PreparedRound:
     repository = root / "repository"
     seed_git_repository(repository)
@@ -113,13 +114,20 @@ def _prepare_round(
         "# Task\n\nReview the exact candidate.\n",
         encoding="utf-8",
     )
-    started = run_cli(
-        repository,
+    start_arguments = [
         "start",
         "--task",
         str(task),
         "--base",
         "main",
+    ]
+    if with_context:
+        context = root / "context.md"
+        context.write_text("explicit context\n", encoding="utf-8")
+        start_arguments.extend(("--context", str(context)))
+    started = run_cli(
+        repository,
+        *start_arguments,
         data_home=data_home,
         env_overrides=environment,
     )

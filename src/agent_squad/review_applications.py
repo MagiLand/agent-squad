@@ -58,6 +58,7 @@ from .initialization import (
 )
 from .review_submissions import (
     MARKER_PATH,
+    REQUEST_PATH,
     MarkerConfirmedReview,
     RETIRED_RESULTS_PATH,
     ReviewEvidenceAccessError,
@@ -1218,7 +1219,12 @@ def _apply_review_locked(
             result_id=selected_result_id,
             reason=f"review result failed independent validation: {error}",
         )
+    authoritative_round = _load_active_review_records(
+        repository,
+        active,
+    ).round_record
     try:
+        _validate_authoritative_bundle_inputs(authoritative_round, evidence)
         _validate_evidence(repository, active, evidence)
     except ReviewApplicationError as error:
         return _classify_invalid_review(
@@ -2328,6 +2334,32 @@ def _validate_evidence(
                 f"review evidence {label} does not match authoritative state"
             )
     _validate_resolution_bundle_inputs(active, evidence)
+
+
+def _validate_authoritative_bundle_inputs(
+    round_record: ReviewRoundRecord,
+    evidence: MarkerConfirmedReview,
+) -> None:
+    """Bind every captured authority input to the round manifest."""
+
+    bundle_files = {item.path: item.content for item in evidence.bundle_files}
+    # Report the altered authority input when its digest and the live request's
+    # self-declared digest were changed together. The request remains bound
+    # too.
+    ordered_artifacts = sorted(
+        round_record.bundle_inputs,
+        key=lambda artifact: artifact.path == REQUEST_PATH.as_posix(),
+    )
+    for artifact in ordered_artifacts:
+        path = PurePosixPath(artifact.path)
+        content = bundle_files.get(path)
+        if content is None or (
+            hashlib.sha256(content).hexdigest() != artifact.sha256
+        ):
+            raise ReviewApplicationError(
+                "review bundle input does not match the authoritative round "
+                f"digest: {path}"
+            )
 
 
 def _validate_resolution_bundle_inputs(

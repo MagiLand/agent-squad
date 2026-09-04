@@ -16,6 +16,7 @@ from tests._support import (
     seed_git_repository,
 )
 from tests.integration.test_review_applications import (
+    _assert_invalid_review_apply,
     _marker_confirmed_review,
     _write_fixed_response,
 )
@@ -782,7 +783,7 @@ class HumanDecisionCommandTests(unittest.TestCase):
                 ).exists()
             )
 
-    def test_subsequent_review_bundle_contains_every_developer_resolution(
+    def test_subsequent_review_bundle_binds_every_developer_resolution(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -970,6 +971,38 @@ class HumanDecisionCommandTests(unittest.TestCase):
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn("Developer resolutions: 2", status.stdout)
+
+            request_path = bundle / "input/request.json"
+            request["created_at"] = later_record["created_at"]
+            request["resolution_paths"] = [
+                "input/resolutions/001-resolution.json"
+            ]
+            request_path.chmod(0o600)
+            request_path.write_bytes(review_applications.encode_json(request))
+            (bundle / "input/resolutions/002-resolution.json").unlink()
+            (bundle / "input/resolutions/002-resolution.md").unlink()
+            prepared_round = SimpleNamespace(
+                repository=repository,
+                data_home=data_home,
+                environment=environment,
+                review_worktree=review_worktree,
+                bundle=bundle,
+                request=request,
+            )
+            review = _write_review(prepared_round)
+            reviewed = run_cli(
+                review_worktree,
+                "review-submit",
+                data_home=data_home,
+                env_overrides=environment,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            _assert_invalid_review_apply(
+                self,
+                prepared_round,
+                review,
+                expected_reason="input/resolutions/002-resolution.json",
+            )
 
     def test_reviewer_needs_human_result_can_be_resolved_and_reviewed_again(
         self,
@@ -1437,13 +1470,16 @@ class HumanDecisionCommandTests(unittest.TestCase):
             self.assertEqual(reapplied.returncode, 0, reapplied.stderr)
             self.assertIn("classified invalid", reapplied.stdout)
             self.assertIn(
-                "resolution record does not match the authoritative run "
-                "copy",
+                "input/resolutions/001-resolution.json",
                 reapplied.stdout,
             )
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["phase"], "implementing")
             self.assertEqual(state["active_round"]["status"], "invalid")
+            self.assertEqual(
+                state["review_budget"]["completed_change_reviews"],
+                0,
+            )
             self.assertEqual(canonical_record.read_bytes(), original_record)
             self.assertEqual(
                 canonical_companion.read_bytes(),
@@ -1452,6 +1488,55 @@ class HumanDecisionCommandTests(unittest.TestCase):
             self.assertFalse(
                 (run_directory / "rounds/002/bundle").exists()
             )
+
+    def test_apply_rejects_missing_developer_resolution_inputs(self) -> None:
+        for expected_path in (
+            "input/resolutions/001-resolution.json",
+            "input/resolutions/001-resolution.md",
+        ):
+            with self.subTest(path=expected_path):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    prepared_round = self._prepare_resolved_needs_human_round(
+                        root
+                    )
+                    prepared = prepared_round.prepared
+                    request = json.loads(
+                        (
+                            prepared_round.bundle / "input/request.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    second_round = SimpleNamespace(
+                        repository=prepared.repository,
+                        data_home=prepared.data_home,
+                        environment=prepared.environment,
+                        review_worktree=prepared_round.review_worktree,
+                        bundle=prepared_round.bundle,
+                        request=request,
+                    )
+                    review = _write_review(second_round)
+                    reviewed = run_cli(
+                        prepared_round.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=prepared.environment,
+                    )
+                    self.assertEqual(
+                        reviewed.returncode,
+                        0,
+                        reviewed.stderr,
+                    )
+                    prepared_round.bundle.joinpath(
+                        *Path(expected_path).parts
+                    ).unlink()
+
+                    _assert_invalid_review_apply(
+                        self,
+                        prepared,
+                        review,
+                        expected_reason=Path(expected_path).name,
+                        round_number=2,
+                    )
 
     def test_needs_human_application_rolls_back_as_one_transition(
         self,

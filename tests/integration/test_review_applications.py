@@ -162,6 +162,119 @@ def _write_rejected_response(
     return response
 
 
+def _prepare_correction_round(root: Path):
+    prepared, review = _marker_confirmed_review(
+        root,
+        verdict="changes_requested",
+    )
+    applied = review_applications.apply_review(
+        prepared.repository,
+        result_id=str(review["result_id"]),
+    )
+    if applied.classification is not runs.RoundStatus.APPLIED:
+        raise AssertionError(f"first review was not applied: {applied}")
+
+    (prepared.repository / "feature.txt").write_text(
+        "complete candidate\n",
+        encoding="utf-8",
+    )
+    run(["git", "add", "feature.txt"], cwd=prepared.repository)
+    run(
+        [
+            "git",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "--no-verify",
+            "-m",
+            "fix: complete candidate",
+        ],
+        cwd=prepared.repository,
+    )
+    report = root / "corrected-report.md"
+    report.write_text(
+        "# Implementation Report\n\nCompleted the candidate value.\n",
+        encoding="utf-8",
+    )
+    response_path = root / "response.json"
+    _write_fixed_response(response_path, prepared, review)
+    submitted = run_cli(
+        prepared.repository,
+        "submit",
+        "--report",
+        str(report),
+        "--response",
+        str(response_path),
+        "--mode",
+        "new_revision",
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+    if submitted.returncode != 0:
+        raise AssertionError(submitted.stderr)
+    state = json.loads(
+        (prepared.repository / ".agent-squad/state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    review_worktree = Path(state["active_round"]["review_worktree"])
+    bundle = review_worktree / ".agent-squad-review"
+    request = json.loads(
+        (bundle / "input/request.json").read_text(encoding="utf-8")
+    )
+    return replace(
+        prepared,
+        review_worktree=review_worktree,
+        bundle=bundle,
+        request=request,
+    )
+
+
+def _assert_invalid_review_apply(
+    test_case: unittest.TestCase,
+    prepared,
+    review: dict[str, object],
+    *,
+    expected_reason: str,
+    round_number: int = 1,
+    completed_change_reviews: int = 0,
+) -> None:
+    applied = run_cli(
+        prepared.repository,
+        "apply-review",
+        "--result-id",
+        str(review["result_id"]),
+        data_home=prepared.data_home,
+        env_overrides=prepared.environment,
+    )
+
+    test_case.assertEqual(applied.returncode, 0, applied.stderr)
+    test_case.assertIn("classified invalid", applied.stdout)
+    test_case.assertIn(expected_reason, applied.stdout)
+    control_root = prepared.repository / ".agent-squad"
+    state = json.loads(
+        (control_root / "state.json").read_text(encoding="utf-8")
+    )
+    round_directory = (
+        control_root
+        / "runs"
+        / str(state["active_run_id"])
+        / "rounds"
+        / f"{round_number:03d}"
+    )
+    round_record = json.loads(
+        (round_directory / "round.json").read_text(encoding="utf-8")
+    )
+    test_case.assertEqual(state["phase"], "implementing")
+    test_case.assertEqual(state["active_round"]["status"], "invalid")
+    test_case.assertEqual(
+        state["review_budget"]["completed_change_reviews"],
+        completed_change_reviews,
+    )
+    test_case.assertEqual(round_record["artifacts"]["bundle_archive"], [])
+    test_case.assertFalse((round_directory / "bundle").exists())
+
+
 class ApprovedReviewLifecycleTests(unittest.TestCase):
     def test_commands_report_basic_application_and_completion_guards(
         self,
@@ -419,6 +532,254 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     )
                     self.assertIs(retried.verdict, runs.ReviewVerdict.APPROVED)
                     self.assertFalse(retried.replayed)
+
+    def test_authoritative_manifest_access_failure_leaves_result_retryable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            control_root = prepared.repository / ".agent-squad"
+            state_path = control_root / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            run_directory = (
+                control_root / "runs" / str(state["active_run_id"])
+            )
+            round_path = run_directory / "rounds/001/round.json"
+            run_path = run_directory / "run.json"
+            events_path = run_directory / "events.jsonl"
+            originals = (
+                state_path.read_bytes(),
+                round_path.read_bytes(),
+                run_path.read_bytes(),
+                events_path.read_bytes(),
+            )
+            real_read_bytes = Path.read_bytes
+
+            def fail_manifest_read(path):
+                if path.resolve() == round_path.resolve():
+                    raise PermissionError("simulated manifest read failure")
+                return real_read_bytes(path)
+
+            with (
+                mock.patch.object(
+                    Path,
+                    "read_bytes",
+                    new=fail_manifest_read,
+                ),
+                self.assertRaisesRegex(
+                    review_applications.ReviewApplicationError,
+                    "simulated manifest read failure",
+                ),
+            ):
+                review_applications.apply_review(
+                    prepared.repository,
+                    result_id=str(review["result_id"]),
+                )
+
+            self.assertEqual(
+                (
+                    state_path.read_bytes(),
+                    round_path.read_bytes(),
+                    run_path.read_bytes(),
+                    events_path.read_bytes(),
+                ),
+                originals,
+            )
+            self.assertFalse(
+                (round_path.parent / "diagnostics/invalid-results").exists()
+            )
+
+            retried = review_applications.apply_review(
+                prepared.repository,
+                result_id=str(review["result_id"]),
+            )
+
+            self.assertIs(retried.classification, runs.RoundStatus.APPLIED)
+            self.assertIs(retried.verdict, runs.ReviewVerdict.APPROVED)
+            self.assertFalse(retried.replayed)
+
+    def test_apply_rejects_request_input_changed_after_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            request_path = prepared.bundle / "input/request.json"
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            request["created_at"] = "2026-08-26T11:59:00Z"
+            request_path.chmod(0o600)
+            request_path.write_bytes(review_applications.encode_json(request))
+
+            _assert_invalid_review_apply(
+                self,
+                prepared,
+                review,
+                expected_reason="input/request.json",
+            )
+
+    def test_apply_rejects_request_input_missing_after_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            (prepared.bundle / "input/request.json").unlink()
+
+            _assert_invalid_review_apply(
+                self,
+                prepared,
+                review,
+                expected_reason="review request",
+            )
+
+    def test_apply_rejects_changed_or_missing_base_authority_inputs(
+        self,
+    ) -> None:
+        cases = (
+            ("task", "input/task.md"),
+            ("implementation report", "input/implementation-report.md"),
+            ("explicit context", "input/context/001/context.md"),
+        )
+        for label, expected_path in cases:
+            for damage in ("paired tampering", "missing"):
+                with self.subTest(input=label, damage=damage):
+                    with tempfile.TemporaryDirectory() as temporary_directory:
+                        root = Path(temporary_directory)
+                        prepared = _prepare_round(root, with_context=True)
+                        review = _submit_with_lost_notification(prepared)
+                        request_path = prepared.bundle / "input/request.json"
+                        request = json.loads(
+                            request_path.read_text(encoding="utf-8")
+                        )
+                        if label == "task":
+                            artifact = request["task"]
+                        elif label == "implementation report":
+                            artifact = request["implementation_report"]
+                        else:
+                            artifact = request["context_files"][0]
+                        target = prepared.bundle.joinpath(*Path(
+                            artifact["path"]
+                        ).parts)
+
+                        if damage == "paired tampering":
+                            changed = f"changed {label}\n".encode("utf-8")
+                            target.chmod(0o600)
+                            target.write_bytes(changed)
+                            artifact["sha256"] = hashlib.sha256(
+                                changed
+                            ).hexdigest()
+                            request_path.chmod(0o600)
+                            request_path.write_bytes(
+                                review_applications.encode_json(request)
+                            )
+                        else:
+                            target.unlink()
+                            if label == "explicit context":
+                                target.parent.rmdir()
+                                target.parent.parent.rmdir()
+                                request["context_files"] = []
+                                request_path.chmod(0o600)
+                                request_path.write_bytes(
+                                    review_applications.encode_json(request)
+                                )
+
+                        _assert_invalid_review_apply(
+                            self,
+                            prepared,
+                            review,
+                            expected_reason=expected_path,
+                        )
+
+    def test_valid_manifest_bound_bundle_is_applied_and_archived(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared = _prepare_round(root, with_context=True)
+            review = _submit_with_lost_notification(prepared)
+            expected_inputs = {
+                path.relative_to(prepared.bundle).as_posix(): path.read_bytes()
+                for path in (prepared.bundle / "input").rglob("*")
+                if path.is_file()
+            }
+
+            applied = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertIn("Verdict: approved", applied.stdout)
+            control_root = prepared.repository / ".agent-squad"
+            state = json.loads(
+                (control_root / "state.json").read_text(encoding="utf-8")
+            )
+            round_directory = (
+                control_root
+                / "runs"
+                / str(state["active_run_id"])
+                / "rounds/001"
+            )
+            round_record = json.loads(
+                (round_directory / "round.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "approved")
+            self.assertEqual(
+                {
+                    item["path"]
+                    for item in round_record["artifacts"]["bundle_inputs"]
+                },
+                set(expected_inputs),
+            )
+            for path, expected in expected_inputs.items():
+                with self.subTest(path=path):
+                    self.assertEqual(
+                        (round_directory / "bundle" / path).read_bytes(),
+                        expected,
+                    )
+
+    def test_apply_rejects_changed_or_missing_prior_authority_inputs(
+        self,
+    ) -> None:
+        cases = (
+            ("previous review", "input/previous-review.json"),
+            ("previous response", "input/previous-response.json"),
+        )
+        for label, expected_path in cases:
+            for damage in ("semantic tampering", "missing"):
+                with self.subTest(input=label, damage=damage):
+                    with tempfile.TemporaryDirectory() as temporary_directory:
+                        root = Path(temporary_directory)
+                        prepared = _prepare_correction_round(root)
+                        target = prepared.bundle.joinpath(
+                            *Path(expected_path).parts
+                        )
+                        if damage == "semantic tampering":
+                            value = json.loads(
+                                target.read_text(encoding="utf-8")
+                            )
+                            if label == "previous review":
+                                value["summary"] = "Changed review summary."
+                            else:
+                                value["responses"][0]["rationale"] = (
+                                    "Changed response rationale."
+                                )
+                            target.chmod(0o600)
+                            target.write_bytes(
+                                review_applications.encode_json(value)
+                            )
+                            review = _submit_with_lost_notification(prepared)
+                        else:
+                            review = _submit_with_lost_notification(prepared)
+                            target.unlink()
+
+                        _assert_invalid_review_apply(
+                            self,
+                            prepared,
+                            review,
+                            expected_reason=expected_path,
+                            round_number=2,
+                            completed_change_reviews=1,
+                        )
 
     def test_missing_base_object_is_classified_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
