@@ -22,6 +22,7 @@ from .artifacts import (
     ReviewerLocalMarker,
     ReviewResult,
     ReviewVerdict,
+    SubmissionMode,
     deterministic_reviewer_name,
     response_validation_mode,
     validate_followup_submission_head,
@@ -903,6 +904,10 @@ def _validate_bundle_inputs(
             raise ReviewSubmissionError(
                 "previous review round must precede the requested round"
             )
+    elif request.previous_response_path is not None:
+        raise ReviewSubmissionError(
+            "a previous response requires a previous review"
+        )
 
     recovery_round: ReviewRoundRecord | None = None
     if request.recovery_round_path is not None:
@@ -987,22 +992,39 @@ def _validate_bundle_inputs(
             )
         except ArtifactValidationError as error:
             raise ReviewSubmissionError(str(error)) from error
-    elif (
-        request.round_number > 1
-        and request.previous_response_path is None
-    ):
+    elif request.round_number > 1:
         raise ReviewSubmissionError(
             "a correction-round request must reference the previous review "
             "and response"
         )
 
-    if previous_review is not None and (
-        request.previous_response_path is None
-    ):
-        raise ReviewSubmissionError(
-            "a correction-round request must reference the previous review "
-            "and response"
-        )
+    if previous_review is not None:
+        if previous_review.verdict is ReviewVerdict.CHANGES_REQUESTED:
+            if request.previous_response_path is None:
+                raise ReviewSubmissionError(
+                    "a request after changes_requested must reference the "
+                    "previous review and response"
+                )
+        elif previous_review.verdict is ReviewVerdict.NEEDS_HUMAN:
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise ReviewSubmissionError(
+                    "a request after needs_human must use new_revision"
+                )
+            if request.previous_response_path is not None:
+                raise ReviewSubmissionError(
+                    "a reviewer needs_human result does not accept a "
+                    "previous response"
+                )
+            if not request.resolution_paths:
+                raise ReviewSubmissionError(
+                    "a request after needs_human must include a Developer "
+                    "resolution"
+                )
+        else:
+            raise ReviewSubmissionError(
+                "a follow-up request cannot use a previous review with "
+                f"verdict {previous_review.verdict.value}"
+            )
 
     if request.previous_response_path is not None:
         previous_response_path = PurePosixPath(

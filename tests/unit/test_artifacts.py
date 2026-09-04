@@ -14,6 +14,8 @@ from agent_squad.artifacts import (  # noqa: E402
     ApprovalRecord,
     ArtifactValidationError,
     DeveloperResolution,
+    EscalationReason,
+    EscalationRecord,
     HandoffRecord,
     HandoffStatus,
     ReviewRequest,
@@ -109,6 +111,27 @@ def _developer_resolution() -> dict[str, object]:
         "resolution_path": "001-resolution.md",
         "resolution_sha256": "a" * 64,
         "additional_rounds_granted": 1,
+    }
+
+
+def _escalation() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "created_at": "2026-08-25T12:30:00Z",
+        "escalation_id": "22222222-2222-4222-8222-222222222222",
+        "run_id": "87654321-4321-6789-a234-678912345678",
+        "round": 1,
+        "head_oid": "b" * 40,
+        "related_finding_ids": ["REV-001"],
+        "source_request_id": "12345678-1234-5678-9234-567812345678",
+        "source_result_id": "33333333-3333-4333-8333-333333333333",
+        "previous_approved_head_oid": None,
+        "previous_phase": "reviewing",
+        "actor": "reviewer",
+        "note_path": "001-escalation.md",
+        "note_sha256": "f" * 64,
+        "response_id": None,
+        "reason": "reviewer_needs_human",
     }
 
 
@@ -834,6 +857,97 @@ class ApprovalRecordTests(unittest.TestCase):
                     message,
                 ):
                     ApprovalRecord.from_dict(data)
+
+
+class EscalationRecordTests(unittest.TestCase):
+    def test_escalation_round_trips_with_all_protocol_fields(self) -> None:
+        escalation = EscalationRecord.from_dict(
+            _escalation(),
+            object_format="sha1",
+            label="Developer escalation",
+        )
+
+        self.assertEqual(escalation.to_dict(), _escalation())
+        self.assertEqual(escalation.related_finding_ids, ("REV-001",))
+        self.assertIs(
+            escalation.reason,
+            EscalationReason.REVIEWER_NEEDS_HUMAN,
+        )
+
+    def test_escalation_rejects_invalid_protocol_values(self) -> None:
+        cases = (
+            (
+                lambda data: data.update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                lambda data: data.update(round=-1),
+                "round must not be negative",
+            ),
+            (
+                lambda data: data.update(head_oid="b" * 39),
+                "full lowercase sha1 object ID",
+            ),
+            (
+                lambda data: data.update(
+                    related_finding_ids=["REV-001", "REV-001"]
+                ),
+                "related_finding_ids contains duplicates",
+            ),
+            (
+                lambda data: data.update(previous_phase="waiting"),
+                "previous_phase must be implementing, reviewing, or "
+                "approved",
+            ),
+            (
+                lambda data: data.update(
+                    previous_phase="approved",
+                    previous_approved_head_oid=None,
+                ),
+                "previous_approved_head_oid must be present exactly",
+            ),
+            (
+                lambda data: data.update(
+                    previous_approved_head_oid="c" * 40,
+                ),
+                "previous_approved_head_oid must be present exactly",
+            ),
+            (
+                lambda data: data.update(actor="reviewer\nother"),
+                "actor must be a single line",
+            ),
+            (
+                lambda data: data.update(
+                    note_path="nested/001-escalation.md"
+                ),
+                "must name a companion file in the same directory",
+            ),
+            (
+                lambda data: data.update(reason="unknown"),
+                "reason must be one of",
+            ),
+            (
+                lambda data: data.update(response_id="not-a-uuid"),
+                "response_id must be a canonical UUID",
+            ),
+            (
+                lambda data: data.update(unexpected=True),
+                "unknown field",
+            ),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                data = copy.deepcopy(_escalation())
+                mutate(data)
+                with self.assertRaisesRegex(
+                    ArtifactValidationError,
+                    message,
+                ):
+                    EscalationRecord.from_dict(
+                        data,
+                        object_format="sha1",
+                        label="Developer escalation",
+                    )
 
 
 class DeveloperResolutionTests(unittest.TestCase):

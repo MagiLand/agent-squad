@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -65,7 +66,6 @@ from .storage import (
     decode_json,
     encode_json,
     exclusive_file_lock,
-    utc_timestamp,
 )
 from .validation import JsonValidator, OID_LENGTHS
 
@@ -307,7 +307,7 @@ def _prepare_submission_locked(
             )
         recovering = active_round.status in runs.RECOVERY_ROUND_STATUSES
         if recovering:
-            previous = _find_applied_changes_review(
+            previous = _find_applied_review(
                 run_directory,
                 active,
             )
@@ -340,7 +340,7 @@ def _prepare_submission_locked(
                 / ROUND_RECORD_FILE_NAME
             )
         else:
-            previous = _load_applied_changes_review(
+            previous = _load_applied_review(
                 run_directory,
                 active,
             )
@@ -354,7 +354,10 @@ def _prepare_submission_locked(
                 raise SubmissionError(str(error)) from error
         round_number = active.current_round + 1
 
-    if previous is not None:
+    if (
+        previous is not None
+        and previous.review.verdict is ReviewVerdict.CHANGES_REQUESTED
+    ):
         response_mode = response_validation_mode(
             mode,
             head_oid=head_oid,
@@ -377,7 +380,7 @@ def _prepare_submission_locked(
                 "a recovery submission without an applied previous review "
                 "does not accept --response"
             )
-    else:
+    elif previous.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
         previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
         previous_response_path = PREVIOUS_RESPONSE_BUNDLE_PATH
         if response_path is None:
@@ -412,6 +415,31 @@ def _prepare_submission_locked(
                 implementation_response.content,
             ),
         )
+    else:
+        _validate_resolved_needs_human_review(active, previous)
+        if mode is not SubmissionMode.NEW_REVISION:
+            raise SubmissionError(
+                "a submission after a resolved needs_human review must use "
+                "--mode new_revision"
+            )
+        if response_path is not None:
+            raise SubmissionError(
+                "a reviewer needs_human result is resolved by the recorded "
+                "Developer resolution and does not accept --response"
+            )
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = None
+        additional_bundle_contents = (
+            (
+                BundleArtifact(
+                    path=previous_review_path,
+                    sha256=hashlib.sha256(
+                        previous.review_bytes
+                    ).hexdigest(),
+                ),
+                previous.review_bytes,
+            ),
+        )
     recovery_round_path: str | None = None
     if recovering:
         if recovery_round_content is None:
@@ -431,6 +459,13 @@ def _prepare_submission_locked(
                 recovery_round_content,
             ),
         )
+    resolution_paths, resolution_bundle_contents = (
+        _developer_resolution_bundle_contents(active.resolutions)
+    )
+    additional_bundle_contents = (
+        *additional_bundle_contents,
+        *resolution_bundle_contents,
+    )
 
     artifact_sources = [report.source_path]
     if implementation_response is not None:
@@ -442,7 +477,7 @@ def _prepare_submission_locked(
     )
 
     request_id = str(uuid.uuid4())
-    timestamp = utc_timestamp()
+    timestamp = _next_request_timestamp(active.resolutions)
     try:
         reviewer_name = deterministic_reviewer_name(
             active.run_id,
@@ -481,7 +516,7 @@ def _prepare_submission_locked(
         previous_review_path=previous_review_path,
         previous_response_path=previous_response_path,
         recovery_round_path=recovery_round_path,
-        resolution_paths=(),
+        resolution_paths=resolution_paths,
         review_output_path="output/review.json",
         review_markdown_path="output/review.md",
         implementer_agent=active.implementer_agent,
@@ -911,23 +946,23 @@ def _capture_report(
     )
 
 
-def _load_applied_changes_review(
+def _load_applied_review(
     run_directory: Path,
     active: runs.ActiveRunStatus,
 ) -> runs.AppliedReviewAuthority:
-    authority = _find_applied_changes_review(run_directory, active)
+    authority = _find_applied_review(run_directory, active)
     if authority is None:
         raise SubmissionError(
-            "a correction-round request has no previous applied review"
+            "a follow-up request has no previous applied review"
         )
     return authority
 
 
-def _find_applied_changes_review(
+def _find_applied_review(
     run_directory: Path,
     active: runs.ActiveRunStatus,
 ) -> runs.AppliedReviewAuthority | None:
-    """Find and validate the latest applied changes-requested authority."""
+    """Find and validate the latest applied review authority."""
 
     active_round = active.active_round
     if (
@@ -951,10 +986,13 @@ def _find_applied_changes_review(
     if authority is None:
         return None
     round_record = authority.round_record
-    if round_record.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+    if round_record.verdict not in {
+        ReviewVerdict.CHANGES_REQUESTED,
+        ReviewVerdict.NEEDS_HUMAN,
+    }:
         raise SubmissionError(
             "a follow-up submission requires an applied changes_requested "
-            "review"
+            "or needs_human review"
         )
     if round_record.round_number == active.current_round:
         comparisons = (
@@ -970,6 +1008,37 @@ def _find_applied_changes_review(
                     "authoritative state"
                 )
     return authority
+
+
+def _validate_resolved_needs_human_review(
+    active: runs.ActiveRunStatus,
+    previous: runs.AppliedReviewAuthority,
+) -> None:
+    """Require a resolution for the exact applied needs-human result."""
+
+    if previous.review.verdict is not ReviewVerdict.NEEDS_HUMAN:
+        raise SubmissionError(
+            "internal error: expected an applied needs_human review"
+        )
+    matching_escalations = tuple(
+        authority.record
+        for authority in active.escalations
+        if authority.record.source_result_id == previous.review.result_id
+    )
+    if len(matching_escalations) != 1:
+        raise SubmissionError(
+            "the applied needs_human review does not have exactly one "
+            "linked Developer escalation"
+        )
+    escalation_id = matching_escalations[0].escalation_id
+    if not any(
+        authority.record.resolves_escalation_id == escalation_id
+        for authority in active.resolutions
+    ):
+        raise SubmissionError(
+            "the applied needs_human review has not been resolved by the "
+            "Developer"
+        )
 
 
 def _capture_response(
@@ -1268,6 +1337,60 @@ def _context_bundle_artifacts(
             BundleArtifact(path=f"input/{path}", sha256=digest)
         )
     return tuple(artifacts)
+
+
+def _developer_resolution_bundle_contents(
+    resolutions: tuple[runs.DeveloperResolutionAuthority, ...],
+) -> tuple[
+    tuple[str, ...],
+    tuple[tuple[BundleArtifact, bytes], ...],
+]:
+    """Prepare every canonical Developer resolution for a later bundle."""
+
+    paths: list[str] = []
+    contents: list[tuple[BundleArtifact, bytes]] = []
+    for authority in resolutions:
+        record_path = f"input/resolutions/{authority.path.name}"
+        companion_path = (
+            f"input/resolutions/{authority.companion_path.name}"
+        )
+        paths.append(record_path)
+        contents.extend(
+            (
+                (
+                    BundleArtifact(
+                        path=record_path,
+                        sha256=hashlib.sha256(
+                            authority.record_bytes
+                        ).hexdigest(),
+                    ),
+                    authority.record_bytes,
+                ),
+                (
+                    BundleArtifact(
+                        path=companion_path,
+                        sha256=authority.record.resolution_sha256,
+                    ),
+                    authority.companion_bytes,
+                ),
+            )
+        )
+    return tuple(paths), tuple(contents)
+
+
+def _next_request_timestamp(
+    resolutions: tuple[runs.DeveloperResolutionAuthority, ...],
+) -> str:
+    """Return a request time later than every bundled resolution."""
+
+    now = datetime.now(timezone.utc)
+    if resolutions:
+        latest = datetime.fromisoformat(
+            f"{resolutions[-1].record.created_at[:-1]}+00:00"
+        )
+        if now <= latest:
+            now = latest + timedelta(microseconds=1)
+    return now.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def review_worktree_path(

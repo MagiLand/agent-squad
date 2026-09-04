@@ -405,6 +405,10 @@ class ProtocolValueValidationTests(unittest.TestCase):
             runs._next_action(runs.RunPhase.APPROVED),
             "agent-squad complete",
         )
+        self.assertEqual(
+            runs._next_action(runs.RunPhase.NEEDS_HUMAN),
+            "agent-squad resume --resolution <resolution.md>",
+        )
 
 
 class RunArtifactValidationTests(unittest.TestCase):
