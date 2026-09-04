@@ -295,7 +295,12 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
             )
 
     def test_evidence_access_failures_leave_the_result_retryable(self) -> None:
-        for failure_kind in ("filesystem", "git"):
+        for failure_kind in (
+            "filesystem",
+            "git object format",
+            "base existence",
+            "base type",
+        ):
             with self.subTest(failure_kind=failure_kind):
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     root = Path(temporary_directory)
@@ -311,11 +316,13 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     round_path = run_directory / "rounds/001/round.json"
                     run_path = run_directory / "run.json"
                     events_path = run_directory / "events.jsonl"
+                    marker_path = prepared.bundle / "local-state.json"
                     originals = (
                         state_path.read_bytes(),
                         round_path.read_bytes(),
                         run_path.read_bytes(),
                         events_path.read_bytes(),
+                        marker_path.read_bytes(),
                     )
 
                     if failure_kind == "filesystem":
@@ -337,17 +344,36 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                         message = "simulated evidence read failure"
                     else:
                         real_run_git = review_submissions.run_git
+                        if failure_kind == "git object format":
+                            failing_arguments = (
+                                "rev-parse",
+                                "--show-object-format",
+                            )
+                            message = "simulated Git inspection failure"
+                        elif failure_kind == "base existence":
+                            failing_arguments = (
+                                "cat-file",
+                                "-e",
+                                str(prepared.request["base_oid"]),
+                            )
+                            message = "simulated base existence failure"
+                        else:
+                            failing_arguments = (
+                                "cat-file",
+                                "-t",
+                                str(prepared.request["base_oid"]),
+                            )
+                            message = "simulated base type failure"
 
                         def fail_evidence_git(start, *arguments):
                             if (
                                 Path(start) == prepared.review_worktree
-                                and arguments
-                                == ("rev-parse", "--show-object-format")
+                                and arguments == failing_arguments
                             ):
                                 return SimpleNamespace(
                                     returncode=128,
                                     stdout="",
-                                    stderr="simulated Git inspection failure",
+                                    stderr=message,
                                 )
                             return real_run_git(start, *arguments)
 
@@ -356,8 +382,6 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                             "run_git",
                             side_effect=fail_evidence_git,
                         )
-                        message = "simulated Git inspection failure"
-
                     with failure, self.assertRaisesRegex(
                         review_applications.ReviewApplicationError,
                         message,
@@ -373,6 +397,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                             round_path.read_bytes(),
                             run_path.read_bytes(),
                             events_path.read_bytes(),
+                            marker_path.read_bytes(),
                         ),
                         originals,
                     )
@@ -394,6 +419,53 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     )
                     self.assertIs(retried.verdict, runs.ReviewVerdict.APPROVED)
                     self.assertFalse(retried.replayed)
+
+    def test_missing_base_object_is_classified_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            prepared, review = _marker_confirmed_review(root)
+            real_run_git = review_submissions.run_git
+            missing_arguments = (
+                "cat-file",
+                "-e",
+                str(prepared.request["base_oid"]),
+            )
+
+            def report_missing_base(start, *arguments):
+                if (
+                    Path(start) == prepared.review_worktree
+                    and arguments == missing_arguments
+                ):
+                    return SimpleNamespace(
+                        returncode=1,
+                        stdout="",
+                        stderr="",
+                    )
+                return real_run_git(start, *arguments)
+
+            with mock.patch.object(
+                review_submissions,
+                "run_git",
+                side_effect=report_missing_base,
+            ):
+                applied = review_applications.apply_review(
+                    prepared.repository,
+                    result_id=str(review["result_id"]),
+                )
+
+            self.assertIs(applied.classification, runs.RoundStatus.INVALID)
+            self.assertIsNone(applied.verdict)
+            self.assertIn(
+                "review request base object is not an available commit",
+                str(applied.reason),
+            )
+            state = json.loads(
+                (
+                    prepared.repository / ".agent-squad/state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], "implementing")
+            self.assertEqual(state["active_round"]["status"], "invalid")
 
     def test_invalid_authoritative_retired_ledger_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

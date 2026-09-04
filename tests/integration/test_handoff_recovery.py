@@ -10,6 +10,7 @@ import sys
 import tempfile
 from threading import Event
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -26,7 +27,12 @@ from tests.integration.test_review_submissions import (
     _write_review,
 )
 
-from agent_squad import handoffs, runs  # noqa: E402
+from agent_squad import (  # noqa: E402
+    handoffs,
+    review_applications,
+    review_submissions,
+    runs,
+)
 
 
 def _actual_herdr_invocations(environment: dict[str, str]) -> list[list[str]]:
@@ -359,6 +365,183 @@ class ReviewHandoffRecoveryTests(unittest.TestCase):
             state, run_directory = _artifacts(prepared.repository)
             self.assertEqual(state["current_round"], 1)
             _assert_single_round(self, run_directory)
+
+    def test_access_faults_refuse_recovery_without_mutating_evidence(
+        self,
+    ) -> None:
+        for failure_kind in ("filesystem", "git"):
+            with self.subTest(failure_kind=failure_kind):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    prepared = _prepare_round(Path(temporary_directory))
+                    review = _write_review(prepared)
+                    lost_notification = dict(prepared.environment)
+                    lost_notification["FAKE_HERDR_FAIL_PROMPT"] = "1"
+                    submitted = run_cli(
+                        prepared.review_worktree,
+                        "review-submit",
+                        data_home=prepared.data_home,
+                        env_overrides=lost_notification,
+                    )
+                    self.assertEqual(submitted.returncode, 1)
+                    state, run_directory = _artifacts(prepared.repository)
+                    round_directory = run_directory / "rounds/001"
+                    marker_path = prepared.bundle / "local-state.json"
+                    authoritative_ledger = (
+                        round_directory / "retired-results.json"
+                    )
+                    reviewer_ledger = prepared.bundle / "retired-results.json"
+                    evidence_paths = (
+                        prepared.repository / ".agent-squad/state.json",
+                        round_directory / "round.json",
+                        run_directory / "run.json",
+                        run_directory / "events.jsonl",
+                        marker_path,
+                        authoritative_ledger,
+                        reviewer_ledger,
+                    )
+
+                    def snapshot() -> tuple[bytes | None, ...]:
+                        return tuple(
+                            path.read_bytes() if path.exists() else None
+                            for path in evidence_paths
+                        )
+
+                    originals = snapshot()
+                    prompts_before = _invocations_of(
+                        prepared.environment,
+                        "agent",
+                        "prompt",
+                    )
+                    message = "simulated Git inspection failure"
+                    if failure_kind == "filesystem":
+                        request_path = prepared.bundle / "input/request.json"
+                        request_path.chmod(0)
+                        failure = mock.patch.object(
+                            review_submissions,
+                            "run_git",
+                            wraps=review_submissions.run_git,
+                        )
+                        message = "Permission denied"
+                    else:
+                        real_run_git = review_submissions.run_git
+
+                        def fail_evidence_git(start, *arguments):
+                            if (
+                                Path(start) == prepared.review_worktree
+                                and arguments
+                                == ("rev-parse", "--show-object-format")
+                            ):
+                                return SimpleNamespace(
+                                    returncode=128,
+                                    stdout="",
+                                    stderr=message,
+                                )
+                            return real_run_git(start, *arguments)
+
+                        failure = mock.patch.object(
+                            review_submissions,
+                            "run_git",
+                            side_effect=fail_evidence_git,
+                        )
+
+                    try:
+                        with failure:
+                            status = runs.inspect_status(prepared.repository)
+                            active = status.active_run
+                            self.assertIsNotNone(active)
+                            assert active is not None
+                            self.assertIsInstance(
+                                active.unapplied_review,
+                                runs.UnavailableReviewEvidence,
+                            )
+                            assert isinstance(
+                                active.unapplied_review,
+                                runs.UnavailableReviewEvidence,
+                            )
+                            self.assertIn(
+                                message,
+                                active.unapplied_review.reason,
+                            )
+                            self.assertEqual(
+                                status.next_action,
+                                "agent-squad retry-handoff",
+                            )
+
+                            if failure_kind == "filesystem":
+                                cli_status = run_cli(
+                                    prepared.repository,
+                                    "status",
+                                    data_home=prepared.data_home,
+                                    env_overrides=prepared.environment,
+                                )
+                                self.assertEqual(
+                                    cli_status.returncode,
+                                    0,
+                                    cli_status.stderr,
+                                )
+                                self.assertIn(
+                                    "Marker-confirmed unapplied result: "
+                                    "present but unavailable",
+                                    cli_status.stdout,
+                                )
+                                self.assertIn(message, cli_status.stdout)
+                                self.assertNotIn(
+                                    "present but invalid",
+                                    cli_status.stdout,
+                                )
+
+                            with self.assertRaisesRegex(
+                                handoffs.HandoffRecoveryError,
+                                message,
+                            ) as raised:
+                                handoffs.retry_handoff(prepared.repository)
+                            self.assertNotIn(
+                                "invalid",
+                                str(raised.exception).lower(),
+                            )
+                    finally:
+                        if failure_kind == "filesystem":
+                            request_path.chmod(0o600)
+
+                    self.assertEqual(snapshot(), originals)
+                    self.assertFalse(
+                        (
+                            round_directory
+                            / "diagnostics/invalid-results"
+                        ).exists()
+                    )
+                    self.assertEqual(
+                        _invocations_of(
+                            prepared.environment,
+                            "agent",
+                            "prompt",
+                        ),
+                        prompts_before,
+                    )
+
+                    recovered = handoffs.retry_handoff(prepared.repository)
+                    self.assertIs(
+                        recovered.action,
+                        handoffs.HandoffRecoveryAction.RESULT_READY,
+                    )
+                    self.assertEqual(recovered.result_id, review["result_id"])
+                    self.assertEqual(
+                        _invocations_of(
+                            prepared.environment,
+                            "agent",
+                            "prompt",
+                        ),
+                        prompts_before,
+                    )
+                    applied = review_applications.apply_review(
+                        prepared.repository,
+                        result_id=str(review["result_id"]),
+                    )
+                    self.assertIs(
+                        applied.classification,
+                        runs.RoundStatus.APPLIED,
+                    )
+                    self.assertEqual(state["active_run_id"], applied.run_id)
 
     def test_history_failure_falls_back_to_reprompting_the_same_request(
         self,

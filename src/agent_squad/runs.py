@@ -49,7 +49,11 @@ from .initialization import (
     load_initialized_repository,
     run_git,
 )
-from .review_submissions import MARKER_PATH, load_marker_confirmed_review
+from .review_submissions import (
+    MARKER_PATH,
+    ReviewEvidenceAccessError,
+    load_marker_confirmed_review,
+)
 from .storage import (
     InvalidJsonError,
     atomic_write,
@@ -332,6 +336,13 @@ class InvalidUnappliedReviewResult:
 
 
 @dataclass(frozen=True)
+class UnavailableReviewEvidence:
+    """One marker-confirmed result whose evidence cannot be inspected."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
 class IncompleteReviewOutput:
     """Expected Reviewer output that has no valid local submission marker."""
 
@@ -361,6 +372,7 @@ class _ActiveReviewArtifacts:
 UnappliedReviewState = (
     UnappliedReviewResult
     | InvalidUnappliedReviewResult
+    | UnavailableReviewEvidence
     | IncompleteReviewOutput
     | None
 )
@@ -2354,6 +2366,8 @@ def _discover_unapplied_review(
             active_round.review_worktree,
             authoritative_results_root=authoritative_results_root,
         )
+    except ReviewEvidenceAccessError as error:
+        return UnavailableReviewEvidence(reason=str(error))
     except AgentSquadError as error:
         return InvalidUnappliedReviewResult(
             reason=f"marker-confirmed review result is invalid: {error}",
@@ -2850,7 +2864,11 @@ def _next_action(
     if phase is RunPhase.REVIEWING:
         if isinstance(
             unapplied_review,
-            (IncompleteReviewOutput, InvalidUnappliedReviewResult),
+            (
+                IncompleteReviewOutput,
+                InvalidUnappliedReviewResult,
+                UnavailableReviewEvidence,
+            ),
         ):
             return RETRY_HANDOFF_NEXT_ACTION
         if isinstance(unapplied_review, UnappliedReviewResult):

@@ -252,6 +252,15 @@ def retry_handoff(
                     result_id=active.unapplied_review.result_id,
                     diagnostic_id=None,
                 )
+            if isinstance(
+                active.unapplied_review,
+                runs.UnavailableReviewEvidence,
+            ):
+                raise HandoffRecoveryError(
+                    "review evidence is temporarily unavailable; refusing "
+                    "to preserve or resend it: "
+                    f"{active.unapplied_review.reason}"
+                )
             if not active.review_worktree_available:
                 raise HandoffRecoveryError(
                     "the expected review worktree is unavailable; refusing "

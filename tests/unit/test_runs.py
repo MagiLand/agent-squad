@@ -376,6 +376,14 @@ class ProtocolValueValidationTests(unittest.TestCase):
             ),
             "agent-squad retry-handoff",
         )
+        unavailable = runs.UnavailableReviewEvidence("temporary read fault")
+        self.assertEqual(
+            runs._next_action(
+                runs.RunPhase.REVIEWING,
+                unapplied_review=unavailable,
+            ),
+            "agent-squad retry-handoff",
+        )
         self.assertEqual(
             runs._next_action(
                 runs.RunPhase.REVIEWING,
