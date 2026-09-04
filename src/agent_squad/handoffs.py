@@ -973,6 +973,8 @@ def format_review_request_prompt(
         "Review the exact requested revision in this worktree.\n"
         "Read the complete local review bundle, including any Developer "
         "resolutions.\n"
+        "When resolutions address the same question, the latest created_at "
+        "is authoritative.\n"
         "Do not modify tracked files.\n"
         "Write the required review artifacts and run agent-squad "
         "review-submit."

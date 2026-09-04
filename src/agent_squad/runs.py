@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 import hashlib
 import os
@@ -20,6 +21,9 @@ from .artifacts import (
     ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
+    DeveloperResolution,
+    ESCALATIONS_DIRECTORY_NAME,
+    EscalationRecord,
     HandoffRecord,
     HandoffStatus,
     PREVIOUS_RESPONSE_BUNDLE_PATH,
@@ -33,6 +37,7 @@ from .artifacts import (
     ReviewRoundRecord,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
+    RESOLUTIONS_DIRECTORY_NAME,
     ROUND_RESPONSE_FILE_NAME,
     ReviewerLocalMarker,
     RoundStatus,
@@ -62,6 +67,7 @@ from .storage import (
     encode_json,
     exclusive_file_lock,
     inspect_regular_tree,
+    read_regular_tree,
     utc_timestamp,
 )
 from .validation import JsonValidator
@@ -75,6 +81,7 @@ TASK_FILE_NAME = "task.md"
 EVENT_LOG_FILE_NAME = "events.jsonl"
 CONTEXT_DIRECTORY_NAME = "context"
 RETRY_HANDOFF_NEXT_ACTION = "agent-squad retry-handoff"
+RESUME_NEXT_ACTION = "agent-squad resume --resolution <resolution.md>"
 CORRECTION_SUBMIT_NEXT_ACTION = (
     "agent-squad submit --report <report.md> --response <response.json> "
     "--mode <new_revision|reconsideration> after addressing every "
@@ -360,6 +367,28 @@ class AppliedReviewAuthority:
 
 
 @dataclass(frozen=True)
+class EscalationAuthority:
+    """Validated canonical escalation and its companion Markdown."""
+
+    path: Path
+    note_path: Path
+    record: EscalationRecord
+    record_bytes: bytes
+    note_bytes: bytes
+
+
+@dataclass(frozen=True)
+class DeveloperResolutionAuthority:
+    """Validated canonical Developer resolution and companion Markdown."""
+
+    path: Path
+    companion_path: Path
+    record: DeveloperResolution
+    record_bytes: bytes
+    companion_bytes: bytes
+
+
+@dataclass(frozen=True)
 class _ActiveReviewArtifacts:
     """Validated authority plus optional live review-bundle diagnostics."""
 
@@ -407,6 +436,8 @@ class ActiveRunStatus:
     unapplied_review: UnappliedReviewState
     approval: ApprovalRecord | None
     review_budget: ReviewBudget
+    escalations: tuple[EscalationAuthority, ...]
+    resolutions: tuple[DeveloperResolutionAuthority, ...]
 
 
 @dataclass(frozen=True)
@@ -647,6 +678,11 @@ def load_completed_run(
         active_round = ActiveRoundRecord.from_dict(state["active_round"])
     except ArtifactValidationError as error:
         raise RunStateError(str(error)) from error
+    completed_escalations = load_escalation_history(
+        run_directory=run_directory,
+        run_id=run_id,
+        object_format=record.object_format,
+    )
     review_artifacts = _validate_active_review_artifacts(
         run_directory=run_directory,
         record=record,
@@ -654,6 +690,11 @@ def load_completed_run(
         current_round=round_number,
         current_head_oid=current_head_oid,
         active_round=active_round,
+        resolutions=load_developer_resolution_history(
+            run_directory=run_directory,
+            run_id=run_id,
+            escalations=completed_escalations,
+        ),
         validate_live_worktree=False,
     )
     round_record = review_artifacts.round_record
@@ -751,8 +792,14 @@ def _inspect_status(
     approved_head_oid = _require_optional_string(
         state["approved_head_oid"], "state.approved_head_oid"
     )
-    active_escalation_id = _require_optional_string(
-        state["active_escalation_id"], "state.active_escalation_id"
+    active_escalation_value = state["active_escalation_id"]
+    active_escalation_id = (
+        None
+        if active_escalation_value is None
+        else _require_uuid(
+            active_escalation_value,
+            "state.active_escalation_id",
+        )
     )
     active_round_value = state["active_round"]
     handoff_value = state["handoff"]
@@ -774,6 +821,31 @@ def _inspect_status(
     run_record_path = run_directory / RUN_RECORD_FILE_NAME
     run_record = load_json_object(run_record_path, "active run record")
     record = _validate_run_record(run_record, run_directory, active_run_id)
+    escalations = load_escalation_history(
+        run_directory=run_directory,
+        run_id=active_run_id,
+        object_format=record.object_format,
+    )
+    resolutions = load_developer_resolution_history(
+        run_directory=run_directory,
+        run_id=active_run_id,
+        escalations=escalations,
+    )
+    granted_rounds = sum(
+        authority.record.additional_rounds_granted
+        for authority in resolutions
+    )
+    if granted_rounds != budget.additional_rounds_granted:
+        raise RunStateError(
+            "state review-budget extension does not match Developer "
+            "resolution history"
+        )
+    _validate_active_escalation(
+        phase=phase,
+        active_escalation_id=active_escalation_id,
+        escalations=escalations,
+        resolutions=resolutions,
+    )
 
     stored_identity = record.repository
     _assert_matching_state_value(
@@ -843,6 +915,7 @@ def _inspect_status(
             current_round=current_round,
             current_head_oid=current_head_oid,
             active_round=validated_round,
+            resolutions=resolutions,
             validate_live_worktree=(phase is not RunPhase.IMPLEMENTING),
             live_review_bundle_mode=live_review_bundle_mode,
         )
@@ -921,6 +994,8 @@ def _inspect_status(
             unapplied_review=unapplied_review,
             approval=approval,
             review_budget=budget,
+            escalations=escalations,
+            resolutions=resolutions,
         ),
         next_action=next_action,
     )
@@ -1526,6 +1601,7 @@ def _validate_active_review_artifacts(
     current_round: int,
     current_head_oid: str | None,
     active_round: ActiveRoundRecord,
+    resolutions: tuple[DeveloperResolutionAuthority, ...] = (),
     validate_live_worktree: bool = True,
     live_review_bundle_mode: _LiveReviewBundleMode = (
         _LiveReviewBundleMode.STRICT
@@ -1689,13 +1765,14 @@ def _validate_active_review_artifacts(
                     "new_revision"
                 )
         else:
-            if (
-                previous.round_record.verdict
-                is not ReviewVerdict.CHANGES_REQUESTED
-            ):
+            if previous.round_record.verdict not in {
+                ReviewVerdict.CHANGES_REQUESTED,
+                ReviewVerdict.NEEDS_HUMAN,
+            }:
                 raise RunStateError(
                     "a correction-round request must follow the most recent "
-                    "applied changes_requested result"
+                    "applied changes_requested result or a resolved "
+                    "needs_human result"
                 )
             recovery_head_oid = (
                 preceding_round.head_oid if recovering else None
@@ -1710,14 +1787,52 @@ def _validate_active_review_artifacts(
             except ArtifactValidationError as error:
                 raise RunStateError(str(error)) from error
 
+    request_created_at = _timestamp_value(request.created_at)
+    request_resolutions = tuple(
+        authority
+        for authority in resolutions
+        if _timestamp_value(authority.record.created_at) < request_created_at
+    )
     expected_additional_paths: tuple[str, ...] = ()
     if previous is not None:
-        expected_additional_paths += (
-            PREVIOUS_REVIEW_BUNDLE_PATH,
-            PREVIOUS_RESPONSE_BUNDLE_PATH,
-        )
+        expected_additional_paths += (PREVIOUS_REVIEW_BUNDLE_PATH,)
+        if previous.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
+            expected_additional_paths += (PREVIOUS_RESPONSE_BUNDLE_PATH,)
+        elif previous.review.verdict is ReviewVerdict.NEEDS_HUMAN:
+            if not request_resolutions:
+                raise RunStateError(
+                    "a request after needs_human must include a Developer "
+                    "resolution"
+                )
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise RunStateError(
+                    "a request after needs_human must use new_revision"
+                )
+        else:
+            raise RunStateError(
+                "a follow-up request cannot use the latest applied review "
+                f"with verdict {previous.review.verdict.value}"
+            )
     if recovering:
         expected_additional_paths += (RECOVERY_ROUND_BUNDLE_PATH,)
+    expected_resolution_paths = tuple(
+        f"input/resolutions/{authority.path.name}"
+        for authority in request_resolutions
+    )
+    if request.resolution_paths != expected_resolution_paths:
+        raise RunStateError(
+            "active review request Developer resolutions do not match "
+            "authoritative run history"
+        )
+    for authority, record_path in zip(
+        request_resolutions,
+        expected_resolution_paths,
+        strict=True,
+    ):
+        expected_additional_paths += (
+            record_path,
+            f"input/resolutions/{authority.companion_path.name}",
+        )
     expected_recovery_path = (
         RECOVERY_ROUND_BUNDLE_PATH if recovering else None
     )
@@ -1726,14 +1841,17 @@ def _validate_active_review_artifacts(
             "active review request recovery authority does not match "
             "round history"
         )
-    expected_previous_paths = (
-        (
+    expected_previous_paths = (None, None)
+    if previous is not None:
+        expected_previous_paths = (
             PREVIOUS_REVIEW_BUNDLE_PATH,
-            PREVIOUS_RESPONSE_BUNDLE_PATH,
+            (
+                PREVIOUS_RESPONSE_BUNDLE_PATH
+                if previous.review.verdict
+                is ReviewVerdict.CHANGES_REQUESTED
+                else None
+            ),
         )
-        if previous is not None
-        else (None, None)
-    )
     if (
         request.previous_review_path,
         request.previous_response_path,
@@ -1774,18 +1892,22 @@ def _validate_active_review_artifacts(
                 "previous review bundle input does not match the most recent "
                 "applied round"
             )
-        for label, bundle_path, canonical_name in (
+        prior_artifacts = [
             (
                 "previous review",
                 PREVIOUS_REVIEW_BUNDLE_PATH,
                 REVIEW_RESULT_FILE_NAME,
-            ),
-            (
-                "previous response",
-                PREVIOUS_RESPONSE_BUNDLE_PATH,
-                ROUND_RESPONSE_FILE_NAME,
-            ),
-        ):
+            )
+        ]
+        if previous.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
+            prior_artifacts.append(
+                (
+                    "previous response",
+                    PREVIOUS_RESPONSE_BUNDLE_PATH,
+                    ROUND_RESPONSE_FILE_NAME,
+                )
+            )
+        for label, bundle_path, canonical_name in prior_artifacts:
             artifact = additional_by_path[bundle_path]
             canonical_path = previous_round_directory / canonical_name
             try:
@@ -1799,6 +1921,30 @@ def _validate_active_review_artifacts(
                     f"{label} does not match the active round "
                     f"bundle-input digest: {error}"
                 ) from error
+    for authority, record_path in zip(
+        request_resolutions,
+        expected_resolution_paths,
+        strict=True,
+    ):
+        companion_path = (
+            f"input/resolutions/{authority.companion_path.name}"
+        )
+        expected_record_digest = hashlib.sha256(
+            authority.record_bytes
+        ).hexdigest()
+        if additional_by_path[record_path].sha256 != expected_record_digest:
+            raise RunStateError(
+                "Developer resolution bundle input does not match its "
+                "authoritative record"
+            )
+        if (
+            additional_by_path[companion_path].sha256
+            != authority.record.resolution_sha256
+        ):
+            raise RunStateError(
+                "Developer resolution companion bundle input does not match "
+                "its authoritative digest"
+            )
 
     if round_record.status is RoundStatus.APPLIED:
         validate_applied_review_round(
@@ -1890,6 +2036,274 @@ def find_latest_applied_review_before(
                 round_number=round_number,
             )
     return None
+
+
+def load_escalation_history(
+    *,
+    run_directory: Path,
+    run_id: str,
+    object_format: str,
+) -> tuple[EscalationAuthority, ...]:
+    """Load every canonical escalation in creation order."""
+
+    root = run_directory / ESCALATIONS_DIRECTORY_NAME
+    contents = _read_numbered_artifact_directory(
+        root,
+        artifact_name="escalation",
+    )
+    authorities: list[EscalationAuthority] = []
+    seen_ids: set[str] = set()
+    previous_created_at: datetime | None = None
+    for index in range(1, len(contents) // 2 + 1):
+        stem = f"{index:03d}-escalation"
+        record_name = f"{stem}.json"
+        note_name = f"{stem}.md"
+        record_bytes = contents[PurePosixPath(record_name)]
+        note_bytes = contents[PurePosixPath(note_name)]
+        data = _decode_authoritative_json_bytes(
+            record_bytes,
+            f"Developer escalation {index}",
+        )
+        try:
+            record = EscalationRecord.from_dict(
+                data,
+                object_format=object_format,
+                label=f"Developer escalation {index}",
+            )
+        except ArtifactValidationError as error:
+            raise RunStateError(str(error)) from error
+        if record.run_id != run_id:
+            raise RunStateError(
+                f"Developer escalation {index} belongs to a different run"
+            )
+        if record.note_path != note_name:
+            raise RunStateError(
+                f"Developer escalation {index} companion path does not "
+                "match its canonical location"
+            )
+        if hashlib.sha256(note_bytes).hexdigest() != record.note_sha256:
+            raise RunStateError(
+                f"Developer escalation {index} note digest does not match"
+            )
+        if record.escalation_id in seen_ids:
+            raise RunStateError(
+                "Developer escalation history contains duplicate IDs"
+            )
+        seen_ids.add(record.escalation_id)
+        created_at = _timestamp_value(record.created_at)
+        if (
+            previous_created_at is not None
+            and created_at <= previous_created_at
+        ):
+            raise RunStateError(
+                "Developer escalations must use strictly increasing "
+                "created_at timestamps"
+            )
+        previous_created_at = created_at
+        authorities.append(
+            EscalationAuthority(
+                path=root / record_name,
+                note_path=root / note_name,
+                record=record,
+                record_bytes=record_bytes,
+                note_bytes=note_bytes,
+            )
+        )
+    return tuple(authorities)
+
+
+def load_developer_resolution_history(
+    *,
+    run_directory: Path,
+    run_id: str,
+    escalations: tuple[EscalationAuthority, ...],
+) -> tuple[DeveloperResolutionAuthority, ...]:
+    """Load every canonical Developer resolution in creation order."""
+
+    escalations_by_id = {
+        authority.record.escalation_id: authority.record
+        for authority in escalations
+    }
+    root = run_directory / RESOLUTIONS_DIRECTORY_NAME
+    contents = _read_numbered_artifact_directory(
+        root,
+        artifact_name="resolution",
+    )
+    authorities: list[DeveloperResolutionAuthority] = []
+    seen_ids: set[str] = set()
+    resolved_escalations: set[str] = set()
+    previous_created_at: datetime | None = None
+    for index in range(1, len(contents) // 2 + 1):
+        stem = f"{index:03d}-resolution"
+        record_name = f"{stem}.json"
+        companion_name = f"{stem}.md"
+        record_bytes = contents[PurePosixPath(record_name)]
+        companion_bytes = contents[PurePosixPath(companion_name)]
+        data = _decode_authoritative_json_bytes(
+            record_bytes,
+            f"Developer resolution {index}",
+        )
+        try:
+            record = DeveloperResolution.from_dict(
+                data,
+                label=f"Developer resolution {index}",
+            )
+        except ArtifactValidationError as error:
+            raise RunStateError(str(error)) from error
+        if record.run_id != run_id:
+            raise RunStateError(
+                f"Developer resolution {index} belongs to a different run"
+            )
+        if record.resolves_escalation_id not in escalations_by_id:
+            raise RunStateError(
+                f"Developer resolution {index} references an escalation "
+                "outside this run"
+            )
+        escalation = escalations_by_id[record.resolves_escalation_id]
+        unknown_finding_ids = sorted(
+            set(record.applies_to_finding_ids)
+            - set(escalation.related_finding_ids)
+        )
+        if unknown_finding_ids:
+            raise RunStateError(
+                f"Developer resolution {index} references finding IDs "
+                "outside its escalation: "
+                f"{', '.join(unknown_finding_ids)}"
+            )
+        if record.resolves_escalation_id in resolved_escalations:
+            raise RunStateError(
+                "Developer resolution history resolves one escalation more "
+                "than once"
+            )
+        resolved_escalations.add(record.resolves_escalation_id)
+        if record.resolution_path != companion_name:
+            raise RunStateError(
+                f"Developer resolution {index} companion path does not "
+                "match its canonical location"
+            )
+        if (
+            hashlib.sha256(companion_bytes).hexdigest()
+            != record.resolution_sha256
+        ):
+            raise RunStateError(
+                f"Developer resolution {index} companion digest does not "
+                "match"
+            )
+        if record.resolution_id in seen_ids:
+            raise RunStateError(
+                "Developer resolution history contains duplicate IDs"
+            )
+        seen_ids.add(record.resolution_id)
+        created_at = _timestamp_value(record.created_at)
+        if created_at <= _timestamp_value(escalation.created_at):
+            raise RunStateError(
+                f"Developer resolution {index} must be created after its "
+                "escalation"
+            )
+        if (
+            previous_created_at is not None
+            and created_at <= previous_created_at
+        ):
+            raise RunStateError(
+                "Developer resolutions must use strictly increasing "
+                "created_at timestamps"
+            )
+        previous_created_at = created_at
+        authorities.append(
+            DeveloperResolutionAuthority(
+                path=root / record_name,
+                companion_path=root / companion_name,
+                record=record,
+                record_bytes=record_bytes,
+                companion_bytes=companion_bytes,
+            )
+        )
+    return tuple(authorities)
+
+
+def _read_numbered_artifact_directory(
+    root: Path,
+    *,
+    artifact_name: str,
+) -> dict[PurePosixPath, bytes]:
+    """Read one flat sequence of numbered JSON and Markdown artifacts."""
+
+    if not os.path.lexists(root):
+        return {}
+    contents = read_regular_tree(
+        root,
+        label=f"Developer {artifact_name} history",
+        error_type=RunStateError,
+    )
+    count = len(contents) // 2
+    expected = {
+        PurePosixPath(f"{index:03d}-{artifact_name}.{suffix}")
+        for index in range(1, count + 1)
+        for suffix in ("json", "md")
+    }
+    if len(contents) % 2 or set(contents) != expected:
+        raise RunStateError(
+            f"Developer {artifact_name} history must contain contiguous "
+            "numbered JSON and Markdown pairs"
+        )
+    return contents
+
+
+def _decode_authoritative_json_bytes(
+    content: bytes,
+    label: str,
+) -> dict[str, object]:
+    try:
+        value = decode_json(content.decode("utf-8"))
+    except (UnicodeDecodeError, InvalidJsonError) as error:
+        raise RunStateError(
+            f"{label} contains invalid JSON: {error}"
+        ) from error
+    return _require_object(value, label)
+
+
+def _timestamp_value(value: str) -> datetime:
+    return datetime.fromisoformat(f"{value[:-1]}+00:00")
+
+
+def _validate_active_escalation(
+    *,
+    phase: RunPhase,
+    active_escalation_id: str | None,
+    escalations: tuple[EscalationAuthority, ...],
+    resolutions: tuple[DeveloperResolutionAuthority, ...],
+) -> None:
+    """Bind needs-human state to one unresolved canonical escalation."""
+
+    resolved_ids = {
+        authority.record.resolves_escalation_id
+        for authority in resolutions
+    }
+    unresolved = tuple(
+        authority.record.escalation_id
+        for authority in escalations
+        if authority.record.escalation_id not in resolved_ids
+    )
+    if phase is RunPhase.NEEDS_HUMAN:
+        if active_escalation_id is None:
+            raise RunStateError(
+                "a needs_human run must identify its active escalation"
+            )
+        if unresolved != (active_escalation_id,):
+            raise RunStateError(
+                "state.active_escalation_id must identify the only "
+                "unresolved Developer escalation"
+            )
+        return
+    if active_escalation_id is not None:
+        raise RunStateError(
+            f"a {phase.value} run cannot retain an active escalation"
+        )
+    if unresolved:
+        raise RunStateError(
+            "a run outside needs_human cannot retain unresolved Developer "
+            "escalations"
+        )
 
 
 def find_recorded_review_round(
@@ -2475,11 +2889,6 @@ def _assert_request_matches_active_round(
             "the first active review request cannot reference previous "
             "review artifacts"
         )
-    if request.resolution_paths:
-        raise RunStateError(
-            "this implementation increment does not support Developer "
-            "resolution inputs"
-        )
 
 
 def _validate_active_state_shape(
@@ -2567,6 +2976,43 @@ def _validate_active_state_shape(
                 "an approved run must record the applied result ID"
             )
         return approved_round
+    if phase is RunPhase.NEEDS_HUMAN:
+        if active_escalation_id is None:
+            raise RunStateError(
+                "a needs_human run must identify an active escalation"
+            )
+        if approved_head_oid is not None:
+            raise RunStateError(
+                "a needs_human run cannot retain approval authority"
+            )
+        if current_round == 0:
+            if current_head_oid is not None:
+                raise RunStateError(
+                    "a needs_human run without review history must not "
+                    "record a requested head"
+                )
+            if active_round is not None or handoff is not None:
+                raise RunStateError(
+                    "a needs_human run without review history cannot retain "
+                    "round or handoff state"
+                )
+            return None
+        if current_head_oid is None:
+            raise RunStateError(
+                "a needs_human run with review history must identify its "
+                "current head"
+            )
+        closed_round = _require_linked_active_round(
+            current_round=current_round,
+            active_round=active_round,
+            handoff=handoff,
+            run_description="a needs_human run with review history",
+        )
+        if closed_round.status not in CLOSED_ROUND_STATUSES:
+            raise RunStateError(
+                "a needs_human run must record a closed active round"
+            )
+        return closed_round
     if phase is not RunPhase.REVIEWING:
         return None
     if current_round < 1 or current_head_oid is None:
@@ -2884,6 +3330,8 @@ def _next_action(
         return "wait for the Reviewer result"
     if phase is RunPhase.APPROVED:
         return "agent-squad complete"
+    if phase is RunPhase.NEEDS_HUMAN:
+        return RESUME_NEXT_ACTION
     raise RunStateError(
         f"phase {phase.value} is not supported by this implementation "
         "increment"

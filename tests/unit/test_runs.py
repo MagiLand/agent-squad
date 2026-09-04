@@ -405,6 +405,10 @@ class ProtocolValueValidationTests(unittest.TestCase):
             runs._next_action(runs.RunPhase.APPROVED),
             "agent-squad complete",
         )
+        self.assertEqual(
+            runs._next_action(runs.RunPhase.NEEDS_HUMAN),
+            "agent-squad resume --resolution <resolution.md>",
+        )
 
 
 class RunArtifactValidationTests(unittest.TestCase):
@@ -1341,6 +1345,469 @@ class ApprovalArtifactGuardTests(unittest.TestCase):
                         record=SimpleNamespace(),
                         approved_head_oid=approved_head_oid,
                     )
+
+
+class HumanDecisionHistoryValidationTests(unittest.TestCase):
+    run_id = "12345678-1234-4678-9234-567812345678"
+    escalation_ids = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    )
+    resolution_ids = (
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+    )
+
+    def _escalation_records(self) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = []
+        for index in (1, 2):
+            note = f"# Decision {index}\n".encode()
+            records.append(
+                {
+                    "schema_version": 1,
+                    "created_at": f"2026-09-04T12:0{index - 1}:00Z",
+                    "escalation_id": self.escalation_ids[index - 1],
+                    "run_id": self.run_id,
+                    "round": index,
+                    "head_oid": "a" * 40,
+                    "related_finding_ids": [f"REV-{index:03d}"],
+                    "source_request_id": None,
+                    "source_result_id": None,
+                    "previous_approved_head_oid": None,
+                    "previous_phase": "implementing",
+                    "actor": "implementer",
+                    "note_path": f"{index:03d}-escalation.md",
+                    "note_sha256": hashlib.sha256(note).hexdigest(),
+                    "response_id": None,
+                    "reason": "implementer_requested",
+                }
+            )
+        return records
+
+    def _resolution_records(self) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = []
+        for index in (1, 2):
+            companion = f"# Resolution {index}\n".encode()
+            records.append(
+                {
+                    "schema_version": 1,
+                    "created_at": f"2026-09-04T12:0{index + 1}:00Z",
+                    "resolution_id": self.resolution_ids[index - 1],
+                    "run_id": self.run_id,
+                    "resolves_escalation_id": (
+                        self.escalation_ids[index - 1]
+                    ),
+                    "applies_to_finding_ids": [f"REV-{index:03d}"],
+                    "resolution_path": f"{index:03d}-resolution.md",
+                    "resolution_sha256": hashlib.sha256(
+                        companion
+                    ).hexdigest(),
+                    "additional_rounds_granted": 0,
+                }
+            )
+        return records
+
+    def _write_escalations(
+        self,
+        run_directory: Path,
+        records: list[dict[str, object]],
+    ) -> None:
+        root = run_directory / "escalations"
+        root.mkdir(parents=True)
+        for index, record in enumerate(records, start=1):
+            (root / f"{index:03d}-escalation.json").write_text(
+                f"{json.dumps(record, indent=2)}\n",
+                encoding="utf-8",
+            )
+            (root / f"{index:03d}-escalation.md").write_text(
+                f"# Decision {index}\n",
+                encoding="utf-8",
+            )
+
+    def _write_resolutions(
+        self,
+        run_directory: Path,
+        records: list[dict[str, object]],
+    ) -> None:
+        root = run_directory / "resolutions"
+        root.mkdir(parents=True)
+        for index, record in enumerate(records, start=1):
+            (root / f"{index:03d}-resolution.json").write_text(
+                f"{json.dumps(record, indent=2)}\n",
+                encoding="utf-8",
+            )
+            (root / f"{index:03d}-resolution.md").write_text(
+                f"# Resolution {index}\n",
+                encoding="utf-8",
+            )
+
+    def test_escalation_history_rejects_each_relationship_violation(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "artifact schema",
+                lambda records: records[0].update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                "run identity",
+                lambda records: records[0].update(
+                    run_id="99999999-9999-4999-8999-999999999999"
+                ),
+                "belongs to a different run",
+            ),
+            (
+                "companion path",
+                lambda records: records[0].update(
+                    note_path="other-note.md"
+                ),
+                "companion path does not match",
+            ),
+            (
+                "companion digest",
+                lambda records: records[0].update(note_sha256="f" * 64),
+                "note digest does not match",
+            ),
+            (
+                "duplicate ID",
+                lambda records: records[1].update(
+                    escalation_id=records[0]["escalation_id"]
+                ),
+                "contains duplicate IDs",
+            ),
+            (
+                "timestamp order",
+                lambda records: records[1].update(
+                    created_at=records[0]["created_at"]
+                ),
+                "strictly increasing created_at timestamps",
+            ),
+        )
+        for label, mutate, message in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    run_directory = Path(temporary_directory) / "run"
+                    records = self._escalation_records()
+                    mutate(records)
+                    self._write_escalations(run_directory, records)
+
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        message,
+                    ):
+                        runs.load_escalation_history(
+                            run_directory=run_directory,
+                            run_id=self.run_id,
+                            object_format="sha1",
+                        )
+
+    def test_escalation_history_rejects_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            self._write_escalations(
+                run_directory,
+                self._escalation_records(),
+            )
+            (run_directory / "escalations/001-escalation.json").write_bytes(
+                b"{\n"
+            )
+
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "contains invalid JSON",
+            ):
+                runs.load_escalation_history(
+                    run_directory=run_directory,
+                    run_id=self.run_id,
+                    object_format="sha1",
+                )
+
+    def test_resolution_history_rejects_each_relationship_violation(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "artifact schema",
+                lambda records: records[0].update(schema_version=2),
+                "schema_version must be 1",
+            ),
+            (
+                "run identity",
+                lambda records: records[0].update(
+                    run_id="99999999-9999-4999-8999-999999999999"
+                ),
+                "belongs to a different run",
+            ),
+            (
+                "foreign escalation",
+                lambda records: records[0].update(
+                    resolves_escalation_id=(
+                        "99999999-9999-4999-8999-999999999999"
+                    )
+                ),
+                "references an escalation outside this run",
+            ),
+            (
+                "foreign finding",
+                lambda records: records[0].update(
+                    applies_to_finding_ids=["REV-999"]
+                ),
+                "references finding IDs outside its escalation",
+            ),
+            (
+                "duplicate escalation resolution",
+                lambda records: records[1].update(
+                    resolves_escalation_id=(
+                        records[0]["resolves_escalation_id"]
+                    ),
+                    applies_to_finding_ids=["REV-001"],
+                ),
+                "resolves one escalation more than once",
+            ),
+            (
+                "companion path",
+                lambda records: records[0].update(
+                    resolution_path="other-resolution.md"
+                ),
+                "companion path does not match",
+            ),
+            (
+                "companion digest",
+                lambda records: records[0].update(
+                    resolution_sha256="f" * 64
+                ),
+                "companion digest does not match",
+            ),
+            (
+                "duplicate ID",
+                lambda records: records[1].update(
+                    resolution_id=records[0]["resolution_id"]
+                ),
+                "contains duplicate IDs",
+            ),
+            (
+                "predates escalation",
+                lambda records: records[0].update(
+                    created_at="2026-09-04T12:00:00Z"
+                ),
+                "must be created after its escalation",
+            ),
+            (
+                "timestamp order",
+                lambda records: records[1].update(
+                    created_at=records[0]["created_at"]
+                ),
+                "strictly increasing created_at timestamps",
+            ),
+        )
+        for label, mutate, message in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    run_directory = Path(temporary_directory) / "run"
+                    self._write_escalations(
+                        run_directory,
+                        self._escalation_records(),
+                    )
+                    escalations = runs.load_escalation_history(
+                        run_directory=run_directory,
+                        run_id=self.run_id,
+                        object_format="sha1",
+                    )
+                    records = self._resolution_records()
+                    mutate(records)
+                    self._write_resolutions(run_directory, records)
+
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        message,
+                    ):
+                        runs.load_developer_resolution_history(
+                            run_directory=run_directory,
+                            run_id=self.run_id,
+                            escalations=escalations,
+                        )
+
+    def test_resolution_history_rejects_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_directory = Path(temporary_directory) / "run"
+            self._write_escalations(
+                run_directory,
+                self._escalation_records(),
+            )
+            escalations = runs.load_escalation_history(
+                run_directory=run_directory,
+                run_id=self.run_id,
+                object_format="sha1",
+            )
+            self._write_resolutions(
+                run_directory,
+                self._resolution_records(),
+            )
+            (run_directory / "resolutions/001-resolution.json").write_bytes(
+                b"{\n"
+            )
+
+            with self.assertRaisesRegex(
+                runs.RunStateError,
+                "contains invalid JSON",
+            ):
+                runs.load_developer_resolution_history(
+                    run_directory=run_directory,
+                    run_id=self.run_id,
+                    escalations=escalations,
+                )
+
+    def test_decision_history_requires_contiguous_json_markdown_pairs(
+        self,
+    ) -> None:
+        for artifact_name in ("escalation", "resolution"):
+            with self.subTest(artifact=artifact_name):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory) / "history"
+                    root.mkdir()
+                    (root / f"002-{artifact_name}.json").write_text(
+                        "{}\n",
+                        encoding="utf-8",
+                    )
+                    (root / f"002-{artifact_name}.md").write_text(
+                        "# Companion\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        runs.RunStateError,
+                        "contiguous numbered JSON and Markdown pairs",
+                    ):
+                        runs._read_numbered_artifact_directory(
+                            root,
+                            artifact_name=artifact_name,
+                        )
+
+    def test_active_escalation_requires_exactly_one_unresolved_record(
+        self,
+    ) -> None:
+        escalation_id = self.escalation_ids[0]
+        escalations = (
+            SimpleNamespace(
+                record=SimpleNamespace(escalation_id=escalation_id)
+            ),
+        )
+        resolved = (
+            SimpleNamespace(
+                record=SimpleNamespace(
+                    resolves_escalation_id=escalation_id
+                )
+            ),
+        )
+        runs._validate_active_escalation(
+            phase=runs.RunPhase.NEEDS_HUMAN,
+            active_escalation_id=escalation_id,
+            escalations=escalations,
+            resolutions=(),
+        )
+        runs._validate_active_escalation(
+            phase=runs.RunPhase.IMPLEMENTING,
+            active_escalation_id=None,
+            escalations=escalations,
+            resolutions=resolved,
+        )
+        cases = (
+            (
+                runs.RunPhase.NEEDS_HUMAN,
+                None,
+                escalations,
+                (),
+                "must identify its active escalation",
+            ),
+            (
+                runs.RunPhase.NEEDS_HUMAN,
+                self.escalation_ids[1],
+                escalations,
+                (),
+                "must identify the only unresolved Developer escalation",
+            ),
+            (
+                runs.RunPhase.IMPLEMENTING,
+                escalation_id,
+                escalations,
+                resolved,
+                "cannot retain an active escalation",
+            ),
+            (
+                runs.RunPhase.IMPLEMENTING,
+                None,
+                escalations,
+                (),
+                "cannot retain unresolved Developer escalations",
+            ),
+        )
+        for phase, active_id, history, resolutions, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_active_escalation(
+                        phase=phase,
+                        active_escalation_id=active_id,
+                        escalations=history,
+                        resolutions=resolutions,
+                    )
+
+    def test_needs_human_state_shape_covers_empty_and_historical_runs(
+        self,
+    ) -> None:
+        escalation_id = self.escalation_ids[0]
+        empty = _active_state_arguments(
+            phase=runs.RunPhase.NEEDS_HUMAN,
+            current_round=0,
+            current_head_oid=None,
+            active_escalation_id=escalation_id,
+            active_round=None,
+            handoff=None,
+        )
+        self.assertIsNone(runs._validate_active_state_shape(**empty))
+        closed_round = _active_round(RoundStatus.APPLIED)
+        historical = _active_state_arguments(
+            phase=runs.RunPhase.NEEDS_HUMAN,
+            active_escalation_id=escalation_id,
+            active_round=closed_round,
+        )
+        self.assertIs(
+            runs._validate_active_state_shape(**historical),
+            closed_round,
+        )
+        cases = (
+            (
+                {**empty, "active_escalation_id": None},
+                "must identify an active escalation",
+            ),
+            (
+                {**empty, "approved_head_oid": "a" * 40},
+                "cannot retain approval authority",
+            ),
+            (
+                {**empty, "current_head_oid": "a" * 40},
+                "without review history must not record a requested head",
+            ),
+            (
+                {**empty, "active_round": closed_round},
+                "without review history cannot retain round or handoff",
+            ),
+            (
+                {**historical, "current_head_oid": None},
+                "with review history must identify its current head",
+            ),
+            (
+                {
+                    **historical,
+                    "active_round": _active_round(RoundStatus.REVIEWING),
+                },
+                "must record a closed active round",
+            ),
+        )
+        for arguments, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(runs.RunStateError, message):
+                    runs._validate_active_state_shape(**arguments)
 
 
 if __name__ == "__main__":

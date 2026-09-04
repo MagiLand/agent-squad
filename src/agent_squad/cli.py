@@ -16,12 +16,19 @@ from .artifacts import (
 )
 from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
-from .review_applications import apply_review, complete_run, supersede_review
+from .review_applications import (
+    apply_review,
+    complete_run,
+    escalate_run,
+    resume_run,
+    supersede_review,
+)
 from .review_submissions import submit_review_result
 from .runs import (
     IncompleteReviewOutput,
     InvalidUnappliedReviewResult,
     RETRY_HANDOFF_NEXT_ACTION,
+    RESUME_NEXT_ACTION,
     RunPhase,
     UnavailableReviewEvidence,
     inspect_status,
@@ -213,6 +220,62 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retry_handoff_parser.set_defaults(handler=_run_retry_handoff)
 
+    escalate_parser = commands.add_parser(
+        "escalate",
+        help="request a durable Developer decision",
+        description=(
+            "Move an implementing, reviewing, or approved run to "
+            "needs_human and preserve the decision request."
+        ),
+    )
+    escalate_parser.add_argument(
+        "--note",
+        type=Path,
+        metavar="PATH",
+        help="optional UTF-8 Markdown describing the decision needed",
+    )
+    escalate_parser.add_argument(
+        "--response",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "optional versioned response to the latest applied "
+            "changes-requested review"
+        ),
+    )
+    escalate_parser.set_defaults(handler=_run_escalate)
+
+    resume_parser = commands.add_parser(
+        "resume",
+        help="record a Developer resolution and resume implementation",
+        description=(
+            "Resolve the active escalation with durable UTF-8 Markdown, "
+            "optionally granting additional review rounds."
+        ),
+    )
+    resume_parser.add_argument(
+        "--resolution",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Developer-authored UTF-8 Markdown resolution",
+    )
+    resume_parser.add_argument(
+        "--applies-to-finding",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="finding resolved by the decision; may be repeated",
+    )
+    resume_parser.add_argument(
+        "--extend-rounds",
+        type=_positive_integer,
+        default=0,
+        metavar="COUNT",
+        help="positive number of additional review rounds to grant",
+    )
+    resume_parser.set_defaults(handler=_run_resume)
+
     complete_parser = commands.add_parser(
         "complete",
         help="complete the exact approved revision",
@@ -309,6 +372,16 @@ def _run_status(_arguments: argparse.Namespace) -> int:
     print(f"Current requested head: {run.current_head_oid or 'none'}")
     print(f"Approved head: {run.approved_head_oid or 'none'}")
     print(f"Active escalation: {run.active_escalation_id or 'none'}")
+    if run.resolutions:
+        print(f"Developer resolutions: {len(run.resolutions)}")
+        for index, authority in enumerate(run.resolutions, start=1):
+            resolution = authority.record
+            print(f"Resolution {index}: {resolution.resolution_id}")
+            print(
+                "  Resolves escalation: "
+                f"{resolution.resolves_escalation_id}"
+            )
+            print(f"  Created at: {resolution.created_at}")
     handoff = run.handoff
     if handoff is None:
         print("Request handoff: none")
@@ -548,6 +621,57 @@ def _run_retry_handoff(_arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _run_escalate(arguments: argparse.Namespace) -> int:
+    result = escalate_run(
+        _invocation_directory(),
+        note_path=arguments.note,
+        response_path=arguments.response,
+    )
+    print(f"Escalated Agent Squad run {result.run_id}")
+    print(f"Escalation ID: {result.escalation_id}")
+    print(f"Previous phase: {result.previous_phase.value}")
+    print(f"Revision: {result.head_oid}")
+    print(f"Escalation artifact: {result.escalation_path}")
+    print(f"Decision note: {result.note_path}")
+    if result.response_path is not None:
+        print(f"Archived response: {result.response_path}")
+    if result.previous_phase is RunPhase.REVIEWING:
+        if result.reviewer_notice_sent:
+            print("Reviewer pause notice: sent")
+        else:
+            print("Reviewer pause notice: not sent")
+            print(
+                "agent-squad: warning: Reviewer pause notice failed: "
+                f"{result.reviewer_notice_error}",
+                file=sys.stderr,
+            )
+    for warning in result.cleanup_warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
+    print(f"Next action: {RESUME_NEXT_ACTION}")
+    return 0
+
+
+def _run_resume(arguments: argparse.Namespace) -> int:
+    result = resume_run(
+        _invocation_directory(),
+        resolution_path=arguments.resolution,
+        applies_to_finding_ids=tuple(arguments.applies_to_finding),
+        additional_rounds=arguments.extend_rounds,
+    )
+    print(f"Resumed Agent Squad run {result.run_id}")
+    print(f"Resolution ID: {result.resolution_id}")
+    print(f"Resolved escalation: {result.escalation_id}")
+    print(f"Resolution artifact: {result.resolution_path}")
+    print(f"Resolution Markdown: {result.companion_path}")
+    print(
+        "Additional review rounds granted: "
+        f"{result.additional_rounds_granted}"
+    )
+    print(f"Effective review limit: {result.effective_review_limit}")
+    print("Next action: continue implementing the captured task")
+    return 0
+
+
 def _report_handoff_failure(
     *,
     preservation_notice: str,
@@ -586,6 +710,18 @@ def _invocation_directory() -> Path:
             "cannot determine the current directory; it may have been "
             f"removed or become unreadable: {error}"
         ) from error
+
+
+def _positive_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be a positive integer"
+        ) from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -19,15 +20,25 @@ from .artifacts import (
     ApprovalRecord,
     ArtifactValidationError,
     BundleArtifact,
+    DeveloperResolution,
+    ESCALATIONS_DIRECTORY_NAME,
+    EscalationReason,
+    EscalationRecord,
     REVIEW_MARKDOWN_FILE_NAME,
     REVIEW_MARKER_FILE_NAME,
     ReviewResult,
+    ReviewResponse,
     ReviewRoundRecord,
     ReviewerLocalMarker,
     ReviewSupersession,
     ReviewVerdict,
     REVIEW_RESULT_FILE_NAME,
+    RESOLUTIONS_DIRECTORY_NAME,
+    ResponseDisposition,
+    ROUND_RESPONSE_FILE_NAME,
     RoundStatus,
+    SubmissionMode,
+    validate_review_response,
 )
 from .handoffs import (
     HandoffRecoveryError,
@@ -81,6 +92,10 @@ _PROVISIONAL_APPLY_ARTIFACT_NAMES = (
     REVIEW_MARKER_FILE_NAME,
     APPROVAL_FILE_NAME,
 )
+_DEFAULT_ESCALATION_NOTE = (
+    b"# Developer decision needed\n\n"
+    b"The Implementer requested Developer authority.\n"
+)
 
 
 class ReviewApplicationError(AgentSquadError):
@@ -133,11 +148,59 @@ class SupersedeReviewResult:
 
 
 @dataclass(frozen=True)
+class EscalateRunResult:
+    """Durable outcome of requesting a Developer decision."""
+
+    run_id: str
+    escalation_id: str
+    previous_phase: runs.RunPhase
+    round_number: int
+    head_oid: str
+    escalation_path: Path
+    note_path: Path
+    response_path: Path | None
+    reviewer_notice_sent: bool
+    reviewer_notice_error: str | None
+    cleanup_warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResumeRunResult:
+    """Durable outcome of recording a Developer resolution and resuming."""
+
+    run_id: str
+    resolution_id: str
+    escalation_id: str
+    resolution_path: Path
+    companion_path: Path
+    additional_rounds_granted: int
+    effective_review_limit: int
+
+
+@dataclass(frozen=True)
+class _CapturedMarkdown:
+    """Validated Markdown staged for an authoritative artifact."""
+
+    content: bytes
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _CapturedEscalationResponse:
+    """Validated response staged with a direct escalation."""
+
+    response: ReviewResponse
+    content: bytes
+    authority_path: Path
+    original: bytes | None
+
+
+@dataclass(frozen=True)
 class _StagedRecord:
     """One metadata record participating in an authoritative transition."""
 
     path: Path
-    original: bytes
+    original: bytes | None
     staged: bytes
 
 
@@ -229,6 +292,665 @@ def supersede_review(
             f"could not acquire or use the local supersede lock "
             f"{lock_path}: {error}"
         ) from error
+
+
+def escalate_run(
+    start: Path,
+    *,
+    note_path: Path | None = None,
+    response_path: Path | None = None,
+    herdr_client: HerdrClient | None = None,
+) -> EscalateRunResult:
+    """Persist a direct request for Developer authority."""
+
+    repository = load_initialized_repository(start)
+    lock_path = repository.control_root / runs.LOCK_FILE_NAME
+    try:
+        with exclusive_file_lock(lock_path):
+            return _escalate_run_locked(
+                repository,
+                note_path=note_path,
+                response_path=response_path,
+                herdr_client=herdr_client,
+            )
+    except AgentSquadError:
+        raise
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"could not acquire or use the local escalation lock "
+            f"{lock_path}: {error}"
+        ) from error
+
+
+def resume_run(
+    start: Path,
+    *,
+    resolution_path: Path,
+    applies_to_finding_ids: tuple[str, ...] = (),
+    additional_rounds: int = 0,
+) -> ResumeRunResult:
+    """Record a Developer decision and return a run to implementation."""
+
+    if type(additional_rounds) is not int or additional_rounds < 0:
+        raise ReviewApplicationError(
+            "additional review rounds must be a non-negative integer"
+        )
+    repository = load_initialized_repository(start)
+    lock_path = repository.control_root / runs.LOCK_FILE_NAME
+    try:
+        with exclusive_file_lock(lock_path):
+            return _resume_run_locked(
+                repository,
+                resolution_path=resolution_path,
+                applies_to_finding_ids=applies_to_finding_ids,
+                additional_rounds=additional_rounds,
+            )
+    except AgentSquadError:
+        raise
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"could not acquire or use the local resume lock "
+            f"{lock_path}: {error}"
+        ) from error
+
+
+def _escalate_run_locked(
+    repository: InitializedRepository,
+    *,
+    note_path: Path | None,
+    response_path: Path | None,
+    herdr_client: HerdrClient | None,
+) -> EscalateRunResult:
+    status = runs.inspect_status_locked(
+        repository.worktree.invocation_directory,
+        validate_live_review_bundle=False,
+    )
+    active = status.active_run
+    if active is None:
+        raise ReviewApplicationError("there is no active run to escalate")
+    if active.phase is runs.RunPhase.NEEDS_HUMAN:
+        return _replay_direct_escalation(
+            repository,
+            active=active,
+            note_path=note_path,
+            response_path=response_path,
+        )
+    if active.phase not in {
+        runs.RunPhase.IMPLEMENTING,
+        runs.RunPhase.REVIEWING,
+        runs.RunPhase.APPROVED,
+    }:
+        raise ReviewApplicationError(
+            f"run {active.run_id} is in phase {active.phase.value}; "
+            "escalate is allowed only while implementing, reviewing, or "
+            "approved"
+        )
+    _validate_implementation_identity(repository, active)
+    head_oid = _current_head(
+        repository.worktree.root,
+        active.git_object_format,
+        label="implementation",
+    )
+    note = _capture_markdown(
+        note_path,
+        invocation_directory=repository.worktree.invocation_directory,
+        label="escalation note",
+        default=_DEFAULT_ESCALATION_NOTE,
+    )
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    response = _capture_escalation_response(
+        repository,
+        active=active,
+        run_directory=run_directory,
+        response_path=response_path,
+    )
+    escalation_number = len(active.escalations) + 1
+    timestamp = _next_history_timestamp(
+        (
+            *(item.record.created_at for item in active.escalations),
+            *(item.record.created_at for item in active.resolutions),
+        )
+    )
+    escalation_id = str(uuid.uuid4())
+    stem = f"{escalation_number:03d}-escalation"
+    escalation_directory = run_directory / ESCALATIONS_DIRECTORY_NAME
+    escalation_path = escalation_directory / f"{stem}.json"
+    companion_path = escalation_directory / f"{stem}.md"
+    _require_new_artifact_path(escalation_path, "escalation artifact")
+    _require_new_artifact_path(companion_path, "escalation note")
+
+    source_request_id: str | None = None
+    source_result_id: str | None = None
+    active_round = active.active_round
+    if active_round is not None:
+        source_request_id = active_round.request_id
+        source_result_id = active_round.result_id
+    if response is not None:
+        previous = runs.find_latest_applied_review_before(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round + 1,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+        )
+        if previous is None:
+            raise ReviewApplicationError(
+                "an escalation response has no applied review authority"
+            )
+        source_request_id = previous.review.request_id
+        source_result_id = previous.review.result_id
+    related_finding_ids = (
+        tuple(
+            item.finding_id
+            for item in response.response.responses
+            if item.disposition is ResponseDisposition.NEEDS_HUMAN
+        )
+        if response is not None
+        else ()
+    )
+    escalation = EscalationRecord(
+        created_at=timestamp,
+        escalation_id=escalation_id,
+        run_id=active.run_id,
+        round_number=active.current_round,
+        head_oid=head_oid,
+        related_finding_ids=related_finding_ids,
+        source_request_id=source_request_id,
+        source_result_id=source_result_id,
+        previous_approved_head_oid=active.approved_head_oid,
+        previous_phase=active.phase.value,
+        actor=active.implementer_agent,
+        note_path=companion_path.name,
+        note_sha256=note.sha256,
+        response_id=(
+            response.response.response_id if response is not None else None
+        ),
+        reason=EscalationReason.IMPLEMENTER_REQUESTED,
+    )
+    try:
+        escalation = EscalationRecord.from_dict(
+            escalation.to_dict(),
+            object_format=active.git_object_format,
+            label="Developer escalation",
+        )
+    except ArtifactValidationError as error:
+        raise ReviewApplicationError(
+            f"cannot build Developer escalation: {error}"
+        ) from error
+
+    state_path = repository.control_root / runs.STATE_FILE_NAME
+    run_path = run_directory / runs.RUN_RECORD_FILE_NAME
+    event_path = run_directory / runs.EVENT_LOG_FILE_NAME
+    state = runs.load_json_object(state_path, "authoritative state")
+    run_record = runs.load_json_object(run_path, "active run record")
+    next_run = copy.deepcopy(run_record)
+    next_run["phase"] = runs.RunPhase.NEEDS_HUMAN.value
+    next_state = copy.deepcopy(state)
+    next_state.update(
+        updated_at=timestamp,
+        phase=runs.RunPhase.NEEDS_HUMAN.value,
+        approved_head_oid=None,
+        active_escalation_id=escalation_id,
+    )
+    records: list[_StagedRecord] = [
+        _StagedRecord(
+            path=companion_path,
+            original=None,
+            staged=note.content,
+        ),
+        _StagedRecord(
+            path=escalation_path,
+            original=None,
+            staged=encode_json(escalation.to_dict()),
+        ),
+    ]
+    next_round: ReviewRoundRecord | None = None
+    round_directory: Path | None = None
+    if active.phase is runs.RunPhase.REVIEWING:
+        if active_round is None:
+            raise ReviewApplicationError(
+                "reviewing state lost its active round during escalation"
+            )
+        records_for_review = _load_active_review_records(repository, active)
+        supersession = ReviewSupersession(
+            created_at=timestamp,
+            actor=active.implementer_agent,
+            cause=f"escalation:{escalation_id}",
+        )
+        next_round = replace(
+            records_for_review.round_record,
+            updated_at=timestamp,
+            status=RoundStatus.SUPERSEDED,
+            supersession=supersession,
+        )
+        next_active_round = replace(
+            active_round,
+            status=RoundStatus.SUPERSEDED,
+        )
+        next_state["active_round"] = next_active_round.to_dict()
+        records.append(
+            _StagedRecord(
+                path=records_for_review.round_path,
+                original=records_for_review.original_round,
+                staged=encode_json(next_round.to_dict()),
+            )
+        )
+        round_directory = records_for_review.round_directory
+    if response is not None:
+        records.append(
+            _StagedRecord(
+                path=response.authority_path,
+                original=response.original,
+                staged=response.content,
+            )
+        )
+    records.append(
+        _StagedRecord(
+            path=run_path,
+            original=run_path.read_bytes(),
+            staged=encode_json(next_run),
+        )
+    )
+    event = {
+        "timestamp": timestamp,
+        "event": "run_escalated",
+        "run_id": active.run_id,
+        "escalation_id": escalation_id,
+        "round": active.current_round,
+        "head_oid": head_oid,
+        "previous_phase": active.phase.value,
+        "actor": active.implementer_agent,
+        "reason": EscalationReason.IMPLEMENTER_REQUESTED.value,
+    }
+    original_events, staged_events = _stage_event_log(
+        event_path,
+        event,
+        identity_fields=("event", "run_id", "escalation_id"),
+    )
+    records.append(
+        _StagedRecord(
+            path=event_path,
+            original=original_events,
+            staged=staged_events,
+        )
+    )
+    directory_created = _ensure_history_directory(
+        escalation_directory,
+        "Developer escalation history",
+    )
+    try:
+        _validate_implementation_identity(repository, active)
+        if _current_head(
+            repository.worktree.root,
+            active.git_object_format,
+            label="implementation",
+        ) != head_oid:
+            raise ReviewApplicationError(
+                "implementation HEAD changed while escalation artifacts "
+                "were being prepared; no escalation was recorded"
+            )
+        _persist_authoritative_transition(
+            records=tuple(records),
+            state_path=state_path,
+            original_state=state_path.read_bytes(),
+            next_state=encode_json(next_state),
+            failure_message="could not persist Developer escalation",
+        )
+    except BaseException:
+        if directory_created:
+            _remove_empty_directory(escalation_directory)
+        raise
+
+    reviewer_notice_sent = False
+    reviewer_notice_error: str | None = None
+    cleanup_warnings: tuple[str, ...] = ()
+    if (
+        active.phase is runs.RunPhase.REVIEWING
+        and active_round is not None
+        and next_round is not None
+        and round_directory is not None
+    ):
+        client = herdr_client or HerdrClient(repository.worktree.root)
+        try:
+            client.discover(active.reviewer_kind, role="Reviewer")
+            reviewer_notice_sent = client.dispatch_reviewer_notice(
+                reviewer_name=active_round.reviewer_name,
+                reviewer_kind=active.reviewer_kind,
+                review_worktree=active_round.review_worktree,
+                prompt=_review_escalated_prompt(
+                    run_id=active.run_id,
+                    round_number=active.current_round,
+                    escalation_id=escalation_id,
+                ),
+            )
+            if not reviewer_notice_sent:
+                reviewer_notice_error = (
+                    f"Reviewer {active_round.reviewer_name!r} is not available"
+                )
+        except HerdrError as error:
+            reviewer_notice_error = format_herdr_error(str(error))
+        _, cleanup_warnings = _cleanup_superseded_review_resources(
+            repository,
+            active=active,
+            round_directory=round_directory,
+            round_record=next_round,
+        )
+    return EscalateRunResult(
+        run_id=active.run_id,
+        escalation_id=escalation_id,
+        previous_phase=active.phase,
+        round_number=active.current_round,
+        head_oid=head_oid,
+        escalation_path=escalation_path,
+        note_path=companion_path,
+        response_path=(
+            response.authority_path if response is not None else None
+        ),
+        reviewer_notice_sent=reviewer_notice_sent,
+        reviewer_notice_error=reviewer_notice_error,
+        cleanup_warnings=cleanup_warnings,
+    )
+
+
+def _replay_direct_escalation(
+    repository: InitializedRepository,
+    *,
+    active: runs.ActiveRunStatus,
+    note_path: Path | None,
+    response_path: Path | None,
+) -> EscalateRunResult:
+    """Replay an identical committed direct escalation without mutation."""
+
+    escalation_id = active.active_escalation_id
+    if escalation_id is None:
+        raise ReviewApplicationError(
+            "needs_human state lost its active escalation"
+        )
+    authority = next(
+        (
+            item
+            for item in active.escalations
+            if item.record.escalation_id == escalation_id
+        ),
+        None,
+    )
+    if authority is None or (
+        authority.record.reason
+        is not EscalationReason.IMPLEMENTER_REQUESTED
+    ):
+        raise ReviewApplicationError(
+            f"run {active.run_id} is already in needs_human; resolve its "
+            "active escalation before requesting another"
+        )
+    note = _capture_markdown(
+        note_path,
+        invocation_directory=repository.worktree.invocation_directory,
+        label="escalation note",
+        default=_DEFAULT_ESCALATION_NOTE,
+    )
+    if note.content != authority.note_bytes:
+        raise ReviewApplicationError(
+            "the active escalation is already authoritative and its note "
+            "differs from this retry"
+        )
+
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    canonical_response: Path | None = None
+    if authority.record.response_id is None:
+        if response_path is not None:
+            raise ReviewApplicationError(
+                "the active escalation is already authoritative without a "
+                "response; escalate cannot add one"
+            )
+    else:
+        if response_path is None:
+            raise ReviewApplicationError(
+                "an identical retry of this active escalation requires its "
+                "original --response"
+            )
+        canonical_response = (
+            run_directory
+            / "rounds"
+            / f"{authority.record.round_number:03d}"
+            / ROUND_RESPONSE_FILE_NAME
+        )
+        candidate = _read_input_bytes(
+            response_path,
+            invocation_directory=repository.worktree.invocation_directory,
+            label="implementation response",
+        )
+        canonical = _read_authoritative_bytes(
+            canonical_response,
+            label="authoritative implementation response",
+        )
+        if candidate != canonical:
+            raise ReviewApplicationError(
+                "the active escalation already references a different "
+                "response; escalate cannot overwrite it"
+            )
+        try:
+            response = ReviewResponse.from_dict(
+                decode_json(canonical.decode("utf-8")),
+                object_format=active.git_object_format,
+            )
+        except (
+            UnicodeDecodeError,
+            InvalidJsonError,
+            ArtifactValidationError,
+        ) as error:
+            raise ReviewApplicationError(
+                f"authoritative implementation response is invalid: {error}"
+            ) from error
+        if response.response_id != authority.record.response_id:
+            raise ReviewApplicationError(
+                "authoritative implementation response ID does not match "
+                "the active escalation"
+            )
+        if (
+            response.run_id != active.run_id
+            or response.review_result_id
+            != authority.record.source_result_id
+        ):
+            raise ReviewApplicationError(
+                "authoritative implementation response source does not "
+                "match the active escalation"
+            )
+    return EscalateRunResult(
+        run_id=active.run_id,
+        escalation_id=authority.record.escalation_id,
+        previous_phase=runs.RunPhase(authority.record.previous_phase),
+        round_number=authority.record.round_number,
+        head_oid=authority.record.head_oid,
+        escalation_path=authority.path,
+        note_path=authority.note_path,
+        response_path=canonical_response,
+        reviewer_notice_sent=False,
+        reviewer_notice_error=None,
+        cleanup_warnings=(),
+    )
+
+
+def _resume_run_locked(
+    repository: InitializedRepository,
+    *,
+    resolution_path: Path,
+    applies_to_finding_ids: tuple[str, ...],
+    additional_rounds: int,
+) -> ResumeRunResult:
+    status = runs.inspect_status_locked(
+        repository.worktree.invocation_directory,
+        validate_live_review_bundle=False,
+    )
+    active = status.active_run
+    if active is None:
+        raise ReviewApplicationError("there is no active run to resume")
+    if active.phase is not runs.RunPhase.NEEDS_HUMAN:
+        raise ReviewApplicationError(
+            f"run {active.run_id} is in phase {active.phase.value}; "
+            "resume requires a needs_human run"
+        )
+    escalation_id = active.active_escalation_id
+    if escalation_id is None:
+        raise ReviewApplicationError(
+            "needs_human state lost its active escalation"
+        )
+    escalation_authority = next(
+        (
+            item
+            for item in active.escalations
+            if item.record.escalation_id == escalation_id
+        ),
+        None,
+    )
+    if escalation_authority is None:
+        raise ReviewApplicationError(
+            "active escalation does not belong to the current run"
+        )
+    finding_ids = _validated_finding_ids(applies_to_finding_ids)
+    unknown_ids = sorted(
+        set(finding_ids)
+        - set(escalation_authority.record.related_finding_ids)
+    )
+    if unknown_ids:
+        raise ReviewApplicationError(
+            "Developer resolution references finding IDs outside the active "
+            f"escalation: {', '.join(unknown_ids)}"
+        )
+    resolution = _capture_markdown(
+        resolution_path,
+        invocation_directory=repository.worktree.invocation_directory,
+        label="Developer resolution",
+    )
+    _validate_implementation_identity(repository, active)
+    run_directory = runs.safe_run_directory(
+        repository.control_root,
+        active.run_id,
+    )
+    resolution_number = len(active.resolutions) + 1
+    timestamp = _next_history_timestamp(
+        (
+            escalation_authority.record.created_at,
+            *(item.record.created_at for item in active.resolutions),
+        )
+    )
+    resolution_id = str(uuid.uuid4())
+    stem = f"{resolution_number:03d}-resolution"
+    resolution_directory = run_directory / RESOLUTIONS_DIRECTORY_NAME
+    record_path = resolution_directory / f"{stem}.json"
+    companion_path = resolution_directory / f"{stem}.md"
+    _require_new_artifact_path(record_path, "Developer resolution artifact")
+    _require_new_artifact_path(companion_path, "Developer resolution")
+    record = DeveloperResolution(
+        created_at=timestamp,
+        resolution_id=resolution_id,
+        run_id=active.run_id,
+        resolves_escalation_id=escalation_id,
+        applies_to_finding_ids=finding_ids,
+        resolution_path=companion_path.name,
+        resolution_sha256=resolution.sha256,
+        additional_rounds_granted=additional_rounds,
+    )
+    try:
+        record = DeveloperResolution.from_dict(
+            record.to_dict(),
+            label="Developer resolution",
+        )
+    except ArtifactValidationError as error:
+        raise ReviewApplicationError(
+            f"cannot build Developer resolution: {error}"
+        ) from error
+
+    next_budget = replace(
+        active.review_budget,
+        additional_rounds_granted=(
+            active.review_budget.additional_rounds_granted
+            + additional_rounds
+        ),
+        effective_limit=(
+            active.review_budget.effective_limit + additional_rounds
+        ),
+    )
+    state_path = repository.control_root / runs.STATE_FILE_NAME
+    run_path = run_directory / runs.RUN_RECORD_FILE_NAME
+    event_path = run_directory / runs.EVENT_LOG_FILE_NAME
+    state = runs.load_json_object(state_path, "authoritative state")
+    run_record = runs.load_json_object(run_path, "active run record")
+    next_run = copy.deepcopy(run_record)
+    next_run["phase"] = runs.RunPhase.IMPLEMENTING.value
+    next_state = copy.deepcopy(state)
+    next_state.update(
+        updated_at=timestamp,
+        phase=runs.RunPhase.IMPLEMENTING.value,
+        active_escalation_id=None,
+        review_budget=next_budget.to_dict(),
+    )
+    event = {
+        "timestamp": timestamp,
+        "event": "run_resumed",
+        "run_id": active.run_id,
+        "escalation_id": escalation_id,
+        "resolution_id": resolution_id,
+        "additional_rounds_granted": additional_rounds,
+        "effective_review_limit": next_budget.effective_limit,
+    }
+    original_events, staged_events = _stage_event_log(
+        event_path,
+        event,
+        identity_fields=("event", "run_id", "resolution_id"),
+    )
+    directory_created = _ensure_history_directory(
+        resolution_directory,
+        "Developer resolution history",
+    )
+    try:
+        _validate_implementation_identity(repository, active)
+        _persist_authoritative_transition(
+            records=(
+                _StagedRecord(
+                    path=companion_path,
+                    original=None,
+                    staged=resolution.content,
+                ),
+                _StagedRecord(
+                    path=record_path,
+                    original=None,
+                    staged=encode_json(record.to_dict()),
+                ),
+                _StagedRecord(
+                    path=run_path,
+                    original=run_path.read_bytes(),
+                    staged=encode_json(next_run),
+                ),
+                _StagedRecord(
+                    path=event_path,
+                    original=original_events,
+                    staged=staged_events,
+                ),
+            ),
+            state_path=state_path,
+            original_state=state_path.read_bytes(),
+            next_state=encode_json(next_state),
+            failure_message="could not persist Developer resolution",
+        )
+    except BaseException:
+        if directory_created:
+            _remove_empty_directory(resolution_directory)
+        raise
+    return ResumeRunResult(
+        run_id=active.run_id,
+        resolution_id=resolution_id,
+        escalation_id=escalation_id,
+        resolution_path=record_path,
+        companion_path=companion_path,
+        additional_rounds_granted=additional_rounds,
+        effective_review_limit=next_budget.effective_limit,
+    )
 
 
 def _supersede_review_locked(
@@ -526,14 +1248,6 @@ def _apply_review_locked(
             evidence=evidence,
             observed_head_oid=current_head,
         )
-    if evidence.review.verdict not in {
-        ReviewVerdict.APPROVED,
-        ReviewVerdict.CHANGES_REQUESTED,
-    }:
-        raise ReviewApplicationError(
-            f"valid verdict {evidence.review.verdict.value} is not supported "
-            "by this command version; no state was changed"
-        )
     if (
         evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED
         and active.review_budget.completed_change_reviews + 1
@@ -560,7 +1274,17 @@ def _apply_review_locked(
         raise ReviewApplicationError(str(error)) from error
     _assert_round_is_active(round_record, active)
 
-    timestamp = utc_timestamp()
+    timestamp = (
+        _next_history_timestamp(
+            (
+                evidence.request.created_at,
+                *(item.record.created_at for item in active.escalations),
+                *(item.record.created_at for item in active.resolutions),
+            )
+        )
+        if evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN
+        else utc_timestamp()
+    )
     bundle_manifest = _archive_bundle(round_directory, evidence)
     result_artifact = _write_immutable_artifact(
         round_directory / REVIEW_RESULT_FILE_NAME,
@@ -631,6 +1355,10 @@ def _apply_review_locked(
         next_phase = runs.RunPhase.IMPLEMENTING
         next_action = runs.CORRECTION_SUBMIT_NEXT_ACTION
         approved_head_oid = None
+    elif evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
+        next_phase = runs.RunPhase.NEEDS_HUMAN
+        next_action = runs.RESUME_NEXT_ACTION
+        approved_head_oid = None
 
     next_round = replace(
         round_record,
@@ -656,59 +1384,160 @@ def _apply_review_locked(
         updated_at=timestamp,
         phase=next_phase.value,
         approved_head_oid=approved_head_oid,
+        active_escalation_id=None,
         active_round=next_active_round.to_dict(),
         review_budget=next_budget.to_dict(),
     )
-    _validate_implementation_identity(repository, active)
-    if _current_head(
-        repository.worktree.root,
-        active.git_object_format,
-        label="implementation",
-    ) != current_head:
-        raise ReviewApplicationError(
-            "implementation HEAD changed while review artifacts were being "
-            "prepared; no result was applied"
-        )
-    _persist_authoritative_transition(
-        records=(
-            _StagedRecord(
-                path=round_path,
-                original=round_path.read_bytes(),
-                staged=encode_json(next_round.to_dict()),
-            ),
-            _StagedRecord(
-                path=run_path,
-                original=run_path.read_bytes(),
-                staged=encode_json(next_run),
-            ),
+    transition_records: list[_StagedRecord] = [
+        _StagedRecord(
+            path=round_path,
+            original=round_path.read_bytes(),
+            staged=encode_json(next_round.to_dict()),
         ),
-        state_path=state_path,
-        original_state=original_state,
-        next_state=encode_json(next_state),
-        failure_message="could not persist applied review state",
-    )
-    try:
-        _ensure_event(
-            run_directory / runs.EVENT_LOG_FILE_NAME,
-            _review_applied_event(
-                timestamp=next_round.updated_at,
-                run_id=active.run_id,
-                round_number=active.current_round,
-                request_id=evidence.request.request_id,
-                result_id=evidence.review.result_id,
-                verdict=evidence.review.verdict,
-                head_oid=evidence.review.head_oid,
+        _StagedRecord(
+            path=run_path,
+            original=run_path.read_bytes(),
+            staged=encode_json(next_run),
+        ),
+    ]
+    escalation_directory: Path | None = None
+    escalation_directory_created = False
+    if evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
+        escalation_number = len(active.escalations) + 1
+        escalation_id = str(uuid.uuid4())
+        stem = f"{escalation_number:03d}-escalation"
+        escalation_directory = run_directory / ESCALATIONS_DIRECTORY_NAME
+        escalation_path = escalation_directory / f"{stem}.json"
+        escalation_note_path = escalation_directory / f"{stem}.md"
+        _require_new_artifact_path(
+            escalation_path,
+            "automatic escalation artifact",
+        )
+        _require_new_artifact_path(
+            escalation_note_path,
+            "automatic escalation note",
+        )
+        escalation_note = (
+            "# Developer decision needed\n\n"
+            f"{evidence.review.summary.strip()}\n"
+        ).encode("utf-8")
+        escalation = EscalationRecord(
+            created_at=timestamp,
+            escalation_id=escalation_id,
+            run_id=active.run_id,
+            round_number=active.current_round,
+            head_oid=evidence.review.head_oid,
+            related_finding_ids=tuple(
+                finding.finding_id for finding in evidence.review.findings
             ),
+            source_request_id=evidence.request.request_id,
+            source_result_id=evidence.review.result_id,
+            previous_approved_head_oid=None,
+            previous_phase=runs.RunPhase.REVIEWING.value,
+            actor=evidence.request.reviewer_name,
+            note_path=escalation_note_path.name,
+            note_sha256=hashlib.sha256(escalation_note).hexdigest(),
+            response_id=None,
+            reason=EscalationReason.REVIEWER_NEEDS_HUMAN,
+        )
+        try:
+            escalation = EscalationRecord.from_dict(
+                escalation.to_dict(),
+                object_format=active.git_object_format,
+                label="automatic Developer escalation",
+            )
+        except ArtifactValidationError as error:
+            raise ReviewApplicationError(
+                f"cannot build automatic Developer escalation: {error}"
+            ) from error
+        next_state["active_escalation_id"] = escalation_id
+        transition_records[0:0] = [
+            _StagedRecord(
+                path=escalation_note_path,
+                original=None,
+                staged=escalation_note,
+            ),
+            _StagedRecord(
+                path=escalation_path,
+                original=None,
+                staged=encode_json(escalation.to_dict()),
+            ),
+        ]
+        review_event = _review_applied_event(
+            timestamp=next_round.updated_at,
+            run_id=active.run_id,
+            round_number=active.current_round,
+            request_id=evidence.request.request_id,
+            result_id=evidence.review.result_id,
+            verdict=evidence.review.verdict,
+            head_oid=evidence.review.head_oid,
+        )
+        review_event["escalation_id"] = escalation_id
+        event_path = run_directory / runs.EVENT_LOG_FILE_NAME
+        original_events, staged_events = _stage_event_log(
+            event_path,
+            review_event,
             identity_fields=("event", "run_id", "round", "result_id"),
         )
-    except OSError as error:
-        raise ReviewApplicationError(
-            "the applied result is authoritative, but its event could not "
-            f"be recorded: {error}"
-        ) from error
+        transition_records.append(
+            _StagedRecord(
+                path=event_path,
+                original=original_events,
+                staged=staged_events,
+            )
+        )
+        escalation_directory_created = _ensure_history_directory(
+            escalation_directory,
+            "Developer escalation history",
+        )
+    try:
+        _validate_implementation_identity(repository, active)
+        if _current_head(
+            repository.worktree.root,
+            active.git_object_format,
+            label="implementation",
+        ) != current_head:
+            raise ReviewApplicationError(
+                "implementation HEAD changed while review artifacts were "
+                "prepared; no result was applied"
+            )
+        _persist_authoritative_transition(
+            records=tuple(transition_records),
+            state_path=state_path,
+            original_state=original_state,
+            next_state=encode_json(next_state),
+            failure_message="could not persist applied review state",
+        )
+    except BaseException:
+        if escalation_directory_created and escalation_directory is not None:
+            _remove_empty_directory(escalation_directory)
+        raise
+    if evidence.review.verdict is not ReviewVerdict.NEEDS_HUMAN:
+        try:
+            _ensure_event(
+                run_directory / runs.EVENT_LOG_FILE_NAME,
+                _review_applied_event(
+                    timestamp=next_round.updated_at,
+                    run_id=active.run_id,
+                    round_number=active.current_round,
+                    request_id=evidence.request.request_id,
+                    result_id=evidence.review.result_id,
+                    verdict=evidence.review.verdict,
+                    head_oid=evidence.review.head_oid,
+                ),
+                identity_fields=("event", "run_id", "round", "result_id"),
+            )
+        except OSError as error:
+            raise ReviewApplicationError(
+                "the applied result is authoritative, but its event could "
+                f"not be recorded: {error}"
+            ) from error
 
     cleanup_warnings: tuple[str, ...] = ()
-    if evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED:
+    if evidence.review.verdict in {
+        ReviewVerdict.CHANGES_REQUESTED,
+        ReviewVerdict.NEEDS_HUMAN,
+    }:
         cleanup_warnings = _cleanup_review_resources(repository, active)
     return ApplyReviewResult(
         run_id=active.run_id,
@@ -1498,6 +2327,55 @@ def _validate_evidence(
             raise ReviewApplicationError(
                 f"review evidence {label} does not match authoritative state"
             )
+    _validate_resolution_bundle_inputs(active, evidence)
+
+
+def _validate_resolution_bundle_inputs(
+    active: runs.ActiveRunStatus,
+    evidence: MarkerConfirmedReview,
+) -> None:
+    """Bind every reviewed resolution file to canonical run history."""
+
+    request = evidence.request
+    bundle_files = {item.path: item.content for item in evidence.bundle_files}
+    resolutions_by_name = {
+        authority.path.name: authority for authority in active.resolutions
+    }
+    request_created_at = datetime.fromisoformat(
+        f"{request.created_at[:-1]}+00:00"
+    )
+    expected_paths = tuple(
+        f"input/resolutions/{authority.path.name}"
+        for authority in active.resolutions
+        if datetime.fromisoformat(
+            f"{authority.record.created_at[:-1]}+00:00"
+        ) < request_created_at
+    )
+    if request.resolution_paths != expected_paths:
+        raise ReviewApplicationError(
+            "review bundle Developer resolutions do not match the "
+            "authoritative run history"
+        )
+    for path_text in request.resolution_paths:
+        record_path = PurePosixPath(path_text)
+        authority = resolutions_by_name.get(record_path.name)
+        record_bytes = bundle_files.get(record_path)
+        if authority is None or record_bytes is None or hashlib.sha256(
+            record_bytes
+        ).digest() != hashlib.sha256(authority.record_bytes).digest():
+            raise ReviewApplicationError(
+                "review bundle Developer resolution record does not match "
+                f"the authoritative run copy: {record_path}"
+            )
+        companion_path = record_path.parent / authority.companion_path.name
+        companion_bytes = bundle_files.get(companion_path)
+        if companion_bytes is None or hashlib.sha256(
+            companion_bytes
+        ).hexdigest() != authority.record.resolution_sha256:
+            raise ReviewApplicationError(
+                "review bundle Developer resolution companion does not "
+                f"match the authoritative run copy: {companion_path}"
+            )
 
 
 def _assert_round_is_active(
@@ -2022,18 +2900,26 @@ def _persist_authoritative_transition(
         for record in reversed(records):
             try:
                 current = record.path.read_bytes()
+            except FileNotFoundError:
+                if record.original is None:
+                    continue
+                rollback_errors.append(f"{record.path}: file disappeared")
+                continue
             except OSError as inspection_error:
                 rollback_errors.append(
                     f"{record.path}: {inspection_error}"
                 )
                 continue
-            if current == record.original:
+            if record.original is not None and current == record.original:
                 continue
             if current != record.staged:
                 rollback_errors.append(f"{record.path}: content changed")
                 continue
             try:
-                atomic_write(record.path, record.original, mode=0o600)
+                if record.original is None:
+                    record.path.unlink()
+                else:
+                    atomic_write(record.path, record.original, mode=0o600)
             except OSError as restore_error:
                 rollback_errors.append(f"{record.path}: {restore_error}")
         detail = (
@@ -2122,6 +3008,246 @@ def _validate_completion_cleanliness(
         )
 
 
+def _capture_markdown(
+    path: Path | None,
+    *,
+    invocation_directory: Path,
+    label: str,
+    default: bytes | None = None,
+) -> _CapturedMarkdown:
+    """Capture one non-empty UTF-8 Markdown input."""
+
+    if path is None:
+        if default is None:
+            raise ReviewApplicationError(f"{label} is required")
+        content = default
+    else:
+        content = _read_input_bytes(
+            path,
+            invocation_directory=invocation_directory,
+            label=label,
+        )
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReviewApplicationError(
+            f"{label} must contain UTF-8 Markdown"
+        ) from error
+    if not text.strip():
+        raise ReviewApplicationError(
+            f"{label} must contain non-whitespace text"
+        )
+    if "\x00" in text:
+        raise ReviewApplicationError(f"{label} must not contain null bytes")
+    return _CapturedMarkdown(
+        content=content,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _read_input_bytes(
+    path: Path,
+    *,
+    invocation_directory: Path,
+    label: str,
+) -> bytes:
+    candidate = path if path.is_absolute() else invocation_directory / path
+    try:
+        resolved = candidate.resolve(strict=True)
+        with resolved.open("rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ReviewApplicationError(
+                    f"{label} must be a regular file: {resolved}"
+                )
+            return source.read()
+    except ReviewApplicationError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise ReviewApplicationError(
+            f"cannot read {label} {candidate}: {error}"
+        ) from error
+
+
+def _read_authoritative_bytes(path: Path, *, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise ReviewApplicationError(
+            f"{label} must be a regular non-symlink file: {path}"
+        )
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot read {label} {path}: {error}"
+        ) from error
+
+
+def _capture_escalation_response(
+    repository: InitializedRepository,
+    *,
+    active: runs.ActiveRunStatus,
+    run_directory: Path,
+    response_path: Path | None,
+) -> _CapturedEscalationResponse | None:
+    """Validate a response without making its canonical copy authoritative."""
+
+    if response_path is None:
+        return None
+    if active.phase is not runs.RunPhase.IMPLEMENTING:
+        raise ReviewApplicationError(
+            "--response is accepted only while implementing after an "
+            "applied changes_requested review"
+        )
+    try:
+        previous = runs.find_latest_applied_review_before(
+            run_directory=run_directory,
+            run_id=active.run_id,
+            current_round=active.current_round + 1,
+            base_oid=active.base_oid,
+            object_format=active.git_object_format,
+        )
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
+    if previous is None or (
+        previous.review.verdict is not ReviewVerdict.CHANGES_REQUESTED
+    ):
+        raise ReviewApplicationError(
+            "--response requires an applied changes_requested review"
+        )
+    content = _read_input_bytes(
+        response_path,
+        invocation_directory=repository.worktree.invocation_directory,
+        label="implementation response",
+    )
+    try:
+        value = decode_json(content.decode("utf-8"))
+        response = ReviewResponse.from_dict(
+            value,
+            object_format=active.git_object_format,
+        )
+        validate_review_response(
+            response,
+            previous.review,
+            SubmissionMode.NEW_REVISION,
+        )
+    except (
+        UnicodeDecodeError,
+        InvalidJsonError,
+        ArtifactValidationError,
+    ) as error:
+        raise ReviewApplicationError(
+            f"implementation response failed validation: {error}"
+        ) from error
+    if response.supersedes_response_id is not None or response.resolution_ids:
+        raise ReviewApplicationError(
+            "an escalation-time response cannot replace an earlier response"
+        )
+    authority_path = previous.round_directory / ROUND_RESPONSE_FILE_NAME
+    original: bytes | None = None
+    already_referenced = any(
+        authority.record.response_id is not None
+        and authority.record.round_number
+        == previous.round_record.round_number
+        for authority in active.escalations
+    )
+    if os.path.lexists(authority_path):
+        if authority_path.is_symlink() or not authority_path.is_file():
+            raise ReviewApplicationError(
+                "existing implementation response must be a regular "
+                f"non-symlink file: {authority_path}"
+            )
+        try:
+            original = authority_path.read_bytes()
+        except OSError as error:
+            raise ReviewApplicationError(
+                f"cannot read existing implementation response "
+                f"{authority_path}: {error}"
+            ) from error
+        if (
+            previous.round_record.round_number < active.current_round
+            or already_referenced
+        ) and original != content:
+            raise ReviewApplicationError(
+                "the applied review already has an authoritative response; "
+                "escalate cannot overwrite it"
+            )
+    elif already_referenced:
+        raise ReviewApplicationError(
+            "the applied review's escalation-referenced response is "
+            "missing; escalate cannot replace it"
+        )
+    return _CapturedEscalationResponse(
+        response=response,
+        content=content,
+        authority_path=authority_path,
+        original=original,
+    )
+
+
+def _validated_finding_ids(values: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(values, tuple):
+        raise ReviewApplicationError(
+            "Developer resolution finding IDs must be a tuple"
+        )
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+            or "\x00" in value
+        ):
+            raise ReviewApplicationError(
+                "Developer resolution finding IDs must be non-empty text "
+                "without surrounding whitespace or null bytes"
+            )
+    if len(values) != len(set(values)):
+        raise ReviewApplicationError(
+            "Developer resolution finding IDs must not contain duplicates"
+        )
+    return values
+
+
+def _next_history_timestamp(previous_values: tuple[str, ...]) -> str:
+    now = datetime.now(timezone.utc)
+    if previous_values:
+        previous = max(
+            datetime.fromisoformat(f"{value[:-1]}+00:00")
+            for value in previous_values
+        )
+        if now <= previous:
+            now = previous + timedelta(microseconds=1)
+    return now.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _ensure_history_directory(path: Path, label: str) -> bool:
+    if path.is_symlink():
+        raise ReviewApplicationError(f"{label} must not be a symlink: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise ReviewApplicationError(
+                f"{label} must be a directory: {path}"
+            )
+        return False
+    try:
+        path.mkdir(mode=0o700)
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"cannot create {label} {path}: {error}"
+        ) from error
+    return True
+
+
+def _require_new_artifact_path(path: Path, label: str) -> None:
+    if os.path.lexists(path):
+        raise ReviewApplicationError(f"{label} already exists: {path}")
+
+
+def _remove_empty_directory(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
 def _supersede_cause(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReviewApplicationError(
@@ -2147,6 +3273,22 @@ def _review_superseded_prompt(
         f"reason: {cause}\n\n"
         "This round is no longer authoritative.\n"
         "Stop work when safe and do not submit it as the current result."
+    )
+
+
+def _review_escalated_prompt(
+    *,
+    run_id: str,
+    round_number: int,
+    escalation_id: str,
+) -> str:
+    return (
+        "AGENT_SQUAD/0.4.4 REVIEW_ESCALATED\n"
+        f"run_id={run_id}\n"
+        f"round={round_number}\n"
+        f"escalation_id={escalation_id}\n"
+        "The review no longer controls the run. Pause work and preserve "
+        "local evidence.\n"
     )
 
 

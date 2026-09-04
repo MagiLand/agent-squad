@@ -71,7 +71,7 @@ class SubmissionHelperTests(unittest.TestCase):
             "find_latest_applied_review_before",
             return_value=authority,
         ) as latest:
-            result = submissions._load_applied_changes_review(
+            result = submissions._load_applied_review(
                 Path("/run"),
                 active,
             )
@@ -188,6 +188,78 @@ class SubmissionHelperTests(unittest.TestCase):
                     submissions._capture_report(fifo, root)
 
             open_file.assert_not_called()
+
+    def test_resolved_needs_human_review_requires_one_linked_resolution(
+        self,
+    ) -> None:
+        result_id = "11111111-1111-4111-8111-111111111111"
+        escalation_id = "22222222-2222-4222-8222-222222222222"
+        previous = SimpleNamespace(
+            review=SimpleNamespace(
+                verdict=submissions.ReviewVerdict.NEEDS_HUMAN,
+                result_id=result_id,
+            )
+        )
+        escalation = SimpleNamespace(
+            record=SimpleNamespace(
+                escalation_id=escalation_id,
+                source_result_id=result_id,
+            )
+        )
+        resolution = SimpleNamespace(
+            record=SimpleNamespace(
+                resolves_escalation_id=escalation_id,
+            )
+        )
+        active = SimpleNamespace(
+            escalations=(escalation,),
+            resolutions=(resolution,),
+        )
+        submissions._validate_resolved_needs_human_review(active, previous)
+
+        cases = (
+            (
+                SimpleNamespace(
+                    review=SimpleNamespace(
+                        verdict=submissions.ReviewVerdict.CHANGES_REQUESTED,
+                        result_id=result_id,
+                    )
+                ),
+                active,
+                "expected an applied needs_human review",
+            ),
+            (
+                previous,
+                SimpleNamespace(escalations=(), resolutions=()),
+                "does not have exactly one linked Developer escalation",
+            ),
+            (
+                previous,
+                SimpleNamespace(
+                    escalations=(escalation, escalation),
+                    resolutions=(resolution,),
+                ),
+                "does not have exactly one linked Developer escalation",
+            ),
+            (
+                previous,
+                SimpleNamespace(
+                    escalations=(escalation,),
+                    resolutions=(),
+                ),
+                "has not been resolved by the Developer",
+            ),
+        )
+        for candidate, run_status, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    message,
+                ):
+                    submissions._validate_resolved_needs_human_review(
+                        run_status,
+                        candidate,
+                    )
 
 
 if __name__ == "__main__":

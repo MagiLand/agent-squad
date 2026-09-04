@@ -17,6 +17,8 @@ REVIEW_MARKDOWN_FILE_NAME = "review.md"
 REVIEW_MARKER_FILE_NAME = "review-marker.json"
 REVIEW_RESULT_FILE_NAME = "review.json"
 ROUND_RESPONSE_FILE_NAME = "response.json"
+ESCALATIONS_DIRECTORY_NAME = "escalations"
+RESOLUTIONS_DIRECTORY_NAME = "resolutions"
 PREVIOUS_REVIEW_BUNDLE_PATH = "input/previous-review.json"
 PREVIOUS_RESPONSE_BUNDLE_PATH = "input/previous-response.json"
 RECOVERY_ROUND_BUNDLE_PATH = "input/recovery-round.json"
@@ -108,6 +110,14 @@ class ResponseDisposition(StrEnum):
     FIXED = "fixed"
     REJECTED = "rejected"
     NEEDS_HUMAN = "needs_human"
+
+
+class EscalationReason(StrEnum):
+    """Machine-readable sources of a human decision request."""
+
+    IMPLEMENTER_REQUESTED = "implementer_requested"
+    REVIEWER_NEEDS_HUMAN = "reviewer_needs_human"
+    REVIEW_BUDGET_EXHAUSTED = "review_budget_exhausted"
 
 
 @dataclass(frozen=True)
@@ -382,6 +392,186 @@ class BundleArtifact:
         """Return the stable JSON representation."""
 
         return {"path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
+class EscalationRecord:
+    """One durable request for Developer authority."""
+
+    created_at: str
+    escalation_id: str
+    run_id: str
+    round_number: int
+    head_oid: str
+    related_finding_ids: tuple[str, ...]
+    source_request_id: str | None
+    source_result_id: str | None
+    previous_approved_head_oid: str | None
+    previous_phase: str
+    actor: str
+    note_path: str
+    note_sha256: str
+    response_id: str | None
+    reason: EscalationReason
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        object_format: str,
+        label: str,
+    ) -> "EscalationRecord":
+        """Validate and construct one escalation artifact."""
+
+        data = _require_object(value, label)
+        _VALIDATOR.check_fields(
+            data,
+            required={
+                "schema_version",
+                "created_at",
+                "escalation_id",
+                "run_id",
+                "round",
+                "head_oid",
+                "related_finding_ids",
+                "source_request_id",
+                "source_result_id",
+                "previous_approved_head_oid",
+                "previous_phase",
+                "actor",
+                "note_path",
+                "note_sha256",
+                "response_id",
+                "reason",
+            },
+            path=label,
+        )
+        schema_version = _require_int(
+            data["schema_version"],
+            f"{label}.schema_version",
+        )
+        if schema_version != SCHEMA_VERSION:
+            raise ArtifactValidationError(
+                f"{label}.schema_version must be {SCHEMA_VERSION}"
+            )
+        _require_object_format(object_format, f"{label} Git object format")
+        round_number = _require_int(data["round"], f"{label}.round")
+        if round_number < 0:
+            raise ArtifactValidationError(
+                f"{label}.round must not be negative"
+            )
+        finding_ids = _require_meaningful_string_list(
+            data["related_finding_ids"],
+            f"{label}.related_finding_ids",
+        )
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ArtifactValidationError(
+                f"{label}.related_finding_ids contains duplicates"
+            )
+        previous_phase = _require_string(
+            data["previous_phase"],
+            f"{label}.previous_phase",
+        )
+        if previous_phase not in {"implementing", "reviewing", "approved"}:
+            raise ArtifactValidationError(
+                f"{label}.previous_phase must be implementing, reviewing, "
+                "or approved"
+            )
+        actor = _require_meaningful_string(data["actor"], f"{label}.actor")
+        if any(character in actor for character in "\x00\r\n"):
+            raise ArtifactValidationError(
+                f"{label}.actor must be a single line without null bytes"
+            )
+        note_path = _require_string(data["note_path"], f"{label}.note_path")
+        parsed_note_path = PurePosixPath(note_path)
+        if (
+            parsed_note_path.is_absolute()
+            or ".." in parsed_note_path.parts
+            or len(parsed_note_path.parts) != 1
+            or str(parsed_note_path) != note_path
+        ):
+            raise ArtifactValidationError(
+                f"{label}.note_path must name a companion file in the same "
+                "directory"
+            )
+        previous_approved_head_oid = _require_optional_oid(
+            data["previous_approved_head_oid"],
+            object_format,
+            f"{label}.previous_approved_head_oid",
+        )
+        if (previous_phase == "approved") != (
+            previous_approved_head_oid is not None
+        ):
+            raise ArtifactValidationError(
+                f"{label}.previous_approved_head_oid must be present exactly "
+                "when previous_phase is approved"
+            )
+        return cls(
+            created_at=_require_timestamp(
+                data["created_at"],
+                f"{label}.created_at",
+            ),
+            escalation_id=_require_uuid(
+                data["escalation_id"],
+                f"{label}.escalation_id",
+            ),
+            run_id=_require_uuid(data["run_id"], f"{label}.run_id"),
+            round_number=round_number,
+            head_oid=_require_oid(
+                data["head_oid"],
+                object_format,
+                f"{label}.head_oid",
+            ),
+            related_finding_ids=finding_ids,
+            source_request_id=_require_optional_uuid(
+                data["source_request_id"],
+                f"{label}.source_request_id",
+            ),
+            source_result_id=_require_optional_uuid(
+                data["source_result_id"],
+                f"{label}.source_result_id",
+            ),
+            previous_approved_head_oid=previous_approved_head_oid,
+            previous_phase=previous_phase,
+            actor=actor,
+            note_path=note_path,
+            note_sha256=_require_digest(
+                data["note_sha256"],
+                f"{label}.note_sha256",
+            ),
+            response_id=_require_optional_uuid(
+                data["response_id"],
+                f"{label}.response_id",
+            ),
+            reason=_VALIDATOR.require_enum(
+                data["reason"],
+                f"{label}.reason",
+                EscalationReason,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the stable machine-readable escalation representation."""
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self.created_at,
+            "escalation_id": self.escalation_id,
+            "run_id": self.run_id,
+            "round": self.round_number,
+            "head_oid": self.head_oid,
+            "related_finding_ids": list(self.related_finding_ids),
+            "source_request_id": self.source_request_id,
+            "source_result_id": self.source_result_id,
+            "previous_approved_head_oid": self.previous_approved_head_oid,
+            "previous_phase": self.previous_phase,
+            "actor": self.actor,
+            "note_path": self.note_path,
+            "note_sha256": self.note_sha256,
+            "response_id": self.response_id,
+            "reason": self.reason.value,
+        }
 
 
 @dataclass(frozen=True)
@@ -2200,6 +2390,16 @@ def _require_optional_uuid(value: object, label: str) -> str | None:
     if value is None:
         return None
     return _require_uuid(value, label)
+
+
+def _require_optional_oid(
+    value: object,
+    object_format: str,
+    label: str,
+) -> str | None:
+    if value is None:
+        return None
+    return _require_oid(value, object_format, label)
 
 
 def _require_positive_int(value: object, label: str) -> int:

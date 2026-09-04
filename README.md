@@ -4,7 +4,7 @@ Agent Squad is a lightweight local tool for coordinating an implementation agent
 
 ## Project status
 
-Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, recover or supersede stuck reviews, apply approved or changes-requested results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
+Agent Squad is being implemented against the approved version 0.4.4 baseline. The current command-line application can initialize a repository, start one authoritative local run, submit exact committed revisions to fresh round-scoped Reviewers through Herdr, recover or supersede stuck reviews, escalate decisions to the Developer, resume from durable Developer resolutions, apply approved, changes-requested, or needs-human results, carry a finding-complete implementation response into a correction round, and complete the exact approved revision.
 
 The canonical specification is [Agent Squad v0.4.4](docs/agent-squad-v0.4.4-spec.md).
 
@@ -104,6 +104,32 @@ Supersession records the Implementer actor, cause, and timestamp in authoritativ
 Cleanup holds the Reviewer submission lock while it probes for marker-confirmed output. Any late result is copied to the round's `diagnostics/late-results/<result-id>/` directory without being applied, and the complete review bundle is archived and verified before removal. Agent Squad deletes only the review bundle and configured generated paths, then uses normal non-forced Git worktree removal. If a bundle input was altered or removed, cleanup retains the worktree without archiving the damaged bundle and reports why. If unrelated tracked, untracked, or ignored files remain after the bundle has been archived and removed, it preserves the worktree and reports why. A missing review-worktree directory is unregistered through an exact-path Git operation.
 
 A later `new_revision` submission creates a distinct round and Reviewer. It may reuse the immediately preceding superseded round's head because that round produced no applied result, even when an older applied `changes_requested` result reviewed the same head. The older applied result's complete response is still required. A different submitted head remains subject to the normal rule that it must differ from the most recent applied reviewed head. Reconsideration remains available when recovery returns to the most recent applied reviewed head. Any response submitted at that unchanged applied head uses reconsideration semantics, so a `fixed` disposition still requires a different committed revision.
+
+## Escalate and resume a Developer decision
+
+Request Developer authority directly while a run is `implementing`, `reviewing`, or `approved`:
+
+```bash
+agent-squad escalate \
+  --note path/to/decision-needed.md
+```
+
+When answering an applied `changes_requested` review, `--response path/to/response.json` may also stage a complete response whose unresolved dispositions are `needs_human`. The response, escalation record and note, event, run state, and any affected round metadata become authoritative at one commit point. A failed pre-commit attempt leaves the response and escalation correctable. Retrying the exact committed escalation and response is idempotent; a different response cannot overwrite it.
+
+Escalating during review supersedes that round with the escalation ID in its cause and sends the Reviewer a best-effort pause notice. Escalating after approval clears current approval authority while preserving the approved head in the escalation record. Applying a valid Reviewer `needs_human` result performs the same transition automatically and links the escalation to the exact request and result.
+
+Only the Developer can resume the run by recording non-empty UTF-8 Markdown:
+
+```bash
+agent-squad resume \
+  --resolution path/to/resolution.md \
+  --applies-to-finding REV-001 \
+  --extend-rounds 1
+```
+
+`--applies-to-finding` may be repeated and must identify findings belonging to the active escalation. `--extend-rounds` is optional and increases the authoritative review budget. Resume stores a hashed resolution linked to the active escalation, clears that escalation, and returns the run to `implementing`. Every later review bundle includes every resolution in creation order, so a fresh Reviewer receives the complete decision history and treats the latest relevant resolution as authoritative.
+
+A Developer resolution must settle the captured task rather than silently rewrite it. If the decision materially changes the objective or acceptance criteria, the protocol requires cancelling and restarting with a new task snapshot. Cancellation is not available in this increment. Likewise, an escalation raised after approval can be recorded and resolved, but the resumed run cannot yet submit a new revision. Issue #14 owns both lifecycle transitions; until it lands, post-approval escalation preserves the decision record but is not a continuation path.
 
 ## Apply a review, correct findings, and complete
 

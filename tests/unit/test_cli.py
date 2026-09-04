@@ -32,6 +32,8 @@ class InvocationDirectoryTests(unittest.TestCase):
             ("apply-review",),
             ("supersede", "--reason", "review is obsolete"),
             ("retry-handoff",),
+            ("escalate",),
+            ("resume", "--resolution", "resolution.md"),
             ("complete",),
         )
         for arguments in cases:
@@ -86,6 +88,11 @@ class LocalStateErrorTests(unittest.TestCase):
                 "supersede_review",
             ),
             (("retry-handoff",), "retry_handoff"),
+            (("escalate",), "escalate_run"),
+            (
+                ("resume", "--resolution", "resolution.md"),
+                "resume_run",
+            ),
             (("complete",), "complete_run"),
         )
         for arguments, operation in cases:
