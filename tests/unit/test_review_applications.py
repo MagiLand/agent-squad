@@ -309,6 +309,7 @@ class GitAuthorityTests(unittest.TestCase):
             resolutions=(),
         )
         request = SimpleNamespace(
+            created_at="2026-08-26T12:00:00Z",
             run_id=RUN_ID,
             round_number=1,
             request_id=REQUEST_ID,
@@ -430,13 +431,17 @@ class GitAuthorityTests(unittest.TestCase):
             companion_path=Path(companion_path.name),
             record_bytes=record_bytes,
             record=SimpleNamespace(
+                created_at="2026-08-26T11:00:00Z",
                 resolution_sha256=hashlib.sha256(
                     companion_bytes
                 ).hexdigest()
             ),
         )
         active = SimpleNamespace(resolutions=(authority,))
-        request = SimpleNamespace(resolution_paths=(str(record_path),))
+        request = SimpleNamespace(
+            created_at="2026-08-26T12:00:00Z",
+            resolution_paths=(str(record_path),),
+        )
 
         def evidence(
             record: bytes = record_bytes,
@@ -475,6 +480,27 @@ class GitAuthorityTests(unittest.TestCase):
                         active,
                         candidate,
                     )
+
+        omitted_authority = SimpleNamespace(
+            path=Path("002-resolution.json"),
+            companion_path=Path("002-resolution.md"),
+            record_bytes=b'{"resolution_id":"two"}\n',
+            record=SimpleNamespace(
+                created_at="2026-08-26T11:30:00Z",
+                resolution_sha256=hashlib.sha256(
+                    b"# Second resolution\n"
+                ).hexdigest(),
+            ),
+        )
+        active.resolutions = (authority, omitted_authority)
+        with self.assertRaisesRegex(
+            review_applications.ReviewApplicationError,
+            "resolutions do not match the authoritative run history",
+        ):
+            review_applications._validate_resolution_bundle_inputs(
+                active,
+                evidence(),
+            )
 
     def test_implementation_identity_rejects_each_changed_component(
         self,

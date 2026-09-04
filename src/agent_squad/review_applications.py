@@ -2341,6 +2341,21 @@ def _validate_resolution_bundle_inputs(
     resolutions_by_name = {
         authority.path.name: authority for authority in active.resolutions
     }
+    request_created_at = datetime.fromisoformat(
+        f"{request.created_at[:-1]}+00:00"
+    )
+    expected_paths = tuple(
+        f"input/resolutions/{authority.path.name}"
+        for authority in active.resolutions
+        if datetime.fromisoformat(
+            f"{authority.record.created_at[:-1]}+00:00"
+        ) < request_created_at
+    )
+    if request.resolution_paths != expected_paths:
+        raise ReviewApplicationError(
+            "review bundle Developer resolutions do not match the "
+            "authoritative run history"
+        )
     for path_text in request.resolution_paths:
         record_path = PurePosixPath(path_text)
         authority = resolutions_by_name.get(record_path.name)
