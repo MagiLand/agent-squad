@@ -571,13 +571,27 @@ def _validate_worktree_integrity(
         raise ReviewEvidenceAccessError(
             f"could not verify detached review HEAD: {detail}"
         )
-    base_commit = run_git(
+    base_exists = run_git(
         worktree.root,
         "cat-file",
         "-e",
-        f"{request.base_oid}^{{commit}}",
+        request.base_oid,
     )
-    if base_commit.returncode != 0:
+    if base_exists.returncode == 1:
+        raise ReviewSubmissionError(
+            "review request base object is not an available commit"
+        )
+    if base_exists.returncode != 0:
+        detail = base_exists.stderr.strip() or "unknown Git error"
+        raise ReviewEvidenceAccessError(
+            f"could not verify the review request base object: {detail}"
+        )
+    base_type = _git_output(
+        worktree.root,
+        ("cat-file", "-t", request.base_oid),
+        "determine the review request base object type",
+    )
+    if base_type != "commit":
         raise ReviewSubmissionError(
             "review request base object is not an available commit"
         )

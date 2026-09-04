@@ -23,6 +23,7 @@ from .runs import (
     InvalidUnappliedReviewResult,
     RETRY_HANDOFF_NEXT_ACTION,
     RunPhase,
+    UnavailableReviewEvidence,
     inspect_status,
     start_run,
 )
@@ -327,7 +328,13 @@ def _run_status(_arguments: argparse.Namespace) -> int:
         print(f"Review bundle warning: {run.review_bundle_error}")
     unapplied_review = run.unapplied_review
     if run.phase is RunPhase.REVIEWING:
-        if isinstance(unapplied_review, InvalidUnappliedReviewResult):
+        if isinstance(unapplied_review, UnavailableReviewEvidence):
+            print(
+                "Marker-confirmed unapplied result: present but unavailable: "
+                f"{unapplied_review.reason}"
+            )
+            print(f"Recovery command: {RETRY_HANDOFF_NEXT_ACTION}")
+        elif isinstance(unapplied_review, InvalidUnappliedReviewResult):
             print(
                 "Marker-confirmed unapplied result: present but invalid: "
                 f"{unapplied_review.reason}"
