@@ -1020,6 +1020,15 @@ def _validate_bundle_inputs(
                     "a request after needs_human must include a Developer "
                     "resolution"
                 )
+        elif previous_review.verdict is ReviewVerdict.APPROVED:
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise ReviewSubmissionError(
+                    "a request after approved must use new_revision"
+                )
+            if request.previous_response_path is not None:
+                raise ReviewSubmissionError(
+                    "an approved result does not accept a response"
+                )
         else:
             raise ReviewSubmissionError(
                 "a follow-up request cannot use a previous review with "

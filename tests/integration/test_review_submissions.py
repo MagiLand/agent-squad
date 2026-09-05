@@ -893,8 +893,7 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 ),
                 (
                     candidate("approved"),
-                    "follow-up request cannot use a previous review with "
-                    "verdict approved",
+                    "an approved result does not accept a response",
                 ),
             )
             for (request, previous), message in cases:

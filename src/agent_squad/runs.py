@@ -1768,11 +1768,12 @@ def _validate_active_review_artifacts(
             if previous.round_record.verdict not in {
                 ReviewVerdict.CHANGES_REQUESTED,
                 ReviewVerdict.NEEDS_HUMAN,
+                ReviewVerdict.APPROVED,
             }:
                 raise RunStateError(
                     "a correction-round request must follow the most recent "
-                    "applied changes_requested result or a resolved "
-                    "needs_human result"
+                    "applied changes_requested, resolved needs_human, or "
+                    "approved result"
                 )
             recovery_head_oid = (
                 preceding_round.head_oid if recovering else None
@@ -1807,6 +1808,11 @@ def _validate_active_review_artifacts(
             if request.mode is not SubmissionMode.NEW_REVISION:
                 raise RunStateError(
                     "a request after needs_human must use new_revision"
+                )
+        elif previous.review.verdict is ReviewVerdict.APPROVED:
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise RunStateError(
+                    "a request after approved must use new_revision"
                 )
         else:
             raise RunStateError(

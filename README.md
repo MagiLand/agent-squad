@@ -173,6 +173,23 @@ agent-squad complete
 
 Completion preserves the run and round history, releases the active-run slot, and removes only validated disposable review resources. It never merges, pushes, deploys, or deletes a development branch.
 
+After approval, a changed committed candidate can enter a fresh review with
+`submit --mode new_revision --report <report.md>`. The new round clears current
+approval authority; the earlier approval remains in run history. An unchanged
+approved head cannot be submitted again.
+
+Cancel any active run with:
+
+```bash
+agent-squad cancel --reason "Developer stopped this task"
+```
+
+Cancellation records the actor and reason, clears approval and active escalation
+references, and releases the active-run slot. A reviewing round becomes
+superseded before the terminal state is committed. Reviewer notification and
+owned-resource cleanup are best effort; failures leave cancellation in effect.
+Run evidence is preserved, repeated cancellation is safe, and a new run may start.
+
 ## Development
 
 Run the deterministic unit and Git integration tests with either command:
