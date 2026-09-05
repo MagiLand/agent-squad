@@ -1024,6 +1024,26 @@ class HumanDecisionCommandTests(unittest.TestCase):
 
             self.assertEqual(applied.returncode, 0, applied.stderr)
             self.assertIn("Verdict: needs_human", applied.stdout)
+            replay_state = (
+                prepared.repository / ".agent-squad/state.json"
+            ).read_bytes()
+            for _ in range(2):
+                replayed = run_cli(
+                    prepared.repository,
+                    "apply-review",
+                    "--result-id",
+                    str(review["result_id"]),
+                    data_home=prepared.data_home,
+                    env_overrides=prepared.environment,
+                )
+                self.assertEqual(replayed.returncode, 0, replayed.stderr)
+                self.assertEqual(
+                    (
+                        prepared.repository / ".agent-squad/state.json"
+                    ).read_bytes(),
+                    replay_state,
+                )
+
             control_root = prepared.repository / ".agent-squad"
             state_path = control_root / "state.json"
             state = json.loads(state_path.read_text(encoding="utf-8"))

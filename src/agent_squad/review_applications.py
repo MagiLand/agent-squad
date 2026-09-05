@@ -796,6 +796,14 @@ def _resume_run_locked(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "resume requires a needs_human run"
         )
+    if (
+        active.review_budget.completed_change_reviews
+        >= active.review_budget.effective_limit
+        and additional_rounds == 0
+    ):
+        raise ReviewApplicationError(
+            "review budget is exhausted; resume requires --extend-rounds"
+        )
     escalation_id = active.active_escalation_id
     if escalation_id is None:
         raise ReviewApplicationError(
@@ -1254,15 +1262,15 @@ def _apply_review_locked(
             evidence=evidence,
             observed_head_oid=current_head,
         )
-    if (
+    budget_exhausted = (
         evidence.review.verdict is ReviewVerdict.CHANGES_REQUESTED
         and active.review_budget.completed_change_reviews + 1
         >= active.review_budget.effective_limit
-    ):
-        raise ReviewApplicationError(
-            "review budget exhaustion is not supported by this command "
-            "version; no state was changed"
-        )
+    )
+    requires_escalation = (
+        budget_exhausted
+        or evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN
+    )
 
     round_path = round_directory / "round.json"
     state_path = repository.control_root / runs.STATE_FILE_NAME
@@ -1288,7 +1296,7 @@ def _apply_review_locked(
                 *(item.record.created_at for item in active.resolutions),
             )
         )
-        if evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN
+        if requires_escalation
         else utc_timestamp()
     )
     bundle_manifest = _archive_bundle(round_directory, evidence)
@@ -1361,7 +1369,7 @@ def _apply_review_locked(
         next_phase = runs.RunPhase.IMPLEMENTING
         next_action = runs.CORRECTION_SUBMIT_NEXT_ACTION
         approved_head_oid = None
-    elif evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
+    if requires_escalation:
         next_phase = runs.RunPhase.NEEDS_HUMAN
         next_action = runs.RESUME_NEXT_ACTION
         approved_head_oid = None
@@ -1408,7 +1416,7 @@ def _apply_review_locked(
     ]
     escalation_directory: Path | None = None
     escalation_directory_created = False
-    if evidence.review.verdict is ReviewVerdict.NEEDS_HUMAN:
+    if requires_escalation:
         escalation_number = len(active.escalations) + 1
         escalation_id = str(uuid.uuid4())
         stem = f"{escalation_number:03d}-escalation"
@@ -1435,6 +1443,7 @@ def _apply_review_locked(
             head_oid=evidence.review.head_oid,
             related_finding_ids=tuple(
                 finding.finding_id for finding in evidence.review.findings
+                if not budget_exhausted or finding.blocking
             ),
             source_request_id=evidence.request.request_id,
             source_result_id=evidence.review.result_id,
@@ -1444,7 +1453,11 @@ def _apply_review_locked(
             note_path=escalation_note_path.name,
             note_sha256=hashlib.sha256(escalation_note).hexdigest(),
             response_id=None,
-            reason=EscalationReason.REVIEWER_NEEDS_HUMAN,
+            reason=(
+                EscalationReason.REVIEW_BUDGET_EXHAUSTED
+                if budget_exhausted
+                else EscalationReason.REVIEWER_NEEDS_HUMAN
+            ),
         )
         try:
             escalation = EscalationRecord.from_dict(
@@ -1518,7 +1531,7 @@ def _apply_review_locked(
         if escalation_directory_created and escalation_directory is not None:
             _remove_empty_directory(escalation_directory)
         raise
-    if evidence.review.verdict is not ReviewVerdict.NEEDS_HUMAN:
+    if not requires_escalation:
         try:
             _ensure_event(
                 run_directory / runs.EVENT_LOG_FILE_NAME,
@@ -2024,7 +2037,9 @@ def _historical_result_replay(
             label="historical approval authority",
         )
         approval_path = round_directory / APPROVAL_FILE_NAME
-    elif authority.review.verdict is not ReviewVerdict.CHANGES_REQUESTED:
+    elif authority.review.verdict not in {
+        ReviewVerdict.CHANGES_REQUESTED, ReviewVerdict.NEEDS_HUMAN,
+    }:
         raise ReviewApplicationError(
             f"historical applied verdict {authority.review.verdict.value} "
             "is not supported by this command version"
@@ -2035,18 +2050,28 @@ def _historical_result_replay(
         and active.active_round is not None
         and active.active_round.result_id == result_id
     ):
+        event = _review_applied_event(
+            timestamp=round_record.updated_at,
+            run_id=active.run_id,
+            round_number=round_record.round_number,
+            request_id=round_record.request_id,
+            result_id=result_id,
+            verdict=authority.review.verdict,
+            head_oid=authority.review.head_oid,
+        )
+        for escalation in active.escalations:
+            if (
+                escalation.record.source_result_id == result_id
+                and escalation.record.reason in {
+                    EscalationReason.REVIEW_BUDGET_EXHAUSTED,
+                    EscalationReason.REVIEWER_NEEDS_HUMAN,
+                }
+            ):
+                event["escalation_id"] = escalation.record.escalation_id
         try:
             _ensure_event(
                 run_directory / runs.EVENT_LOG_FILE_NAME,
-                _review_applied_event(
-                    timestamp=round_record.updated_at,
-                    run_id=active.run_id,
-                    round_number=round_record.round_number,
-                    request_id=round_record.request_id,
-                    result_id=result_id,
-                    verdict=authority.review.verdict,
-                    head_oid=authority.review.head_oid,
-                ),
+                event,
                 identity_fields=("event", "run_id", "round", "result_id"),
             )
         except OSError as error:
