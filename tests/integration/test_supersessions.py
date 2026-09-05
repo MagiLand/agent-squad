@@ -1084,8 +1084,9 @@ class SupersedeReviewTests(unittest.TestCase):
                 encoding="utf-8",
             )
             response_path = root / "response.json"
-            # A persisted correction freezes its response. Reuse a rejected
-            # response so reconsideration does not require rewriting it.
+            # A differing reconsideration response is refused once a round
+            # references the original, even after that round is superseded.
+            # Reuse the rejection to isolate this test's HEAD/mode contract.
             _write_rejected_response(response_path, prepared, review)
             correction = run_cli(
                 prepared.repository,

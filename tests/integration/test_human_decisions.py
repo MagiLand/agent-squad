@@ -1038,7 +1038,9 @@ class HumanDecisionCommandTests(unittest.TestCase):
                 )
                 self.assertEqual(replayed.returncode, 0, replayed.stderr)
                 self.assertEqual(
-                    (prepared.repository / ".agent-squad/state.json").read_bytes(),
+                    (
+                        prepared.repository / ".agent-squad/state.json"
+                    ).read_bytes(),
                     replay_state,
                 )
 

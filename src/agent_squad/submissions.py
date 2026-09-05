@@ -1163,7 +1163,9 @@ def _plan_response_archival(
         decode_json(content.decode("utf-8")),
         object_format=active.git_object_format,
     )
-    # Only rounds included in authoritative state can freeze a response.
+    # Every persisted round freezes the response, even after recovery retires
+    # that round. Its captured digest remains authoritative; a later linked
+    # replacement cannot rewrite the response out from under that reference.
     review_digest = hashlib.sha256(previous.review_bytes).hexdigest()
     for number in range(
         previous.review.round_number + 1, active.current_round + 1,
@@ -1245,6 +1247,10 @@ def _plan_response_archival(
         raise SubmissionError(
             "escalation-time response ID does not match its escalation"
         )
+    if original == content and earlier_content == content:
+        # Reuse only the validated escalation-time response, not an arbitrary
+        # provisional file left by an interrupted replacement.
+        return None
     if response.supersedes_response_id != earlier.response_id:
         raise SubmissionError(
             "replacement must identify the escalation-time response in "

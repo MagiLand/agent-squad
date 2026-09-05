@@ -15,7 +15,11 @@ from tests.integration.test_review_applications import (
     _marker_confirmed_review,
     _write_fixed_response,
 )
-from tests.integration.test_review_submissions import _write_review
+from tests.integration.test_review_submissions import (
+    _PreparedRound,
+    _prepare_round,
+    _write_review,
+)
 
 add_src_to_path()
 from agent_squad import review_applications, submissions  # noqa: E402
@@ -36,10 +40,50 @@ class BudgetResponseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result
 
+    def mixed_finding_review(
+        self,
+        root: Path,
+        *,
+        verdict: str,
+        review_limit: int | None = None,
+    ) -> tuple[_PreparedRound, dict[str, object]]:
+        prepared = _prepare_round(root, review_limit=review_limit)
+        review = _write_review(prepared, verdict="changes_requested")
+        optional = copy.deepcopy(review["findings"][0])
+        optional.update(id="REV-002", blocking=False, severity="low")
+        review["findings"].append(optional)
+        review["verdict"] = verdict
+        (prepared.bundle / "output/review.json").write_text(json.dumps(review))
+        self.cli(prepared, "review-submit", cwd=prepared.review_worktree)
+        return prepared, review
+
+    def test_reviewer_needs_human_escalation_retains_optional_finding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            prepared, review = self.mixed_finding_review(
+                Path(temporary), verdict="needs_human",
+            )
+            self.cli(
+                prepared, "apply-review", "--result-id", review["result_id"],
+            )
+            control = prepared.repository / ".agent-squad"
+            state = json.loads((control / "state.json").read_bytes())
+            escalation = json.loads((
+                control / "runs" / state["active_run_id"]
+                / "escalations/001-escalation.json"
+            ).read_bytes())
+            self.assertEqual(
+                escalation["related_finding_ids"], ["REV-001", "REV-002"],
+            )
+            self.assertEqual(
+                state["review_budget"]["completed_change_reviews"], 0,
+            )
+
     def test_exhaustion_extension_and_replay_are_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            prepared, review = _marker_confirmed_review(
+            prepared, review = self.mixed_finding_review(
                 root, verdict="changes_requested", review_limit=1,
             )
             state_path = prepared.repository / ".agent-squad/state.json"
@@ -165,75 +209,212 @@ class BudgetResponseTests(unittest.TestCase):
                     "implementing" if number == 2 else "needs_human",
                 )
 
-    def test_resolved_response_replacement_and_corrected_precommit_retry(
+    def prepare_response_continuation(
         self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            prepared, review = _marker_confirmed_review(
-                root, verdict="changes_requested",
-            )
-            self.cli(
-                prepared, "apply-review", "--result-id", review["result_id"],
-            )
-            response_path = root / "response.json"
-            earlier = _write_fixed_response(response_path, prepared, review)
+        root: Path,
+        *,
+        needs_human: bool = True,
+    ) -> SimpleNamespace:
+        prepared, review = _marker_confirmed_review(
+            root, verdict="changes_requested",
+        )
+        self.cli(
+            prepared, "apply-review", "--result-id", review["result_id"],
+        )
+        response_path = root / "response.json"
+        earlier = _write_fixed_response(response_path, prepared, review)
+        if needs_human:
             earlier["responses"][0].update(
                 disposition="needs_human",
                 rationale="Developer must choose the compatibility policy.",
             )
-            response_path.write_text(json.dumps(earlier))
-            self.cli(prepared, "escalate", "--response", str(response_path))
-            state_path = prepared.repository / ".agent-squad/state.json"
-            state = json.loads(state_path.read_bytes())
-            run_dir = state_path.parent / "runs" / state["active_run_id"]
-            canonical = run_dir / "rounds/001/response.json"
-            earlier_bytes = canonical.read_bytes()
-            resolution_path = root / "resolution.md"
-            resolution_path.write_text(
-                "# Decision\n\nUse strict compatibility for REV-001.\n"
-            )
+        response_path.write_text(json.dumps(earlier))
+        self.cli(prepared, "escalate", "--response", str(response_path))
+        state_path = prepared.repository / ".agent-squad/state.json"
+        state = json.loads(state_path.read_bytes())
+        run_dir = state_path.parent / "runs" / state["active_run_id"]
+        canonical = run_dir / "rounds/001/response.json"
+        earlier_bytes = canonical.read_bytes()
+        resolution_path = root / "resolution.md"
+        resolution_path.write_text(
+            "# Decision\n\nUse strict compatibility for REV-001.\n"
+        )
+        finding_args = (
+            ("--applies-to-finding", "REV-001") if needs_human else ()
+        )
+        self.cli(
+            prepared, "resume", "--resolution", str(resolution_path),
+            *finding_args,
+        )
+        resolution_record = run_dir / "resolutions/001-resolution.json"
+        resolution = json.loads(resolution_record.read_bytes())
+        response = _write_fixed_response(response_path, prepared, review)
+        response.update(
+            response_id=str(uuid.uuid4()),
+            supersedes_response_id=earlier["response_id"],
+            resolution_ids=[resolution["resolution_id"]],
+        )
+        response["responses"][0]["rationale"] = (
+            "Applied strict compatibility as required by Developer "
+            "resolution " + resolution["resolution_id"]
+        )
+        (prepared.repository / "feature.txt").write_text(
+            "strict compatibility\n"
+        )
+        run(["git", "add", "feature.txt"], cwd=prepared.repository)
+        run(
+            [
+                "git", "-c", "commit.gpgSign=false", "commit",
+                "--no-verify", "-m", "fix: apply resolution",
+            ],
+            cwd=prepared.repository,
+        )
+        report = root / "report.md"
+        report.write_text("# Report\n\nApplied strict compatibility.\n")
+        original_state = state_path.read_bytes()
+        diagnostic = (
+            run_dir / "rounds/001/diagnostics/replaced-responses"
+            / (earlier["response_id"] + ".json")
+        )
+        response_path.write_text(json.dumps(response))
+        return SimpleNamespace(
+            prepared=prepared, response_path=response_path, earlier=earlier,
+            state_path=state_path, canonical=canonical,
+            earlier_bytes=earlier_bytes, resolution_record=resolution_record,
+            response=response, report=report, original_state=original_state,
+            diagnostic=diagnostic,
+        )
+
+    def test_clean_replacement_creates_immutable_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.prepare_response_continuation(Path(temporary))
+            self.assertFalse(fixture.diagnostic.exists())
             self.cli(
-                prepared, "resume", "--resolution", str(resolution_path),
-                "--applies-to-finding", "REV-001",
+                fixture.prepared, "submit", "--mode", "new_revision",
+                "--report", str(fixture.report),
+                "--response", str(fixture.response_path),
             )
-            resolution_record = run_dir / "resolutions/001-resolution.json"
-            resolution = json.loads(resolution_record.read_bytes())
-            response = _write_fixed_response(response_path, prepared, review)
-            response.update(
-                response_id=str(uuid.uuid4()),
-                supersedes_response_id=earlier["response_id"],
-                resolution_ids=[resolution["resolution_id"]],
+            self.assertTrue(fixture.diagnostic.exists())
+            self.assertEqual(
+                fixture.diagnostic.read_bytes(), fixture.earlier_bytes,
             )
-            response["responses"][0]["rationale"] = (
-                "Applied strict compatibility as required by Developer "
-                "resolution " + resolution["resolution_id"]
+            self.assertEqual(fixture.diagnostic.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(
+                fixture.canonical.read_bytes(),
+                fixture.response_path.read_bytes(),
             )
-            (prepared.repository / "feature.txt").write_text(
-                "strict compatibility\n"
+            state = json.loads(fixture.state_path.read_bytes())
+            bundle = (
+                Path(state["active_round"]["review_worktree"])
+                / ".agent-squad-review"
             )
-            run(["git", "add", "feature.txt"], cwd=prepared.repository)
-            run(
-                [
-                    "git", "-c", "commit.gpgSign=false", "commit",
-                    "--no-verify", "-m", "fix: apply resolution",
-                ],
-                cwd=prepared.repository,
+            self.assertEqual(
+                (bundle / "input/previous-response.json").read_bytes(),
+                fixture.response_path.read_bytes(),
             )
-            report = root / "report.md"
-            report.write_text("# Report\n\nApplied strict compatibility.\n")
-            original_state = state_path.read_bytes()
-            diagnostic = (
-                run_dir / "rounds/001/diagnostics/replaced-responses"
-                / (earlier["response_id"] + ".json")
+            self.assertEqual(
+                bundle.joinpath(
+                    "input/resolutions/001-resolution.json"
+                ).read_bytes(),
+                fixture.resolution_record.read_bytes(),
             )
-            for patch in (
-                {"supersedes_response_id": None},
-                {"response_id": earlier["response_id"]},
-                {"resolution_ids": []},
-                {"resolution_ids": [str(uuid.uuid4())]},
-                {"responses": earlier["responses"]},
+
+    def test_submit_reuses_unchanged_escalation_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.prepare_response_continuation(
+                Path(temporary), needs_human=False,
+            )
+            fixture.response_path.write_bytes(fixture.earlier_bytes)
+            self.cli(
+                fixture.prepared, "submit", "--mode", "new_revision",
+                "--report", str(fixture.report),
+                "--response", str(fixture.response_path),
+            )
+            self.assertEqual(
+                fixture.canonical.read_bytes(), fixture.earlier_bytes,
+            )
+            self.assertFalse(fixture.diagnostic.exists())
+            state = json.loads(fixture.state_path.read_bytes())
+            bundle = (
+                Path(state["active_round"]["review_worktree"])
+                / ".agent-squad-review"
+            )
+            self.assertEqual(
+                (bundle / "input/previous-response.json").read_bytes(),
+                fixture.earlier_bytes,
+            )
+
+    def test_response_diagnostic_symlink_is_refused_before_preparation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.prepare_response_continuation(Path(temporary))
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            fixture.diagnostic.parent.parent.symlink_to(outside)
+            with mock.patch.object(
+                submissions, "_create_detached_review_worktree",
+                side_effect=AssertionError("review preparation began"),
             ):
+                with self.assertRaisesRegex(
+                    submissions.SubmissionError,
+                    "response diagnostic directory must not be "
+                    "a symbolic link",
+                ):
+                    submissions.submit_candidate(
+                        fixture.prepared.repository, mode="new_revision",
+                        report_path=fixture.report,
+                        response_path=fixture.response_path,
+                    )
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(
+                fixture.state_path.read_bytes(), fixture.original_state,
+            )
+            self.assertEqual(
+                fixture.canonical.read_bytes(), fixture.earlier_bytes,
+            )
+
+    def test_resolved_response_replacement_and_corrected_precommit_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.prepare_response_continuation(Path(temporary))
+            prepared = fixture.prepared
+            response_path = fixture.response_path
+            earlier = fixture.earlier
+            state_path = fixture.state_path
+            canonical = fixture.canonical
+            earlier_bytes = fixture.earlier_bytes
+            resolution_record = fixture.resolution_record
+            response = fixture.response
+            report = fixture.report
+            original_state = fixture.original_state
+            diagnostic = fixture.diagnostic
+            cases = (
+                (
+                    {"supersedes_response_id": None},
+                    "replacement must identify the escalation-time response",
+                ),
+                (
+                    {"response_id": earlier["response_id"]},
+                    "supersedes_response_id cannot equal response_id",
+                ),
+                (
+                    {"resolution_ids": []},
+                    "replacement must identify recorded Developer "
+                    "resolution_ids",
+                ),
+                (
+                    {"resolution_ids": [str(uuid.uuid4())]},
+                    "replacement must identify recorded Developer "
+                    "resolution_ids",
+                ),
+                (
+                    {"responses": earlier["responses"]},
+                    "implementation response requires Developer authority",
+                ),
+            )
+            for patch, message in cases:
                 invalid = copy.deepcopy(response)
                 invalid.update(patch)
                 response_path.write_text(json.dumps(invalid))
@@ -244,6 +425,7 @@ class BudgetResponseTests(unittest.TestCase):
                     env_overrides=prepared.environment,
                 )
                 self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(message, refused.stderr)
                 self.assertEqual(state_path.read_bytes(), original_state)
                 self.assertEqual(canonical.read_bytes(), earlier_bytes)
                 self.assertFalse(diagnostic.exists())
@@ -268,6 +450,7 @@ class BudgetResponseTests(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), original_state)
             self.assertEqual(canonical.read_bytes(), earlier_bytes)
             self.assertFalse(diagnostic.exists())
+
             def fail_after_response_write(path, content, *, mode):
                 result = write(path, content, mode=mode)
                 if (
