@@ -109,6 +109,26 @@ the result. For Reviewer-exit recovery, stop only the owned Reviewer, then call
 `supersede --reason <text>` to exercise supersession. Do not manufacture a false
 finding or a dishonest response merely to obtain same-SHA reconsideration.
 
+For a reproducible same-SHA evidence exercise, finish the greeting task first,
+then start a new run at its completed HEAD using
+`tests/fixtures/smoke/reconsideration-task.md` and the existing captured protocol
+context. This task adds documentation and explicitly requires an implementation
+execution record. An honest first report can disclose that it lacks that record.
+If the independent Reviewer requests the missing evidence, apply the result,
+execute the required checks at the unchanged HEAD, and supply their actual
+commands, outputs, and exits in a response and updated report outside Git. The
+protocol's `rejected` disposition here explains why the same revision now meets
+the acceptance criteria; it must acknowledge that the original evidence gap was
+real. Submit with `--mode reconsideration`, verify that the new request retains
+the exact same HEAD, and let a fresh Reviewer judge the evidence independently.
+
+The adapter supplies `worktree open --cwd <implementation-repository>` explicitly.
+A background trial therefore does not depend on which repository is focused in
+Herdr. If a new workspace shell is not ready for agent startup, preserve the
+request and use `retry-handoff` after the shell is available. If native sandbox
+permissions prevent result notification, use the marker discovery commands above;
+do not rewrite the review artifacts to simulate delivery.
+
 After recording completion and preserving required evidence, inspect the owned
 Herdr workspace identities and contents, then close only workspaces created for
 the trial. Check `git worktree list --porcelain` in the temporary repository and
@@ -138,6 +158,7 @@ A documentation-only trial must not be described as app-build or release proof.
 ## Evidence status
 
 The dated verification record is [2026-09-05](verification/2026-09-05-issue-16.md).
-The live directions and consuming-repository acceptance criteria remain open
-until that record contains completed trials. Automated success alone is not
-v0.4.4 release acceptance and is not independent self-review of Agent Squad.
+It records completed real trials in both directions, all Section 36.6 scenarios,
+and the isolated Double Dubs consumer trial, with exact revisions, outcomes,
+limitations, and cleanup. Those agents reviewed fixture and consumer changes;
+the Agent Squad implementation still requires its own external PR review.
