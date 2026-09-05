@@ -16,6 +16,8 @@ from .artifacts import ReviewRoundRecord, RoundStatus
 from .herdr import HerdrClient, HerdrError, format_herdr_error
 from .initialization import (
     AgentSquadError,
+    CONTROL_DIRECTORY_NAME,
+    REVIEW_DIRECTORY_NAME,
     InitializedRepository,
     LOCAL_EXCLUDE_PATTERNS,
     discover_git_worktree,
@@ -73,7 +75,7 @@ def diagnose(
     timeout_seconds: float = 120.0,
     herdr_client: HerdrClient | None = None,
 ) -> DoctorReport:
-    """Check prerequisites and report leftovers without adopting or deleting them."""
+    """Check prerequisites and report resources without changing ownership."""
 
     diagnostics: list[Diagnostic] = []
     if live_reviewer and (
@@ -121,7 +123,8 @@ def diagnose(
             Diagnostic(
                 "submodules",
                 "warning",
-                "detached review worktrees may lack initialized submodule content; "
+                "detached review worktrees may lack initialized "
+                "submodule content; "
                 "prepare submodules with a project-specific preflight",
             )
         )
@@ -275,7 +278,8 @@ def _check_status(root: Path) -> str:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
                 raise AgentSquadError(
-                    f"run lock is busy: {lock_path}; retry doctor after the active operation"
+                    f"run lock is busy: {lock_path}; "
+                    "retry doctor after the active operation"
                 ) from error
             status = inspect_status_locked(root)
             load_cancelled_run(repository)
@@ -313,15 +317,20 @@ def _check_implementer(
 
 
 def _check_worktree(repository: InitializedRepository) -> str:
-    root = repository.configuration.review_worktree_root.resolve()
+    head = git_output(
+        repository.worktree.root, "rev-parse", "--verify", "HEAD^{commit}"
+    )
+    root = (
+        repository.configuration.review_worktree_root.resolve()
+        / repository_identity(repository.worktree).repository_id
+    )
+    if root.is_symlink():
+        raise AgentSquadError(f"diagnostic namespace is a symlink: {root}")
     root.mkdir(parents=True, exist_ok=True)
     # mkdtemp establishes ownership; Git creates only its child.
     parent = Path(tempfile.mkdtemp(prefix=".doctor-", dir=root))
     worktree = parent / "snapshot"
     try:
-        head = git_output(
-            repository.worktree.root, "rev-parse", "--verify", "HEAD^{commit}"
-        )
         git_output(
             repository.worktree.root,
             "-c",
@@ -350,9 +359,15 @@ def _check_worktree(repository: InitializedRepository) -> str:
         )
         parent.rmdir()
     except (AgentSquadError, OSError) as error:
-        raise AgentSquadError(
-            f"{error}; owned probe retained at {parent}"
-        ) from error
+        # A failure before checkout can leave no evidence at all. Only remove
+        # this invocation's empty directory; a populated probe stays intact.
+        try:
+            parent.rmdir()
+        except OSError:
+            raise AgentSquadError(
+                f"{error}; owned probe retained at {parent}"
+            ) from error
+        raise
     return str(root)
 
 
@@ -361,7 +376,7 @@ def _inspect_residuals(
     client: HerdrClient | None,
     diagnostics: list[Diagnostic],
 ) -> None:
-    """Inspect this repository's namespace, including invalid/unregistered bundles."""
+    """Inspect this repository's worktrees, sessions, and leftover bundles."""
 
     def warn(detail: str) -> None:
         diagnostics.append(Diagnostic("residual resources", "warning", detail))
@@ -394,7 +409,7 @@ def _inspect_residuals(
         records: dict[Path, ReviewRoundRecord] = {}
         terminal_runs: set[str] = set()
         for implementation in sorted(registered):
-            control = implementation / ".agent-squad"
+            control = implementation / CONTROL_DIRECTORY_NAME
             if control.is_symlink():
                 warn(f"control storage is a symlink; not traversed: {control}")
                 continue
@@ -468,12 +483,23 @@ def _inspect_residuals(
                 if run_path.is_symlink() or not run_path.is_dir():
                     warn(f"unrecognized review resource: {run_path}")
                     continue
+                if run_path.name.startswith((".doctor-", ".preflight-")):
+                    warn(f"retained owned diagnostic evidence: {run_path}")
+                    if run_path.name.startswith(".doctor-"):
+                        candidates.add(run_path / "snapshot")
+                    else:
+                        candidates.update(
+                            child / "round-001"
+                            for child in run_path.iterdir()
+                            if child.is_dir() and not child.is_symlink()
+                        )
+                    continue
                 candidates.update(run_path.iterdir())
         for path in sorted(candidates):
             record = records.get(path)
             if not os.path.lexists(path) and path not in registered:
                 continue
-            bundle = path / ".agent-squad-review"
+            bundle = path / REVIEW_DIRECTORY_NAME
             suffix = f"; bundle {bundle}" if os.path.lexists(bundle) else ""
             if path.is_symlink():
                 warn(f"review resource is a symlink; not traversed: {path}")
@@ -488,7 +514,8 @@ def _inspect_residuals(
                 or record.run_id in terminal_runs
             ):
                 warn(
-                    f"retained {record.status.value} round worktree: {path}{suffix}"
+                    f"retained {record.status.value} round worktree: "
+                    f"{path}{suffix}"
                 )
             if path not in registered:
                 warn(f"unregistered review worktree or bundle: {path}{suffix}")
@@ -497,12 +524,6 @@ def _inspect_residuals(
                     f"review HEAD differs from recorded {record.head_oid}: "
                     f"{path}{suffix}"
                 )
-        # Probe leftovers have explicit names but are never garbage-collected here.
-        root = namespace.parent
-        if root.exists():
-            for path in sorted(root.iterdir()):
-                if path.name.startswith((".doctor-", ".preflight-")):
-                    warn(f"retained owned diagnostic evidence: {path}")
         if client is not None:
             agents = client.snapshot().get("agents")
             if not isinstance(agents, list):

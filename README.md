@@ -199,10 +199,6 @@ make test
 python -m unittest discover -s tests
 ```
 
-## License
-
-Agent Squad is licensed under the [Apache License 2.0](LICENSE).
-
 ## Diagnose local prerequisites
 
 Run `agent-squad doctor` from an initialized implementation worktree, or use
@@ -234,16 +230,29 @@ permitted output writing, `review-submit`, local marker visibility, independent
 result validation, and result-handoff visibility in Herdr history. The result
 handoff targets that temporary Reviewer itself. The preflight creates an
 unreferenced synthetic commit with the current committed tree and parent; no
-branch or active run is changed. Its output wait defaults to 120 seconds;
-individual Herdr calls also have their own bounded timeouts.
+branch or active run is changed. The synthetic commit can appear as dangling
+in `git fsck` until normal Git garbage collection expires it.
+Its output wait defaults to 120 seconds; individual Herdr calls also have
+their own bounded timeouts.
 
 Successful cleanup closes only the newly created Reviewer workspace after
 checking that its identity is unchanged and it still contains just the original
 pane and tab. Git then removes the owned detached worktree. On failure, doctor
 retains the temporary worktree and available session, reports the failed stage,
 and writes `diagnostic.json` and available Herdr history under the printed
-`.preflight-*` directory. Output permissions may prevent the Reviewer from
-writing a receipt; in that case the retained session/history provides the
+`.preflight-*` directory inside `<review-root>/<repository-id>/`.
+Output permissions may prevent the Reviewer from writing a receipt; in that
+case the retained session/history provides the
 permission error. Doctor reports retained preflight evidence on later runs,
-without deleting it. Tests exercise this workflow with fake Herdr processes and
-never launch real models.
+without deleting it, including a surviving Reviewer and a worktree registration
+whose directory has been removed. Other repositories' probes are not reported.
+For manual cleanup, inspect the evidence and the workspace's current contents
+before stopping the retained Reviewer. Preserve any needed evidence, then use
+`git worktree remove` for the reported worktree; inspect
+`git worktree prune --dry-run` before pruning
+registrations whose directories are already gone. Doctor never runs that cleanup
+for retained probes. Tests use fake Herdr processes and never launch real models.
+
+## License
+
+Agent Squad is licensed under the [Apache License 2.0](LICENSE).

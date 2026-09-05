@@ -1,4 +1,4 @@
-"""Owned live Reviewer capability proof using the real review-submit protocol."""
+"""Owned live Reviewer proof using the real review-submit protocol."""
 
 from __future__ import annotations
 
@@ -22,7 +22,12 @@ from .artifacts import (
 )
 from .doctor import git_output
 from .herdr import HerdrClient
-from .initialization import AgentSquadError, InitializedRepository
+from .initialization import (
+    AgentSquadError,
+    InitializedRepository,
+    REVIEW_DIRECTORY_NAME,
+)
+from .runs import repository_identity
 from .review_submissions import (
     load_marker_confirmed_review,
     submit_review_result,
@@ -40,7 +45,13 @@ def live_preflight(
 
     if timeout_seconds <= 0:
         raise AgentSquadError("live preflight timeout must be positive")
-    root = repository.configuration.review_worktree_root.resolve()
+    root = (
+        repository.configuration.review_worktree_root.resolve()
+        / repository_identity(repository.worktree).repository_id
+    )
+    if root.is_symlink():
+        raise AgentSquadError(f"diagnostic namespace is a symlink: {root}")
+    root.mkdir(parents=True, exist_ok=True)
     parent = Path(tempfile.mkdtemp(prefix=".preflight-", dir=root))
     run_id = str(uuid.uuid4())
     worktree = parent / run_id / "round-001"
@@ -97,7 +108,7 @@ def live_preflight(
             raise AgentSquadError(
                 "snapshot has no tracked regular file to read"
             )
-        bundle = worktree / ".agent-squad-review"
+        bundle = worktree / REVIEW_DIRECTORY_NAME
         bundle.mkdir(mode=0o700)
         (bundle / "input/context").mkdir(parents=True, mode=0o700)
         (bundle / "output").mkdir(mode=0o700)
@@ -110,9 +121,10 @@ def live_preflight(
         challenge = encode_json(
             {"nonce": str(uuid.uuid4()), "snapshot_file": snapshot_file}
         )
+        package_root = Path(__file__).resolve().parents[1]
         script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
+            f"sys.path.insert(0, {str(package_root)!r})\n"
             "from agent_squad.preflight import complete_probe\n"
             "complete_probe()\n"
         ).encode()
@@ -179,14 +191,17 @@ def live_preflight(
             review_worktree=worktree,
             allow_adoption=False,
             prompt=(
-                "Agent Squad live capability preflight. Read the local request at "
-                f"{bundle / 'input/request.json'} and its task, then run {command} "
-                f"from {worktree}. The owned helper reads a tracked snapshot file, "
-                "writes only permitted review outputs and local-state.json, and uses "
-                "review-submit to send a result handoff to this temporary session. "
-                "If any permission or command fails, report the exact error. "
-                "Do not edit project files or contact other agents. After the helper "
-                "finishes, stop; the self-addressed REVIEW_RESULT is diagnostic only."
+                "Agent Squad live capability preflight. "
+                "Read the local request at "
+                f"{bundle / 'input/request.json'} and its task, "
+                f"then run {command} from {worktree}. "
+                "The owned helper reads a tracked snapshot file, "
+                "writes only permitted review outputs and local-state.json, "
+                "and uses review-submit to send a result handoff to this "
+                "temporary session. If any permission or command fails, "
+                "report the exact error. Do not edit project files or "
+                "contact other agents. After the helper finishes, stop; "
+                "the self-addressed REVIEW_RESULT is diagnostic only."
             ),
         )
         manifest.update(
@@ -204,7 +219,8 @@ def live_preflight(
             )
             if agent.get("agent_status") == "blocked":
                 raise AgentSquadError(
-                    "temporary Reviewer is blocked on a permission or interactive prompt"
+                    "temporary Reviewer is blocked on a permission "
+                    "or interactive prompt"
                 )
             if time.monotonic() >= deadline:
                 raise AgentSquadError(
@@ -220,7 +236,7 @@ def live_preflight(
         sentinel_path = bundle / "output/sentinel.txt"
         if (
             sentinel_path.is_symlink()
-            or sentinel_path.read_text() != expected_sentinel
+            or sentinel_path.read_text(encoding="utf-8") != expected_sentinel
         ):
             raise AgentSquadError(
                 f"request/snapshot read sentinel differs: {sentinel_path}"
@@ -245,13 +261,14 @@ def live_preflight(
             or evidence.review.result_id not in history
         ):
             raise AgentSquadError(
-                "Herdr history does not expose the submitted result marker and result ID"
+                "Herdr history does not expose the submitted "
+                "result marker and result ID"
             )
         stage = "clean up owned preflight resources"
         client.close_preflight(
             session, name=name, kind=request.reviewer_kind, worktree=worktree
         )
-        # Full marker validation above verifies the snapshot and regular bundle.
+        # Marker validation above verifies the snapshot and regular bundle.
         # Remove only the owned bundle, then let Git refuse any other dirt.
         shutil.rmtree(bundle)
         git_output(
@@ -262,7 +279,8 @@ def live_preflight(
             (parent / filename).unlink()
         parent.rmdir()
         return (
-            "snapshot/request read, output write, review-submit, local marker, "
+            "snapshot/request read, output write, review-submit, "
+            "local marker, "
             "result inspection and Herdr handoff verified; "
             "owned resources removed"
         )
@@ -291,7 +309,7 @@ def live_preflight(
 def complete_probe() -> None:
     """Run inside the temporary Reviewer, through its actual permissions."""
 
-    bundle = Path.cwd() / ".agent-squad-review"
+    bundle = Path.cwd() / REVIEW_DIRECTORY_NAME
     receipt: dict[str, object]
     try:
         request_bytes = (bundle / "input/request.json").read_bytes()

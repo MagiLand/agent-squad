@@ -6,8 +6,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import sys
 import subprocess
+import sys
 
 METHODS = {
     "agent.get": "AgentTarget",
@@ -147,7 +147,8 @@ def main() -> int:
         return 0
     if arguments == ["agent", "start", "--help"]:
         print("Usage: start <NAME> --kind <KIND> --pane <ID>")
-        print("--kind <KIND> [possible values: " + os.environ.get("FAKE_HERDR_KINDS", "claude, codex") + "]")
+        kinds = os.environ.get("FAKE_HERDR_KINDS", "claude, codex")
+        print(f"--kind <KIND> [possible values: {kinds}]")
         return 0
     if arguments == ["agent", "prompt", "--help"]:
         print("Usage: prompt <TARGET> <TEXT>")
@@ -206,6 +207,8 @@ def main() -> int:
         if opened_path.is_file():
             existing = json.loads(opened_path.read_text(encoding="utf-8"))
             already_open = existing.get("path") == str(path)
+        # This fake manages one Reviewer workspace at a time. Ownership tests
+        # alter its recorded identity to exercise refusal without closing it.
         opened = {
             "path": str(path),
             "workspace_id": "w-test",
@@ -231,7 +234,9 @@ def main() -> int:
             "cwd": opened["path"],
             "workspace_id": opened["workspace_id"],
             "pane_id": opened["pane_id"],
-            "agent_status": os.environ.get("FAKE_HERDR_AGENT_STATUS", "working"),
+            "agent_status": os.environ.get(
+                "FAKE_HERDR_AGENT_STATUS", "working"
+            ),
         }
         agent_path.write_text(json.dumps(agent), encoding="utf-8")
         _success("agent_started", agent=agent, argv=arguments)
@@ -263,6 +268,7 @@ def main() -> int:
                     cwd=agent["cwd"],
                     capture_output=True,
                     text=True,
+                    timeout=30,
                 )
                 if result.returncode:
                     return _error("probe_failed", result.stderr)
@@ -272,6 +278,20 @@ def main() -> int:
                     (bundle / "local-state.json").unlink()
                 if mode == "history":
                     history_path.write_text("no handoff")
+                if mode in {"receipt-not-sent", "receipt-wrong-id"}:
+                    receipt_path = bundle / "output/preflight-receipt.json"
+                    receipt = json.loads(receipt_path.read_text())
+                    if mode == "receipt-not-sent":
+                        receipt["notification_sent"] = False
+                    else:
+                        receipt["result_id"] = "foreign-result"
+                    receipt_path.write_text(json.dumps(receipt))
+                if mode == "request":
+                    request_path = bundle / "input/request.json"
+                    request = json.loads(request_path.read_text())
+                    request["created_at"] = "2020-01-01T00:00:00Z"
+                    request_path.chmod(0o600)
+                    request_path.write_text(json.dumps(request))
         _success("agent_prompted", agent=agent)
         return 0
     return _error(
@@ -297,12 +317,15 @@ def _snapshot(root: Path) -> dict[str, object]:
                 "tab_count": 1,
             }
         )
-    return {
+    snapshot = {
         "version": "test-0.8.2",
         "protocol": 20,
         "agents": agents,
         "workspaces": workspaces,
     }
+    if os.environ.get("FAKE_HERDR_NO_WORKSPACES") == "1":
+        snapshot.pop("workspaces")
+    return snapshot
 
 
 def _option(arguments: list[str], name: str) -> str:
