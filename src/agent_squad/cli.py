@@ -14,6 +14,7 @@ from .artifacts import (
     RoundStatus,
     SubmissionMode,
 )
+from .doctor import diagnose
 from .handoffs import HandoffRecoveryAction, retry_handoff
 from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import (
@@ -63,6 +64,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     commands = parser.add_subparsers(dest="command", required=True)
+    doctor_parser = commands.add_parser(
+        "doctor",
+        help="diagnose prerequisites and orphaned review resources",
+    )
+    doctor_parser.add_argument(
+        "--live-reviewer",
+        action="store_true",
+        help=(
+            "launch an owned temporary Reviewer to prove permissions "
+            "and submission"
+        ),
+    )
+    doctor_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="live Reviewer output timeout (default: 120)",
+    )
+    doctor_parser.set_defaults(handler=_run_doctor)
     init_parser = commands.add_parser(
         "init",
         help="initialize Agent Squad in the current Git worktree",
@@ -299,6 +320,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     complete_parser.set_defaults(handler=_run_complete)
     return parser
+
+
+def _run_doctor(arguments: argparse.Namespace) -> int:
+    report = diagnose(
+        _invocation_directory(),
+        live_reviewer=arguments.live_reviewer,
+        timeout_seconds=arguments.timeout,
+    )
+    for item in report.diagnostics:
+        print(f"{item.severity.upper()}: {item.check}: {item.detail}")
+    return 0 if report.ok else 1
 
 
 def _run_init(_arguments: argparse.Namespace) -> int:

@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
-
+import subprocess
 
 METHODS = {
     "agent.get": "AgentTarget",
@@ -15,6 +15,7 @@ METHODS = {
     "agent.read": "AgentReadParams",
     "agent.start": "AgentStartParams",
     "worktree.open": "WorktreeOpenParams",
+    "workspace.close": "WorkspaceTarget",
 }
 RESULT_TYPES = [
     "agent_info",
@@ -23,11 +24,13 @@ RESULT_TYPES = [
     "agent_view",
     "session_snapshot",
     "worktree_opened",
+    "ok",
 ]
 PARAMETER_FIELDS = {
     "AgentTarget": ["target"],
     "AgentPromptParams": ["target", "text"],
-    "AgentReadParams": ["target", "source"],
+    "AgentReadParams": ["target", "source", "lines", "format"],
+    "WorkspaceTarget": ["workspace_id"],
     "AgentStartParams": ["name", "kind", "pane_id", "args"],
     "WorktreeOpenParams": ["path", "label", "focus"],
 }
@@ -52,9 +55,7 @@ def main() -> int:
             event["request_id_at_prompt"] = (
                 state.get("active_round") or {}
             ).get("request_id")
-        marker_path = (
-            Path.cwd() / ".agent-squad-review/local-state.json"
-        )
+        marker_path = Path.cwd() / ".agent-squad-review/local-state.json"
         if marker_path.is_file():
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             event["review_marker_at_prompt"] = marker
@@ -122,7 +123,7 @@ def main() -> int:
     if arguments == ["api", "snapshot"]:
         _success(
             "session_snapshot",
-            snapshot={"version": "test-0.8.2", "protocol": 20},
+            snapshot=_snapshot(state_root),
         )
         return 0
     if arguments == ["integration", "status"]:
@@ -131,11 +132,22 @@ def main() -> int:
             status = "stale (test)" if kind == stale_kind else "current (test)"
             print(f"{kind}: {status}")
         return 0
+    if arguments == ["workspace", "close", "--help"]:
+        print("Usage: workspace close <workspace_id>")
+        return 0
+    if arguments[:2] == ["workspace", "close"]:
+        if os.environ.get("FAKE_HERDR_FAIL_CLOSE") == "1":
+            return _error("close_failed", "injected workspace close failure")
+        (state_root / "agent.json").unlink(missing_ok=True)
+        (state_root / "opened.json").unlink(missing_ok=True)
+        _success("ok")
+        return 0
     if arguments == ["agent", "--help"]:
         print("Commands: list get start prompt")
         return 0
     if arguments == ["agent", "start", "--help"]:
         print("Usage: start <NAME> --kind <KIND> --pane <ID>")
+        print("--kind <KIND> [possible values: " + os.environ.get("FAKE_HERDR_KINDS", "claude, codex") + "]")
         return 0
     if arguments == ["agent", "prompt", "--help"]:
         print("Usage: prompt <TARGET> <TEXT>")
@@ -159,9 +171,11 @@ def main() -> int:
     agent_path = state_root / "agent.json"
     opened_path = state_root / "opened.json"
     if arguments[:2] == ["agent", "get"]:
-        if not agent_path.is_file():
-            return _error("agent_not_found", "fake Reviewer not found")
-        reviewer = json.loads(agent_path.read_text(encoding="utf-8"))
+        reviewer = (
+            json.loads(agent_path.read_text(encoding="utf-8"))
+            if agent_path.is_file()
+            else {}
+        )
         if (
             os.environ.get("FAKE_HERDR_AGENT_GONE") == "1"
             and reviewer.get("name") == arguments[2]
@@ -217,6 +231,7 @@ def main() -> int:
             "cwd": opened["path"],
             "workspace_id": opened["workspace_id"],
             "pane_id": opened["pane_id"],
+            "agent_status": os.environ.get("FAKE_HERDR_AGENT_STATUS", "working"),
         }
         agent_path.write_text(json.dumps(agent), encoding="utf-8")
         _success("agent_started", agent=agent, argv=arguments)
@@ -232,6 +247,31 @@ def main() -> int:
         with history_path.open("a", encoding="utf-8") as history:
             history.write(arguments[3])
             history.write("\n")
+        if arguments[3].startswith("Agent Squad live capability preflight."):
+            mode = os.environ.get("FAKE_HERDR_PREFLIGHT", "success")
+            bundle = Path(agent["cwd"]) / ".agent-squad-review"
+            if mode == "permission":
+                (bundle / "output/preflight-receipt.json").write_text(
+                    json.dumps(
+                        {"error": "permission denied: local-state.json"}
+                    )
+                )
+            elif mode != "timeout":
+                script = bundle / "input/context/probe.py"
+                result = subprocess.run(
+                    [sys.executable, str(script)],
+                    cwd=agent["cwd"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode:
+                    return _error("probe_failed", result.stderr)
+                if mode == "sentinel":
+                    (bundle / "output/sentinel.txt").write_text("wrong")
+                if mode == "marker":
+                    (bundle / "local-state.json").unlink()
+                if mode == "history":
+                    history_path.write_text("no handoff")
         _success("agent_prompted", agent=agent)
         return 0
     return _error(
@@ -239,6 +279,30 @@ def main() -> int:
         f"unsupported fake Herdr command: {arguments!r}",
         status=2,
     )
+
+
+def _snapshot(root: Path) -> dict[str, object]:
+    agents = json.loads(os.environ.get("FAKE_HERDR_EXTRA_AGENTS", "[]"))
+    workspaces = []
+    agent_path = root / "agent.json"
+    if agent_path.is_file():
+        agent = json.loads(agent_path.read_text())
+        agents.append(agent)
+        workspaces.append(
+            {
+                "workspace_id": agent["workspace_id"],
+                "pane_count": int(
+                    os.environ.get("FAKE_HERDR_PANE_COUNT", "1")
+                ),
+                "tab_count": 1,
+            }
+        )
+    return {
+        "version": "test-0.8.2",
+        "protocol": 20,
+        "agents": agents,
+        "workspaces": workspaces,
+    }
 
 
 def _option(arguments: list[str], name: str) -> str:

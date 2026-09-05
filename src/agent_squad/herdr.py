@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -98,6 +99,8 @@ class HerdrClient:
         agent_kind: AgentKind,
         *,
         role: str,
+        diagnostics: bool = False,
+        live: bool = False,
     ) -> HerdrInstallation:
         """Validate schema, live protocol, commands, and agent integration."""
 
@@ -121,9 +124,25 @@ class HerdrClient:
         if type(protocol) is not int or protocol < 1:
             raise HerdrError("Herdr API schema has no valid protocol number")
         self._validate_schema_contract(schema)
+        if diagnostics:
+            self._validate_diagnostic_schema(schema, live=live)
 
         for arguments, expected_fragments in self._HELP_CHECKS:
             output = self._run(arguments).stdout
+            if diagnostics and arguments == ("agent", "start", "--help"):
+                kinds = re.search(
+                    r"--kind\b.*?\[possible values:\s*([^]]+)\]",
+                    output, re.DOTALL,
+                )
+                supported = (
+                    {value.strip() for value in kinds.group(1).split(",")}
+                    if kinds else set()
+                )
+                if agent_kind.value not in supported:
+                    raise HerdrError(
+                        f"installed Herdr does not advertise {role} kind "
+                        f"{agent_kind.value!r} in agent start help"
+                    )
             absent = [
                 fragment
                 for fragment in expected_fragments
@@ -275,6 +294,137 @@ class HerdrClient:
                 f"contracts: {', '.join(missing_results)}"
             )
 
+    def _validate_diagnostic_schema(
+        self,
+        schema: dict[str, object],
+        *,
+        live: bool,
+    ) -> None:
+        """Require history for doctor while recovery keeps it optional."""
+
+        methods = {**self._REQUIRED_METHODS, "agent.read": "AgentReadParams"}
+        fields = {
+            **self._REQUIRED_PARAMETER_FIELDS,
+            "AgentReadParams": {"target", "source", "lines", "format"},
+        }
+        results = self._REQUIRED_RESULTS | {"agent_view"}
+        if live:
+            methods["workspace.close"] = "WorkspaceTarget"
+            fields["WorkspaceTarget"] = {"workspace_id"}
+            results |= {"ok"}
+        # A separate contract preserves optional history in normal delivery.
+        validator = HerdrClient(self._working_directory)
+        validator._REQUIRED_METHODS = methods
+        validator._REQUIRED_PARAMETER_FIELDS = fields
+        validator._REQUIRED_RESULTS = results
+        validator._validate_schema_contract(schema)
+        output = self._run(("agent", "read", "--help")).stdout
+        for fragment in ("--source", "--lines", "--format"):
+            if fragment not in output:
+                raise HerdrError(f"herdr agent read lacks {fragment}")
+        if live:
+            self._run(("workspace", "close", "--help"))
+
+    def inspect_agent(
+        self,
+        name: str,
+        kind: AgentKind,
+        *,
+        role: str,
+        worktree: Path | None = None,
+    ) -> dict[str, object]:
+        """Read and validate one configured agent without prompting it."""
+
+        agent = self._get_agent(name, role=role)
+        if agent is None:
+            raise HerdrError(f"{role} {name!r} is not available")
+        self._validate_agent_identity(
+            agent,
+            expected_name=name,
+            expected_kind=kind,
+            role=role,
+        )
+        if worktree is not None:
+            cwd = _required_path(agent.get("cwd"), f"{role} cwd")
+            if cwd != worktree.resolve(strict=True):
+                raise HerdrError(
+                    f"{role} {name!r} is in {cwd}, expected {worktree}"
+                )
+        return agent
+
+    def read_history(self, name: str) -> str:
+        """Read history, preserving exact operational failures for doctor."""
+
+        return self._run(
+            (
+                "agent",
+                "read",
+                name,
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "1000",
+                "--format",
+                "text",
+            )
+        ).stdout
+
+    def snapshot(self) -> dict[str, object]:
+        """Read the installed session's resource inventory."""
+
+        result = self._response_result(
+            self._run(("api", "snapshot")),
+            expected_type="session_snapshot",
+        )
+        value = result.get("snapshot")
+        if not isinstance(value, dict):
+            raise HerdrError("Herdr snapshot has no snapshot object")
+        return value
+
+    def close_preflight(
+        self,
+        session: ReviewerSession,
+        *,
+        name: str,
+        kind: AgentKind,
+        worktree: Path,
+    ) -> None:
+        """Close only a newly created, still isolated preflight workspace."""
+
+        if session.adopted:
+            raise HerdrError("refusing to close an adopted preflight session")
+        agent = self.inspect_agent(
+            name, kind, role="Reviewer", worktree=worktree
+        )
+        if (agent.get("pane_id"), agent.get("workspace_id")) != (
+            session.pane_id,
+            session.workspace_id,
+        ):
+            raise HerdrError(
+                "preflight Reviewer moved; retaining its resources"
+            )
+        snapshot = self.snapshot()
+        workspaces = snapshot.get("workspaces")
+        if not isinstance(workspaces, list):
+            raise HerdrError("cannot verify preflight workspace ownership")
+        workspace = next(
+            (
+                item
+                for item in workspaces
+                if isinstance(item, dict)
+                and item.get("workspace_id") == session.workspace_id
+            ),
+            {},
+        )
+        if workspace.get("pane_count") != 1 or workspace.get("tab_count") != 1:
+            raise HerdrError(
+                "preflight workspace is no longer isolated; retaining it"
+            )
+        self._response_result(
+            self._run(("workspace", "close", session.workspace_id)),
+            expected_type="ok",
+        )
+
     def dispatch_review_request(
         self,
         *,
@@ -283,11 +433,14 @@ class HerdrClient:
         start_args: tuple[str, ...],
         review_worktree: Path,
         prompt: str,
+        allow_adoption: bool = True,
     ) -> ReviewerSession:
         """Adopt or launch the deterministic Reviewer and send its prompt."""
 
         existing = self._get_agent(reviewer_name)
         if existing is not None:
+            if not allow_adoption:
+                raise HerdrError("preflight Reviewer name already exists")
             self._validate_agent(
                 existing,
                 reviewer_name=reviewer_name,
@@ -318,6 +471,10 @@ class HerdrClient:
                 ),
                 expected_type="worktree_opened",
             )
+            if not allow_adoption and opened.get("already_open") is not False:
+                raise HerdrError(
+                    "preflight worktree was already open; retaining it"
+                )
             worktree_value = opened.get("worktree")
             pane_value = opened.get("root_pane")
             workspace_value = opened.get("workspace")
