@@ -228,7 +228,9 @@ def _prepare_submission_locked(
         raise SubmissionError(
             "there is no active run; run agent-squad start before submit"
         )
-    if active.phase not in {runs.RunPhase.IMPLEMENTING, runs.RunPhase.APPROVED}:
+    if active.phase not in {
+        runs.RunPhase.IMPLEMENTING, runs.RunPhase.APPROVED,
+    }:
         raise SubmissionError(
             f"run {active.run_id} is in phase {active.phase.value}; "
             "submit is allowed only while implementing or approved"
@@ -426,9 +428,13 @@ def _prepare_submission_locked(
             ),
         )
     elif previous.review.verdict is ReviewVerdict.APPROVED:
-        if mode is not SubmissionMode.NEW_REVISION or response_path is not None:
+        if (
+            mode is not SubmissionMode.NEW_REVISION
+            or response_path is not None
+        ):
             raise SubmissionError(
-                "submission after approved requires new_revision without --response"
+                "submission after approved requires new_revision "
+                "without --response"
             )
         previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
         previous_response_path = None

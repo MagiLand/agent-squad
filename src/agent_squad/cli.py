@@ -280,7 +280,12 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_parser = commands.add_parser(
         "cancel", help="cancel the active run and preserve its evidence",
     )
-    cancel_parser.add_argument("--reason", required=True)
+    cancel_parser.add_argument(
+        "--reason",
+        required=True,
+        metavar="TEXT",
+        help="record why the active run is being cancelled",
+    )
     cancel_parser.set_defaults(handler=_run_cancel)
 
     complete_parser = commands.add_parser(

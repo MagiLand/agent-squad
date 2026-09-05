@@ -865,7 +865,16 @@ class ReviewSubmitCommandTests(unittest.TestCase):
                 previous_response_path=None,
             )
             wrong_mode_review["head_oid"] = wrong_mode_request.head_oid
+            approved_mode_request, approved_mode_review = candidate(
+                "approved", mode="reconsideration",
+                previous_response_path=None,
+            )
+            approved_mode_review["head_oid"] = approved_mode_request.head_oid
             cases = (
+                (
+                    (approved_mode_request, approved_mode_review),
+                    "request after approved must use new_revision",
+                ),
                 (
                     candidate(
                         "changes_requested",
@@ -938,8 +947,8 @@ class ReviewSubmitCommandTests(unittest.TestCase):
 
             self.assertEqual(submitted.returncode, 1)
             self.assertIn(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD",
+                "a new_revision submission requires a new committed HEAD "
+                "different from the previously reviewed revision",
                 submitted.stderr,
             )
             self.assertFalse((prepared.bundle / "local-state.json").exists())
