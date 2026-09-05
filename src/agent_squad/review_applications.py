@@ -248,6 +248,202 @@ def apply_review(
         ) from error
 
 
+@dataclass(frozen=True)
+class CancelRunResult:
+    """Durable cancellation outcome, including best-effort resource release."""
+
+    run_id: str
+    already_cancelled: bool
+    cleanup_warnings: tuple[str, ...]
+
+
+def cancel_run(
+    start: Path,
+    *,
+    reason: str,
+    herdr_client: HerdrClient | None = None,
+) -> CancelRunResult:
+    """Cancel a nonterminal run without discarding its authority history."""
+
+    repository = load_initialized_repository(start)
+    cause = _supersede_cause(reason, command="cancel")
+    try:
+        with exclusive_file_lock(
+            repository.control_root / runs.LOCK_FILE_NAME
+        ):
+            return _cancel_run_locked(repository, cause, herdr_client)
+    except OSError as error:
+        raise ReviewApplicationError(
+            f"could not cancel the run: {error}"
+        ) from error
+
+
+def _cancel_run_locked(
+    repository: InitializedRepository,
+    cause: str,
+    herdr_client: HerdrClient | None,
+) -> CancelRunResult:
+    try:
+        terminal = runs.load_cancelled_run(repository)
+    except runs.RunStateError as error:
+        raise ReviewApplicationError(str(error)) from error
+    if terminal is not None:
+        return CancelRunResult(
+            run_id=terminal.run_id,
+            already_cancelled=True,
+            cleanup_warnings=(),
+        )
+
+    active = runs.inspect_status_locked(
+        repository.worktree.invocation_directory,
+        validate_live_review_bundle=False,
+    ).active_run
+    if active is None:
+        raise ReviewApplicationError("there is no active run to cancel")
+    _validate_implementation_identity(repository, active)
+    run_directory = runs.safe_run_directory(
+        repository.control_root, active.run_id
+    )
+    run_path = run_directory / runs.RUN_RECORD_FILE_NAME
+    event_path = run_directory / runs.EVENT_LOG_FILE_NAME
+    run_record = runs.load_json_object(run_path, "run record")
+    state_path = repository.control_root / runs.STATE_FILE_NAME
+    state = runs.load_json_object(state_path, "authoritative state")
+    timestamp = utc_timestamp()
+    next_state = copy.deepcopy(state)
+    next_state.update(
+        updated_at=timestamp,
+        active_run_id=None,
+        terminal_run_id=active.run_id,
+        phase=runs.RunPhase.CANCELLED.value,
+        approved_head_oid=None,
+        active_escalation_id=None,
+    )
+    next_run = copy.deepcopy(run_record)
+    next_run.update(phase=runs.RunPhase.CANCELLED.value, finished_at=timestamp)
+    records: list[_StagedRecord] = []
+    closed_round: ReviewRoundRecord | None = None
+    round_directory = run_directory / "rounds" / f"{active.current_round:03d}"
+    if active.phase is runs.RunPhase.REVIEWING:
+        round_path = round_directory / "round.json"
+        round_record = ReviewRoundRecord.from_dict(
+            runs.load_json_object(round_path, "active round"),
+            label="active round",
+        )
+        _assert_round_is_active(round_record, active)
+        closed_round = replace(
+            round_record,
+            updated_at=timestamp,
+            status=RoundStatus.SUPERSEDED,
+            supersession=ReviewSupersession(
+                created_at=timestamp,
+                actor=active.implementer_agent,
+                cause=f"run_cancelled: {cause}",
+            ),
+        )
+        if active.active_round is None:
+            raise ReviewApplicationError(
+                "reviewing state lost its active round during cancellation"
+            )
+        next_state["active_round"] = replace(
+            active.active_round, status=RoundStatus.SUPERSEDED
+        ).to_dict()
+        records.append(_StagedRecord(
+            path=round_path,
+            original=round_path.read_bytes(),
+            staged=encode_json(closed_round.to_dict()),
+        ))
+    original_events, staged_events = _stage_event_log(
+        event_path,
+        {
+            "timestamp": timestamp,
+            "event": "run_cancelled",
+            "run_id": active.run_id,
+            "round": active.current_round,
+            "previous_phase": active.phase.value,
+            "actor": active.implementer_agent,
+            "cause": cause,
+        },
+        identity_fields=("event", "run_id"),
+    )
+    records.extend((
+        _StagedRecord(
+            path=run_path,
+            original=run_path.read_bytes(),
+            staged=encode_json(next_run),
+        ),
+        _StagedRecord(
+            path=event_path,
+            original=original_events,
+            staged=staged_events,
+        ),
+    ))
+    _persist_authoritative_transition(
+        records=tuple(records),
+        state_path=state_path,
+        original_state=state_path.read_bytes(),
+        next_state=encode_json(next_state),
+        failure_message="could not persist cancellation",
+    )
+    warnings: list[str] = []
+    if closed_round is not None:
+        if active.active_round is None:
+            raise ReviewApplicationError(
+                "reviewing state lost its active round during cancellation"
+            )
+        client = herdr_client or HerdrClient(repository.worktree.root)
+        try:
+            client.discover(active.reviewer_kind, role="Reviewer")
+            sent = client.dispatch_reviewer_notice(
+                reviewer_name=active.active_round.reviewer_name,
+                reviewer_kind=active.reviewer_kind,
+                review_worktree=active.active_round.review_worktree,
+                prompt=_run_cancelled_prompt(
+                    run_id=active.run_id,
+                    round_number=active.current_round,
+                    cause=cause,
+                ),
+            )
+            if not sent:
+                warnings.append(
+                    "Reviewer cancellation notice could not be delivered"
+                )
+        except HerdrError as error:
+            warnings.append(
+                "Reviewer cancellation notice failed: "
+                f"{format_herdr_error(str(error))}"
+            )
+    try:
+        if closed_round is not None:
+            _, cleanup = _cleanup_superseded_review_resources(
+                repository, active=active, round_directory=round_directory,
+                round_record=closed_round,
+            )
+            warnings.extend(cleanup)
+        elif active.active_round is not None:
+            if active.active_round.status is RoundStatus.SUPERSEDED:
+                round_record = ReviewRoundRecord.from_dict(
+                    runs.load_json_object(
+                        round_directory / "round.json", "closed round"
+                    ),
+                    label="closed round",
+                )
+                _, cleanup = _cleanup_superseded_review_resources(
+                    repository, active=active, round_directory=round_directory,
+                    round_record=round_record,
+                )
+                warnings.extend(cleanup)
+            else:
+                warnings.extend(_cleanup_review_resources(repository, active))
+    except (AgentSquadError, OSError) as error:
+        warnings.append(f"run cancelled, but review cleanup failed: {error}")
+    return CancelRunResult(
+        run_id=active.run_id,
+        already_cancelled=False,
+        cleanup_warnings=tuple(warnings),
+    )
+
+
 def complete_run(start: Path) -> CompleteRunResult:
     """Complete and release one run at its exact approved revision."""
 
@@ -2211,7 +2407,10 @@ def _complete_run_locked(
             f"recorded: {error}"
         )
 
-    warnings.extend(_cleanup_review_resources(repository, active))
+    try:
+        warnings.extend(_cleanup_review_resources(repository, active))
+    except (AgentSquadError, OSError) as error:
+        warnings.append(f"run completed, but review cleanup failed: {error}")
     return CompleteRunResult(
         run_id=active.run_id,
         head_oid=current_head,
@@ -3306,16 +3505,32 @@ def _remove_empty_directory(path: Path) -> None:
         pass
 
 
-def _supersede_cause(value: str) -> str:
+def _supersede_cause(value: str, *, command: str = "supersede") -> str:
     if not isinstance(value, str) or not value.strip():
         raise ReviewApplicationError(
-            "supersede --reason must contain non-whitespace text"
+            f"{command} --reason must contain non-whitespace text"
         )
     if "\x00" in value or "\n" in value or "\r" in value:
         raise ReviewApplicationError(
-            "supersede --reason must be a single line without null bytes"
+            f"{command} --reason must be a single line without null bytes"
         )
     return value.strip()
+
+
+def _run_cancelled_prompt(
+    *,
+    run_id: str,
+    round_number: int,
+    cause: str,
+) -> str:
+    return (
+        "AGENT_SQUAD/0.4.4 RUN_CANCELLED\n\n"
+        f"run_id: {run_id}\n"
+        f"round: {round_number}\n"
+        f"reason: {cause}\n\n"
+        "The Agent Squad run has been cancelled.\n"
+        "Do not continue or submit a current review result."
+    )
 
 
 def _review_superseded_prompt(

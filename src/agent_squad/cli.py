@@ -19,6 +19,7 @@ from .initialization import AgentKind, AgentSquadError, initialize_repository
 from .review_applications import (
     apply_review,
     complete_run,
+    cancel_run,
     escalate_run,
     resume_run,
     supersede_review,
@@ -275,6 +276,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="positive number of additional review rounds to grant",
     )
     resume_parser.set_defaults(handler=_run_resume)
+
+    cancel_parser = commands.add_parser(
+        "cancel", help="cancel the active run and preserve its evidence",
+    )
+    cancel_parser.add_argument(
+        "--reason",
+        required=True,
+        metavar="TEXT",
+        help="record why the active run is being cancelled",
+    )
+    cancel_parser.set_defaults(handler=_run_cancel)
 
     complete_parser = commands.add_parser(
         "complete",
@@ -687,6 +699,15 @@ def _report_handoff_failure(
     )
     print(f"Next action: {RETRY_HANDOFF_NEXT_ACTION}")
     return 1
+
+
+def _run_cancel(arguments: argparse.Namespace) -> int:
+    result = cancel_run(_invocation_directory(), reason=arguments.reason)
+    status = "already cancelled" if result.already_cancelled else "cancelled"
+    print(f"Agent Squad run {result.run_id} is {status}")
+    for warning in result.cleanup_warnings:
+        print(f"agent-squad: warning: {warning}", file=sys.stderr)
+    return 0
 
 
 def _run_complete(_arguments: argparse.Namespace) -> int:

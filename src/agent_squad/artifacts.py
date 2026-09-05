@@ -1290,8 +1290,8 @@ def validate_followup_submission_head(
             return
         if head_oid == previous_reviewed_head_oid:
             raise ArtifactValidationError(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD"
+                "a new_revision submission requires a new committed HEAD "
+                "different from the previously reviewed revision"
             )
         return
     if head_oid != previous_reviewed_head_oid:

@@ -453,6 +453,15 @@ class RepositoryStatus:
 
 
 @dataclass(frozen=True)
+class TerminalRunStatus:
+    """Validated metadata shared by terminal run replays."""
+
+    run_id: str
+    run_directory: Path
+    finished_at: str
+
+
+@dataclass(frozen=True)
 class CompletedRunStatus:
     """Validated authority needed to replay one completed run."""
 
@@ -552,17 +561,20 @@ def inspect_status_locked(
     )
 
 
-def load_completed_run(
+def _load_terminal_run(
     repository: InitializedRepository,
-) -> CompletedRunStatus | None:
-    """Load and validate terminal completion authority, when present."""
+    phase: RunPhase,
+) -> tuple[TerminalRunStatus, dict[str, object], _ValidatedRunRecord] | None:
+    """Validate shared terminal metadata and repository identity."""
 
     state_path = repository.control_root / STATE_FILE_NAME
     state = _load_existing_state(state_path)
-    if state is None or state.get("active_run_id") is not None:
+    if state is None or state.get("phase") != phase.value:
         return None
-    if state.get("phase") != RunPhase.COMPLETED.value:
-        return None
+    if state.get("active_run_id") is not None:
+        raise RunStateError(
+            f"{phase.value} state still occupies the active-run slot"
+        )
     _check_fields(
         state,
         required={
@@ -584,26 +596,26 @@ def load_completed_run(
             "handoff",
             "terminal_run_id",
         },
-        path="completed state",
+        path=f"{phase.value} state",
     )
-    _require_timestamp(state["updated_at"], "completed state.updated_at")
+    _require_timestamp(state["updated_at"], f"{phase.value} state.updated_at")
     run_id = _require_uuid(
         state["terminal_run_id"],
-        "completed state.terminal_run_id",
+        f"{phase.value} state.terminal_run_id",
     )
     run_directory = safe_run_directory(repository.control_root, run_id)
     run_data = load_json_object(
         run_directory / RUN_RECORD_FILE_NAME,
-        "completed run record",
+        f"{phase.value} run record",
     )
     record = _validate_run_record(run_data, run_directory, run_id)
-    if record.phase is not RunPhase.COMPLETED:
+    if record.phase is not phase:
         raise RunStateError(
-            "completed state does not match its terminal run record"
+            f"{phase.value} state does not match its terminal run record"
         )
     finished_at = _require_timestamp(
         run_data["finished_at"],
-        "completed run record.finished_at",
+        f"{phase.value} run record.finished_at",
     )
     identity_values = (
         (
@@ -649,6 +661,45 @@ def load_completed_run(
         label="base OID",
     )
 
+    return (
+        TerminalRunStatus(
+            run_id=run_id,
+            run_directory=run_directory,
+            finished_at=finished_at,
+        ),
+        state,
+        record,
+    )
+
+
+def load_cancelled_run(
+    repository: InitializedRepository,
+) -> TerminalRunStatus | None:
+    """Load cancellation metadata without restoring any active authority."""
+
+    loaded = _load_terminal_run(repository, RunPhase.CANCELLED)
+    if loaded is None:
+        return None
+    terminal, state, _ = loaded
+    if state["approved_head_oid"] is not None:
+        raise RunStateError("cancelled state must clear approval authority")
+    if state["active_escalation_id"] is not None:
+        raise RunStateError("cancelled state must clear its active escalation")
+    return terminal
+
+
+def load_completed_run(
+    repository: InitializedRepository,
+) -> CompletedRunStatus | None:
+    """Load and validate terminal completion authority, when present."""
+
+    loaded = _load_terminal_run(repository, RunPhase.COMPLETED)
+    if loaded is None:
+        return None
+    terminal, state, record = loaded
+    run_id = terminal.run_id
+    run_directory = terminal.run_directory
+    finished_at = terminal.finished_at
     round_number = _require_nonnegative_int(
         state["current_round"],
         "completed state.current_round",
@@ -1768,11 +1819,12 @@ def _validate_active_review_artifacts(
             if previous.round_record.verdict not in {
                 ReviewVerdict.CHANGES_REQUESTED,
                 ReviewVerdict.NEEDS_HUMAN,
+                ReviewVerdict.APPROVED,
             }:
                 raise RunStateError(
                     "a correction-round request must follow the most recent "
-                    "applied changes_requested result or a resolved "
-                    "needs_human result"
+                    "applied changes_requested, resolved needs_human, or "
+                    "approved result"
                 )
             recovery_head_oid = (
                 preceding_round.head_oid if recovering else None
@@ -1807,6 +1859,11 @@ def _validate_active_review_artifacts(
             if request.mode is not SubmissionMode.NEW_REVISION:
                 raise RunStateError(
                     "a request after needs_human must use new_revision"
+                )
+        elif previous.review.verdict is ReviewVerdict.APPROVED:
+            if request.mode is not SubmissionMode.NEW_REVISION:
+                raise RunStateError(
+                    "a request after approved must use new_revision"
                 )
         else:
             raise RunStateError(

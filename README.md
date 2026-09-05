@@ -131,7 +131,7 @@ agent-squad resume \
 
 After resolving an escalation-time response, you may reuse it unchanged if its dispositions already permit submission. Otherwise, submit a complete replacement with a new `response_id`, `supersedes_response_id` identifying the earlier response, and `resolution_ids` including the resolution linked to that escalation. Change each former `needs_human` disposition to `fixed` or evidence-backed `rejected`, and explain how it follows the Developer decision. Successful submission preserves the earlier response under `diagnostics/replaced-responses/<response-id>.json` in the reviewed round and includes the replacement and resolutions in the fresh review bundle. A failed pre-commit attempt remains correctable; once a new round references the response, only identical content may be reused.
 
-A Developer resolution must settle the captured task rather than silently rewrite it. If the decision materially changes the objective or acceptance criteria, the protocol requires cancelling and restarting with a new task snapshot. Cancellation is not available in this increment. Likewise, an escalation raised after approval can be recorded and resolved, but the resumed run cannot yet submit a new revision. Issue #14 owns both lifecycle transitions; until it lands, post-approval escalation preserves the decision record but is not a continuation path.
+A Developer resolution must settle the captured task rather than silently rewrite it. If the decision materially changes the objective or acceptance criteria, the protocol requires cancelling and restarting with a new task snapshot. Cancel the run with `agent-squad cancel --reason <text>` (see below). An escalation raised after approval clears current approval authority; after the Developer resolves it, the resumed run continues by submitting a changed committed candidate with `--mode new_revision`.
 
 ## Apply a review, correct findings, and complete
 
@@ -172,6 +172,23 @@ agent-squad complete
 ```
 
 Completion preserves the run and round history, releases the active-run slot, and removes only validated disposable review resources. It never merges, pushes, deploys, or deletes a development branch.
+
+After approval, a changed committed candidate can enter a fresh review with
+`submit --mode new_revision --report <report.md>`. The new round clears current
+approval authority; the earlier approval remains in run history. An unchanged
+approved head cannot be submitted again.
+
+Cancel any active run with:
+
+```bash
+agent-squad cancel --reason "Developer stopped this task"
+```
+
+Cancellation records the actor and reason, clears approval and active escalation
+references, and releases the active-run slot. A reviewing round becomes
+superseded before the terminal state is committed. Reviewer notification and
+owned-resource cleanup are best effort; failures leave cancellation in effect.
+Run evidence is preserved, repeated cancellation is safe, and a new run may start.
 
 ## Development
 

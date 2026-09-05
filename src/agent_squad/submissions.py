@@ -228,10 +228,12 @@ def _prepare_submission_locked(
         raise SubmissionError(
             "there is no active run; run agent-squad start before submit"
         )
-    if active.phase is not runs.RunPhase.IMPLEMENTING:
+    if active.phase not in {
+        runs.RunPhase.IMPLEMENTING, runs.RunPhase.APPROVED,
+    }:
         raise SubmissionError(
             f"run {active.run_id} is in phase {active.phase.value}; "
-            "submit is allowed only while implementing"
+            "submit is allowed only while implementing or approved"
         )
     is_first_round = active.current_round == 0
     if is_first_round and (
@@ -272,6 +274,16 @@ def _prepare_submission_locked(
         active.base_oid,
         head_oid,
     )
+
+    if active.phase is runs.RunPhase.APPROVED:
+        if mode is not SubmissionMode.NEW_REVISION:
+            raise SubmissionError(
+                "submission from approved must use new_revision"
+            )
+        if head_oid == active.approved_head_oid:
+            raise SubmissionError(
+                "submission from approved requires a different HEAD"
+            )
 
     run_directory = runs.safe_run_directory(
         repository.control_root,
@@ -415,6 +427,24 @@ def _prepare_submission_locked(
                 implementation_response.content,
             ),
         )
+    elif previous.review.verdict is ReviewVerdict.APPROVED:
+        if (
+            mode is not SubmissionMode.NEW_REVISION
+            or response_path is not None
+        ):
+            raise SubmissionError(
+                "submission after approved requires new_revision "
+                "without --response"
+            )
+        previous_review_path = PREVIOUS_REVIEW_BUNDLE_PATH
+        previous_response_path = None
+        additional_bundle_contents = ((
+            BundleArtifact(
+                path=previous_review_path,
+                sha256=hashlib.sha256(previous.review_bytes).hexdigest(),
+            ),
+            previous.review_bytes,
+        ),)
     else:
         _validate_resolved_needs_human_review(active, previous)
         if mode is not SubmissionMode.NEW_REVISION:
@@ -1041,10 +1071,11 @@ def _find_applied_review(
     if round_record.verdict not in {
         ReviewVerdict.CHANGES_REQUESTED,
         ReviewVerdict.NEEDS_HUMAN,
+        ReviewVerdict.APPROVED,
     }:
         raise SubmissionError(
-            "a follow-up submission requires an applied changes_requested "
-            "or needs_human review"
+            "a follow-up submission requires an applied changes_requested, "
+            "needs_human, or approved review"
         )
     if round_record.round_number == active.current_round:
         comparisons = (

@@ -1137,8 +1137,8 @@ class SupersedeReviewTests(unittest.TestCase):
 
             self.assertEqual(rolled_back.returncode, 1)
             self.assertIn(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD",
+                "a new_revision submission requires a new committed HEAD "
+                "different from the previously reviewed revision",
                 rolled_back.stderr,
             )
             self.assertEqual(state_path.read_bytes(), state_before)

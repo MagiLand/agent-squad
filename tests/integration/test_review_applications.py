@@ -2459,7 +2459,7 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     ),
                     (first_review_path, first_review_bytes),
                 ),
-                "must follow the most recent applied changes_requested result",
+                "prior-artifact paths do not match round history",
             )
 
             wrong_previous_review = copy.deepcopy(second_record)
@@ -2788,8 +2788,8 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
 
             self.assertEqual(status.returncode, 1)
             self.assertIn(
-                "a new_revision submission after changes_requested requires "
-                "a new committed HEAD",
+                "a new_revision submission requires a new committed HEAD "
+                "different from the previously reviewed revision",
                 status.stderr,
             )
 
