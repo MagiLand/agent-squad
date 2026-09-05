@@ -32,7 +32,7 @@ PARAMETER_FIELDS = {
     "AgentReadParams": ["target", "source", "lines", "format"],
     "WorkspaceTarget": ["workspace_id"],
     "AgentStartParams": ["name", "kind", "pane_id", "args"],
-    "WorktreeOpenParams": ["path", "label", "focus"],
+    "WorktreeOpenParams": ["cwd", "path", "label", "focus"],
 }
 
 
@@ -166,7 +166,8 @@ def main() -> int:
         print("Commands: list open")
         return 0
     if arguments == ["worktree", "open", "--help"]:
-        print("Usage: open --path <PATH> --label <TEXT> --no-focus")
+        print("Usage: open --cwd <PATH> --path <PATH> "
+              "--label <TEXT> --no-focus")
         return 0
 
     agent_path = state_root / "agent.json"
@@ -202,6 +203,12 @@ def main() -> int:
             print(history_path.read_text(encoding="utf-8"), end="")
         return 0
     if arguments[:2] == ["worktree", "open"]:
+        source = (
+            _option(arguments, "--cwd") if "--cwd" in arguments else
+            os.environ.get("FAKE_HERDR_FOCUSED_CWD", str(Path.cwd()))
+        )
+        if Path(source).resolve() != Path.cwd().resolve():
+            return _error("worktree_not_found", "worktree path not found")
         path = Path(_option(arguments, "--path")).resolve(strict=True)
         already_open = False
         if opened_path.is_file():
