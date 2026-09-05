@@ -68,7 +68,7 @@ class HerdrClient:
         "AgentTarget": {"target"},
         "AgentPromptParams": {"target", "text"},
         "AgentStartParams": {"name", "kind", "pane_id", "args"},
-        "WorktreeOpenParams": {"path", "label", "focus"},
+        "WorktreeOpenParams": {"cwd", "path", "label", "focus"},
     }
     _HELP_CHECKS = (
         (("agent", "--help"), ("start", "prompt", "get")),
@@ -78,7 +78,7 @@ class HerdrClient:
         (("worktree", "--help"), ("open",)),
         (
             ("worktree", "open", "--help"),
-            ("--path", "--label", "--no-focus"),
+            ("--cwd", "--path", "--label", "--no-focus"),
         ),
     )
 
@@ -462,6 +462,8 @@ class HerdrClient:
                     (
                         "worktree",
                         "open",
+                        "--cwd",
+                        str(self._working_directory),
                         "--path",
                         str(review_worktree),
                         "--label",

@@ -199,6 +199,27 @@ make test
 python -m unittest discover -s tests
 ```
 
+Run the complete disposable artifact workflow with:
+
+```bash
+make smoke
+python3 scripts/run-smoke-tests --json
+```
+
+The smoke runner seeds a small Python project in an owned temporary Git
+repository and exposes this checkout's CLI. It exercises task capture, changes
+requested, an escalation response, a scripted Developer resolution, response
+replacement, a fresh review, lost-notification discovery, approval, and
+completion. It uses the committed fake Herdr executable and makes no real model
+calls. The JSON option includes the commands and exit codes. Both success and
+failure clean the owned directory, including immutable archives; cleanup errors
+report the retained path and fail the command. No Agent Squad run is created in
+the source checkout.
+
+For manually supervised live agents, use the separate
+[live workflow guide](docs/workflow-verification.md). Live trials are outside the
+automated test and smoke commands.
+
 ## Diagnose local prerequisites
 
 Run `agent-squad doctor` from an initialized implementation worktree, or use

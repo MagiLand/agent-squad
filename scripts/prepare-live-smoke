@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Prepare an owned live-trial repository without launching models."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--implementer", choices=("codex", "claude"),
+                        required=True)
+    args = parser.parse_args()
+    project = Path(__file__).resolve().parents[1]
+    root = Path(tempfile.mkdtemp(prefix="agent-squad-live-")).resolve()
+    print(f"Owned live-trial resources (retained): {root}", file=sys.stderr)
+    repository = root / "repository"
+    repository.mkdir()
+    binary = root / "bin"
+    binary.mkdir()
+    executable = binary / "agent-squad"
+    executable.write_text(
+        f"#!{sys.executable}\nimport sys\nsys.dont_write_bytecode = True\n"
+        f"sys.path.insert(0, {str(project / 'src')!r})\n"
+        "from agent_squad.cli import main\nraise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("GIT_", "PYTHON"))}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       XDG_DATA_HOME=str(root / "data"))
+
+    def run(*command: str) -> str:
+        return subprocess.run(
+            command, cwd=repository, env=environment, check=True,
+            capture_output=True, text=True, shell=False, timeout=60,
+        ).stdout.strip()
+
+    run("git", "init", "--initial-branch=main")
+    run("git", "config", "user.name", "Agent Squad Live Trial")
+    run("git", "config", "user.email", "trial@example.invalid")
+    run("git", "config", "commit.gpgSign", "false")
+    run("git", "config", "core.hooksPath", str(root / "empty-hooks"))
+    for name in ("greeting.py", "test_greeting.py"):
+        shutil.copyfile(project / "tests/fixtures/smoke" / name,
+                        repository / name)
+    run("git", "add", "greeting.py", "test_greeting.py")
+    run("git", "commit", "-m", "test: seed live greeting trial")
+    base = run("git", "rev-parse", "HEAD")
+    run(str(executable), "init")
+    reviewer = "claude" if args.implementer == "codex" else "codex"
+    implementer_name = "smoke-" + args.implementer + "-" + root.name[-6:]
+    config_path = repository / ".agent-squad/config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["implementer"] = {
+        "kind": args.implementer, "agent_name": implementer_name,
+    }
+    config["reviewer"] = {"kind": reviewer, "start_args": []}
+    config["base_ref"] = "main"
+    config_path.write_text(json.dumps(config, indent=2) + "\n",
+                           encoding="utf-8")
+    task = root / "task.md"
+    shutil.copyfile(project / "tests/fixtures/smoke/task.md", task)
+    context = root / "protocol.md"
+    spec = (project / "docs/agent-squad-v0.4.4-spec.md").read_text(
+        encoding="utf-8",
+    )
+    shapes = spec.split("### 28.4 Review result", 1)[1].split(
+        "### 28.6 Escalation artifact", 1,
+    )[0]
+    context.write_text(
+        "# Live trial protocol\n\n"
+        f"Use `{executable}` for every Agent Squad command. "
+        "The command is exposed; do not install or modify Agent Squad.\n"
+        "Review only the exact base..head range in request.json, read every "
+        "captured input and resolution, and run `python3 -B -m unittest`. "
+        "Do not alter tracked files or inputs. Write output/review.json and "
+        "output/review.md under .agent-squad-review, then run the absolute "
+        "command above with review-submit. Use a new UUID and current UTC "
+        "timestamp for a new result. Copy identity fields from request.json. "
+        "Choose the verdict independently from the code, task, and evidence. "
+        "A failed notification preserves the marker: stop and report it; "
+        "the driver will discover it with status. Do not create a PR.\n\n"
+        "## Artifact schemas\n" + shapes,
+        encoding="utf-8",
+    )
+    run(str(executable), "start", "--task", str(task),
+        "--context", str(context))
+    manifest = {
+        "root": str(root), "repository": str(repository),
+        "cli": str(executable),
+        "base_oid": base, "implementer": implementer_name,
+        "implementer_kind": args.implementer, "reviewer_kind": reviewer,
+        "task": str(task), "context": str(context),
+    }
+    (root / "trial.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8",
+    )
+    print(json.dumps(manifest, indent=2))
+    print("\nPrepared only; no real agents launched.")
+    print("Start the Implementer in Herdr at " + shlex.quote(str(repository)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -17,12 +17,15 @@ from agent_squad.initialization import AgentKind  # noqa: E402
 
 
 class FakeHerdrAdapterTests(unittest.TestCase):
-    def test_discovers_launches_prompts_and_adopts_exact_reviewer(
+    def test_launch_ignores_other_focused_repository_and_adopts_reviewer(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             _, environment = install_fake_herdr(root)
+            focused = root / "unrelated-focused-repository"
+            focused.mkdir()
+            environment["FAKE_HERDR_FOCUSED_CWD"] = str(focused)
             review_worktree = root / "review-worktree"
             review_worktree.mkdir()
 
