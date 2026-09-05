@@ -576,6 +576,14 @@ def _prepare_submission_locked(
     ):
         response_existed = True
         original_response = _read_file(response_authority_path)
+    replacement_archive: tuple[Path, bytes] | None = None
+    replacement_archive_created = False
+    replacement_directories: list[Path] = []
+    if implementation_response is not None and previous is not None:
+        replacement_archive = _plan_response_archival(
+            active, previous, implementation_response.content,
+            original_response,
+        )
     next_state_bytes: bytes | None = None
     commit_point_reached = False
     try:
@@ -677,12 +685,27 @@ def _prepare_submission_locked(
             response_authority_path is not None
             and implementation_response is not None
         ):
+            if replacement_archive is not None:
+                archive_path, archive_content = replacement_archive
+                for directory in (
+                    archive_path.parent.parent, archive_path.parent,
+                ):
+                    if _ensure_rounds_root(directory):
+                        replacement_directories.append(directory)
+                if os.path.lexists(archive_path):
+                    if _read_file(archive_path) != archive_content:
+                        raise SubmissionError(
+                            "replaced response diagnostic changed"
+                        )
+                else:
+                    atomic_write(archive_path, archive_content, mode=0o400)
+                    replacement_archive_created = True
+            response_written = True
             atomic_write(
                 response_authority_path,
                 implementation_response.content,
                 mode=0o400,
             )
-            response_written = True
         atomic_write(
             run_record_path,
             encode_json(next_run_record),
@@ -745,27 +768,56 @@ def _prepare_submission_locked(
             )
             _raise_submission_failure(error, message)
         cleanup_errors: list[str] = []
+        response_restored = not response_written
         if response_written and response_authority_path is not None:
             try:
-                current_response = _read_file(response_authority_path)
-                if (
-                    implementation_response is None
-                    or current_response != implementation_response.content
-                ):
-                    raise OSError("content changed during rollback")
-                if response_existed:
-                    if original_response is None:
-                        raise OSError("original response was not captured")
-                    atomic_write(
-                        response_authority_path,
-                        original_response,
-                        mode=0o400,
-                    )
-                else:
-                    response_authority_path.unlink()
+                current_response = (
+                    _read_file(response_authority_path)
+                    if os.path.lexists(response_authority_path)
+                    else None
+                )
+                if current_response != original_response:
+                    if (
+                        implementation_response is None
+                        or current_response != implementation_response.content
+                    ):
+                        raise OSError("content changed during rollback")
+                    if response_existed:
+                        if original_response is None:
+                            raise OSError("original response was not captured")
+                        atomic_write(
+                            response_authority_path,
+                            original_response,
+                            mode=0o400,
+                        )
+                    else:
+                        response_authority_path.unlink()
+                response_restored = True
             except (OSError, SubmissionError) as cleanup_error:
                 cleanup_errors.append(
                     "could not restore the previous-round response: "
+                    f"{cleanup_error}"
+                )
+        if (
+            response_restored
+            and replacement_archive_created
+            and replacement_archive is not None
+        ):
+            try:
+                replacement_archive[0].unlink()
+            except OSError as cleanup_error:
+                cleanup_errors.append(
+                    "could not remove staged response diagnostic: "
+                    f"{cleanup_error}"
+                )
+        for directory in reversed(
+            replacement_directories if response_restored else []
+        ):
+            try:
+                directory.rmdir()
+            except OSError as cleanup_error:
+                cleanup_errors.append(
+                    "could not remove staged diagnostic directory: "
                     f"{cleanup_error}"
                 )
         if run_record_written:
@@ -1084,14 +1136,6 @@ def _capture_response(
         raise SubmissionError(
             f"implementation response failed validation: {error}"
         ) from error
-    if (
-        response.supersedes_response_id is not None
-        or response.resolution_ids
-    ):
-        raise SubmissionError(
-            "response replacement after Developer resolution is not "
-            "supported by this command version"
-        )
     if any(
         item.disposition is ResponseDisposition.NEEDS_HUMAN
         for item in response.responses
@@ -1105,6 +1149,149 @@ def _capture_response(
         source_path=resolved,
         content=content,
     )
+
+
+def _plan_response_archival(
+    active: runs.ActiveRunStatus,
+    previous: runs.AppliedReviewAuthority,
+    content: bytes,
+    original: bytes | None,
+) -> tuple[Path, bytes] | None:
+    """Validate response references and stage the escalation-time archive."""
+
+    response = ReviewResponse.from_dict(
+        decode_json(content.decode("utf-8")),
+        object_format=active.git_object_format,
+    )
+    # Only rounds included in authoritative state can freeze a response.
+    review_digest = hashlib.sha256(previous.review_bytes).hexdigest()
+    for number in range(
+        previous.review.round_number + 1, active.current_round + 1,
+    ):
+        path = previous.round_directory.parent / f"{number:03d}" / "round.json"
+        try:
+            record = ReviewRoundRecord.from_dict(
+                runs.load_json_object(path, "later review round"),
+                label="later review round",
+            )
+        except (ArtifactValidationError, runs.RunStateError) as error:
+            raise SubmissionError(str(error)) from error
+        inputs = {item.path: item.sha256 for item in record.bundle_inputs}
+        if inputs.get(PREVIOUS_REVIEW_BUNDLE_PATH) != review_digest:
+            continue
+        digest = inputs.get(PREVIOUS_RESPONSE_BUNDLE_PATH)
+        if digest is not None:
+            if (
+                original is None
+                or hashlib.sha256(original).hexdigest() != digest
+            ):
+                raise SubmissionError(
+                    "authoritative response no longer matches its round"
+                )
+            if original != content:
+                raise SubmissionError(
+                    "a persisted review round already references the "
+                    "authoritative response"
+                )
+            return None
+
+    escalations = [
+        item.record for item in active.escalations
+        if item.record.source_result_id == previous.review.result_id
+        and item.record.response_id is not None
+    ]
+    if not escalations:
+        if (
+            response.supersedes_response_id is not None
+            or response.resolution_ids
+        ):
+            raise SubmissionError(
+                "response replacement after Developer resolution requires "
+                "an escalation-time response"
+            )
+        return None
+    escalation = escalations[-1]
+    archive_path = (
+        previous.round_directory / "diagnostics" / "replaced-responses"
+        / f"{escalation.response_id}.json"
+    )
+    for directory in (archive_path.parent.parent, archive_path.parent):
+        if directory.is_symlink():
+            raise SubmissionError(
+                "response diagnostic directory must not be a symbolic link"
+            )
+    # A crash can leave a replacement at the canonical path before state
+    # commits. The immutable diagnostic retains the escalation-time source.
+    earlier_content = (
+        _read_file(archive_path) if os.path.lexists(archive_path) else original
+    )
+    if earlier_content is None:
+        raise SubmissionError("escalation-time response is missing")
+    try:
+        earlier = ReviewResponse.from_dict(
+            decode_json(earlier_content.decode("utf-8")),
+            object_format=active.git_object_format,
+        )
+        validate_review_response(
+            earlier, previous.review, SubmissionMode.NEW_REVISION,
+        )
+    except (
+        UnicodeDecodeError, InvalidJsonError, ArtifactValidationError,
+    ) as error:
+        raise SubmissionError(
+            f"invalid escalation-time response: {error}"
+        ) from error
+    if earlier.response_id != escalation.response_id:
+        raise SubmissionError(
+            "escalation-time response ID does not match its escalation"
+        )
+    if response.supersedes_response_id != earlier.response_id:
+        raise SubmissionError(
+            "replacement must identify the escalation-time response in "
+            "supersedes_response_id"
+        )
+    resolutions = {
+        item.record.resolution_id: item.record for item in active.resolutions
+    }
+    if (
+        not response.resolution_ids
+        or set(response.resolution_ids) - resolutions.keys()
+    ):
+        raise SubmissionError(
+            "replacement must identify recorded Developer resolution_ids"
+        )
+    selected = [
+        resolutions[identifier] for identifier in response.resolution_ids
+    ]
+    if not any(
+        item.resolves_escalation_id == escalation.escalation_id
+        for item in selected
+    ):
+        raise SubmissionError(
+            "replacement must include the resolution linked to its escalation"
+        )
+    answered = {item.finding_id: item for item in response.responses}
+    for item in earlier.responses:
+        if item.disposition is not ResponseDisposition.NEEDS_HUMAN:
+            continue
+        if item.finding_id not in answered:
+            raise SubmissionError(
+                "replacement must resolve every former needs_human finding"
+            )
+        if not any(
+            item.finding_id in resolution.applies_to_finding_ids
+            or (
+                not resolution.applies_to_finding_ids
+                and resolution.resolves_escalation_id
+                == escalation.escalation_id
+            )
+            for resolution in selected
+        ):
+            raise SubmissionError(
+                "replacement requires an applicable Developer resolution "
+                "for every former needs_human finding"
+            )
+    return archive_path, earlier_content
 
 
 def _validate_implementation_cleanliness(

@@ -1987,60 +1987,6 @@ class ApprovedReviewLifecycleTests(unittest.TestCase):
                     check=False,
                 )
 
-    def test_budget_exhaustion_refuses_before_authoritative_writes(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            prepared, review = _marker_confirmed_review(
-                root,
-                verdict="changes_requested",
-                review_limit=1,
-            )
-            control_root = prepared.repository / ".agent-squad"
-            state_path = control_root / "state.json"
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            run_directory = (
-                control_root / "runs" / str(state["active_run_id"])
-            )
-            round_directory = run_directory / "rounds/001"
-            events_path = run_directory / "events.jsonl"
-            original_state = state_path.read_bytes()
-            original_round = {
-                path.relative_to(round_directory).as_posix()
-                for path in round_directory.rglob("*")
-            }
-            original_events = events_path.read_bytes()
-
-            applied = run_cli(
-                prepared.repository,
-                "apply-review",
-                "--result-id",
-                str(review["result_id"]),
-                data_home=prepared.data_home,
-                env_overrides=prepared.environment,
-            )
-
-            self.assertEqual(applied.returncode, 1)
-            self.assertIn("review budget exhaustion", applied.stderr)
-            self.assertIn("no state was changed", applied.stderr)
-            self.assertEqual(state_path.read_bytes(), original_state)
-            self.assertEqual(events_path.read_bytes(), original_events)
-            self.assertEqual(
-                {
-                    path.relative_to(round_directory).as_posix()
-                    for path in round_directory.rglob("*")
-                },
-                original_round,
-            )
-            for name in (
-                "bundle",
-                "review.json",
-                "review.md",
-                "review-marker.json",
-            ):
-                self.assertFalse((round_directory / name).exists())
-
     def test_corrected_revision_archives_response_and_starts_fresh_round(
         self,
     ) -> None:

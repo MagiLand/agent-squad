@@ -1083,8 +1083,10 @@ class SupersedeReviewTests(unittest.TestCase):
                 "# Implementation Report\n\nCompleted the candidate.\n",
                 encoding="utf-8",
             )
-            response_path = root / "fixed-response.json"
-            _write_fixed_response(response_path, prepared, review)
+            response_path = root / "response.json"
+            # A persisted correction freezes its response. Reuse a rejected
+            # response so reconsideration does not require rewriting it.
+            _write_rejected_response(response_path, prepared, review)
             correction = run_cli(
                 prepared.repository,
                 "submit",
