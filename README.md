@@ -199,6 +199,60 @@ make test
 python -m unittest discover -s tests
 ```
 
+## Diagnose local prerequisites
+
+Run `agent-squad doctor` from an initialized implementation worktree, or use
+`make doctor` when developing Agent Squad. Each check reports `OK`, `WARNING`,
+or `ERROR`; errors produce exit status 1, while warnings remain non-blocking.
+The normal command checks configuration, canonical Git and stored run identities,
+local exclusions, writable control storage, exclusive locks, atomic replacement,
+review-worktree placement, and creation/removal of an owned detached worktree.
+It discovers the installed Herdr schema and checks both configured roles and
+history access without launching an agent. Run `agent-squad init` first when
+configuration or the required local exclusions are missing.
+
+Doctor reports residual worktrees, unregistered review bundles, mismatched
+review heads, and deterministic Reviewers that outlive their rounds. It reads
+run histories across registered implementation worktrees in the same repository
+so a sibling worktree's active review is not classified as an orphan. Existing
+resources and run history are never removed or adopted. Submodules receive a
+warning: detached review worktrees may need project-specific preparation.
+
+To test the configured Reviewer's actual permissions, explicitly run:
+
+```bash
+agent-squad doctor --live-reviewer --timeout 120
+```
+
+This starts a temporary Reviewer with the configured kind and native start
+arguments. A disposable request and helper prove snapshot/request reading,
+permitted output writing, `review-submit`, local marker visibility, independent
+result validation, and result-handoff visibility in Herdr history. The result
+handoff targets that temporary Reviewer itself. The preflight creates an
+unreferenced synthetic commit with the current committed tree and parent; no
+branch or active run is changed. The synthetic commit can appear as dangling
+in `git fsck` until normal Git garbage collection expires it.
+Its output wait defaults to 120 seconds; individual Herdr calls also have
+their own bounded timeouts.
+
+Successful cleanup closes only the newly created Reviewer workspace after
+checking that its identity is unchanged and it still contains just the original
+pane and tab. Git then removes the owned detached worktree. On failure, doctor
+retains the temporary worktree and available session, reports the failed stage,
+and writes `diagnostic.json` and available Herdr history under the printed
+`.preflight-*` directory inside `<review-root>/<repository-id>/`.
+Output permissions may prevent the Reviewer from writing a receipt; in that
+case the retained session/history provides the
+permission error. Doctor reports retained preflight evidence on later runs,
+without deleting it, including a surviving Reviewer and a worktree registration
+whose directory has been removed. Other repositories' probes are not reported.
+For manual cleanup, inspect the evidence and the workspace's current contents
+before stopping the retained Reviewer. Preserve any needed evidence, then use
+`git worktree remove` for the reported worktree; inspect
+`git worktree prune --dry-run` before pruning
+registrations whose directories are already gone. Doctor never runs that cleanup
+for retained probes. Tests use fake Herdr processes and never launch real models.
+
 ## License
 
 Agent Squad is licensed under the [Apache License 2.0](LICENSE).
