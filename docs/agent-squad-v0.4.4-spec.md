@@ -1223,6 +1223,10 @@ Before applying a result, Agent Squad MUST verify:
 - the marker's result ID matches the result;
 - the marker's recorded digest matches `output/review.json`;
 - the output paths are the expected paths for the active round;
+- every bundle input recorded in the authoritative round's `bundle_inputs`
+  manifest, including `input/request.json` itself, is present with its
+  recorded digest; the bundle's own request is not independent authority
+  for its `created_at` or `resolution_paths`;
 - every referenced Developer resolution has the expected digest.
 
 ### 23.8 Bundle archive
@@ -1857,7 +1861,9 @@ Under the implementation-side lock, it MUST:
 11. resolve the current implementation `HEAD` and verify that it equals the active round's `head_oid`; otherwise classify the result as stale under Section 27.4;
 12. verify review-worktree `HEAD`;
 13. verify no tracked file has been modified;
-14. verify every Developer resolution input and digest;
+14. verify every bundle input recorded in the authoritative round manifest,
+    including `input/request.json`, against its recorded digest, and every
+    Developer resolution input and digest;
 15. archive the complete review bundle;
 16. copy human-readable convenience artifacts into the round directory;
 17. classify the result as applied, stale, or invalid;
