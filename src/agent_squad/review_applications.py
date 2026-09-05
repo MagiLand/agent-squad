@@ -2343,9 +2343,10 @@ def _validate_authoritative_bundle_inputs(
     """Bind every captured authority input to the round manifest."""
 
     bundle_files = {item.path: item.content for item in evidence.bundle_files}
-    # Report the altered authority input when its digest and the live request's
-    # self-declared digest were changed together. The request remains bound
-    # too.
+    # Compare input/request.json last: False sorts before True, so every
+    # other input is checked first. If an input and its request-declared
+    # digest were altered together, the error names that input. The request
+    # is still compared, so it remains bound to the manifest too.
     ordered_artifacts = sorted(
         round_record.bundle_inputs,
         key=lambda artifact: artifact.path == REQUEST_PATH.as_posix(),

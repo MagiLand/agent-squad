@@ -1489,6 +1489,99 @@ class HumanDecisionCommandTests(unittest.TestCase):
                 (run_directory / "rounds/002/bundle").exists()
             )
 
+    def test_apply_preserves_result_when_canonical_resolution_is_corrupt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            prepared_round = self._prepare_resolved_needs_human_round(
+                Path(temporary_directory)
+            )
+            prepared = prepared_round.prepared
+            bundle = prepared_round.bundle
+            second_round = SimpleNamespace(
+                bundle=bundle,
+                request=json.loads(
+                    (bundle / "input/request.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+            )
+            review = _write_review(second_round)
+            reviewed = run_cli(
+                prepared_round.review_worktree,
+                "review-submit",
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            run_directory = prepared_round.run_directory
+            round_directory = run_directory / "rounds/002"
+            record_path = run_directory / "resolutions/001-resolution.json"
+            companion_path = run_directory / "resolutions/001-resolution.md"
+            original_record = record_path.read_bytes()
+            original_companion = companion_path.read_bytes()
+            originals = {
+                path: path.read_bytes()
+                for path in (
+                    prepared_round.state_path,
+                    run_directory / "run.json",
+                    run_directory / "events.jsonl",
+                    round_directory / "round.json",
+                    *(path for path in bundle.rglob("*") if path.is_file()),
+                )
+            }
+            # Keep canonical history internally valid but different from the
+            # captured round manifest. The Reviewer bundle stays untouched.
+            changed_companion = (
+                b"# Resolution\n\nUse permissive compatibility.\n"
+            )
+            changed_record = json.loads(original_record)
+            changed_record["resolution_sha256"] = hashlib.sha256(
+                changed_companion
+            ).hexdigest()
+            record_path.chmod(0o600)
+            companion_path.chmod(0o600)
+            record_path.write_text(
+                f"{json.dumps(changed_record, indent=2)}\n",
+                encoding="utf-8",
+            )
+            companion_path.write_bytes(changed_companion)
+
+            rejected = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+
+            self.assertEqual(rejected.returncode, 1, rejected.stdout)
+            self.assertIn(
+                "Developer resolution bundle input does not match its "
+                "authoritative record",
+                rejected.stderr,
+            )
+            for path, original in originals.items():
+                self.assertEqual(path.read_bytes(), original, str(path))
+            self.assertFalse((round_directory / "diagnostics").exists())
+            self.assertFalse((round_directory / "bundle").exists())
+            self.assertFalse((round_directory / "approval.json").exists())
+
+            record_path.write_bytes(original_record)
+            companion_path.write_bytes(original_companion)
+            retried = run_cli(
+                prepared.repository,
+                "apply-review",
+                "--result-id",
+                str(review["result_id"]),
+                data_home=prepared.data_home,
+                env_overrides=prepared.environment,
+            )
+            self.assertEqual(retried.returncode, 0, retried.stderr)
+            self.assertIn("Verdict: approved", retried.stdout)
+            self.assertTrue((round_directory / "approval.json").is_file())
+
     def test_apply_rejects_missing_developer_resolution_inputs(self) -> None:
         for expected_path in (
             "input/resolutions/001-resolution.json",
