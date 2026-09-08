@@ -150,7 +150,8 @@ v0.5.0 is not designed for forge outages, for shared PRs edited by several Imple
 | Disposition | The Implementer's reply on a thread whose first line is a `DISPOSITION` line (§7.5) |
 | Verification | The Reviewer's reply on a thread whose first line is a `VERIFIED` or `NOT FIXED` line (§7.5) |
 | Settled thread | A thread closed for later Reviewers under §7.5 |
-| Decision | A PR conversation comment whose first line is a valid `DECISION` header (§7.6) |
+| Decision, general decision, Task amendment | A PR conversation comment whose first line is a valid `DECISION` header; a general decision has `finding=none`; a Task amendment is a general decision whose body contains the amended `## Task` section (§7.6) |
+| Unanchored finding | A finding listed by a tagged review that has no thread yet (§7.4) |
 | Stop | A PR conversation comment whose first line is a valid `STOPPED` header (§7.7) |
 | Budget | The effective and used review counts derived under §7.8 |
 | Agent-approved | The condition defined in §7.10 |
@@ -335,7 +336,7 @@ All protocol lines share these rules:
 - A tagged line MUST be the first line of the review body, comment body, or reply body that carries it. Tokens are separated by exactly one ASCII space; the line has no leading whitespace and no text after its last token.
 - Grammar notation: `<N>` and `<n>` are positive decimal integers without leading zeros; `<full-sha>` is a full object ID (§6.2); alternatives are written `a|b`; square brackets in a grammar line mark an optional token, except in the finding line of §7.4, where they are literal characters.
 - Parsers MUST match the whole line and MUST be exact. A first line that starts with `AGENT_SQUAD/`, `[REV-`, `DISPOSITION`, `VERIFIED`, or `NOT FIXED` but does not parse is *malformed*. Malformed lines are reported by `status` and `pr reviews` as diagnostics and are ignored for every derivation.
-- Authorship is part of validity. A `REVIEW` header counts only when posted by the Reviewer identity; `DISPOSITION` lines count only from the Implementer identity; `VERIFIED` and `NOT FIXED` lines count only from the Reviewer identity; a `DECISION` counts from any author except the Reviewer identity; a `STOPPED` counts from either identity. Tagged lines by other authors are diagnostics.
+- Authorship is part of validity. A `REVIEW` header counts only when posted by the Reviewer identity; a finding thread root counts when posted by the Reviewer identity, or by either identity through `thread open` for a finding that a tagged review lists (§7.4); `DISPOSITION` lines count only from the Implementer identity; `VERIFIED` and `NOT FIXED` lines count only from the Reviewer identity; a `DECISION` counts only from the Implementer identity or from a login listed in `developer_accounts` (§9), which is how the Developer's own login is authorized when it differs from the Implementer identity; a `STOPPED` counts from either identity. Tagged lines by any other author, including collaborators and bots, are diagnostics and have no effect on the budget, the gates, or the Task.
 - "Newer" and "latest" compare the forge's creation timestamps (`submitted_at` for reviews, `created_at` for comments); equal timestamps are ordered by ascending forge ID.
 - The CLI composes every header it posts from command arguments (§10.2), so a header written by a skill never reaches the forge unvalidated.
 
@@ -349,7 +350,7 @@ The Implementer opens the PR with two fixed level-2 sections, in this order, wit
 ## Implementation report
 ```
 
-- `## Task` holds the objective and acceptance criteria derived from the issue, plus constraints and non-goals when the issue states them, in the shape of v0.4.4 §21.1. The Developer approves it once, before coding. It is the task snapshot of v0.4.4 §21.2 and MUST NOT change silently. A material change to the objective or acceptance criteria is made only on the Developer's instruction, by editing the section and posting a `DECISION` with `finding=none` that states the change (§7.6). Reviews older than that decision reviewed the earlier task; they still count towards the budget.
+- `## Task` holds the objective and acceptance criteria derived from the issue, plus constraints and non-goals when the issue states them, in the shape of v0.4.4 §21.1. The Developer approves it once, before coding. It is the task snapshot of v0.4.4 §21.2 and MUST NOT change silently. A material change to the objective or acceptance criteria is made only on the Developer's instruction, by editing the section and posting a `DECISION` with `finding=none` that contains the complete amended section (§7.6). Reviews older than that decision reviewed the earlier Task: they still count towards the budget, and an approval among them is no longer valid (§7.10).
 - `## Implementation report` holds, under level-3 headings, the v0.4.4 §28.3 fields: `Summary`, `Scope`, `Files changed`, `Design decisions`, `Validation performed`, `Known limitations`, and `Areas worth extra review`. The Implementer updates it on each push with `pr report`. The Reviewer treats it as an untrusted aid and verifies material claims.
 - `pr create` composes the body from the two section files, appends `Closes #<issue>` so the forge closes the issue on merge, and uses the issue title unless `--title` is given. Further content MAY follow the two sections.
 - `pr create` and `pr report` MUST refuse a body in which either heading is missing, duplicated, or out of order.
@@ -370,13 +371,13 @@ Validity rules, enforced by `review post` before posting and by `status` when re
 
 - `head` MUST equal the review's forge `commit_id` and, at posting time, the PR head; otherwise the review is malformed or refused.
 - `base` MUST be an ancestor of `head` and of the current tip of the base branch; it is the merge-base the Reviewer was launched with (§6.1).
-- `approved` requires that this review opens no blocking thread and that every blocking thread from earlier tagged reviews is settled (§7.5).
-- `changes_requested` requires at least one blocking thread opened by this review or at least one `NOT FIXED` verification posted during this pass.
+- `approved` requires that this review lists no blocking finding and that every blocking finding from earlier tagged reviews is settled (§7.5).
+- `changes_requested` requires at least one blocking finding listed by this review or at least one `NOT FIXED` verification posted during this pass.
 - `needs_human` requires that the body's `## Summary` names the Developer decision that is required.
 
 **The header is the authoritative verdict.** When the Reviewer identity is distinct from the Implementer identity, as it is in v0.5.0, the forge review state MUST mirror the verdict: `APPROVE` for `approved`, `REQUEST_CHANGES` for `changes_requested`, and `COMMENT` for `needs_human`. `status` reports a review whose forge state does not mirror its header as a mismatch and treats the review as not approving; nothing repairs the mismatch automatically. When only one identity is available, as in the single-identity mode deferred to v0.6.0 (§19), the review is submitted as `COMMENT` and formal approval comes from a human colleague; the header needs no change for that mode.
 
-`review post` composes the header from its arguments and prepends it to the body file, which starts at `## Summary`. The body contains these level-2 sections in this order; the first two are REQUIRED:
+`review post` composes the header from its arguments and prepends it to the body file, which starts at `## Summary`. The body contains these level-2 sections in this order; the first three are REQUIRED:
 
 ```markdown
 ## Summary
@@ -389,10 +390,10 @@ Validity rules, enforced by `review post` before posting and by `status` when re
 
 - `## Summary` states the verdict in prose and, for `needs_human`, the decision required.
 - `## Verified dispositions` lists every earlier blocking thread with its verification line (`REV-<n>: VERIFIED fixed`, `VERIFIED rejection accepted`, or `NOT FIXED`), mirroring the thread replies of §7.5; it says `none` when there is nothing to verify.
-- `## Findings` lists each thread opened by this review as `REV-<n> [blocking|optional] <title>`; `review post` generates it from the threads it posts.
+- `## Findings` lists each finding opened by this review as `REV-<n> [blocking|optional] <title>`, or says `none`; `review post` generates it from the threads it posts. This list is the authoritative association between a review and its findings (§7.4): a finding belongs to the tagged review that lists its ID, whether its thread was created together with the review or afterwards.
 - `## Standards` and `## Spec` carry the two-axis summaries of the installed `code-review` skill (§12.4); `## Evidence` lists the commands the Reviewer ran. These three are RECOMMENDED.
 
-A review body MUST NOT be edited after submission, except that the fallback in §11.1 MAY append a `## Unanchored findings` section. Findings live in threads, not in the body.
+A review body MUST NOT be edited after submission, except that the fallback in §11.1 MAY append a `## Unanchored findings` section (§7.4). Findings live in threads, not in the body; an unanchored finding is the temporary exception.
 
 ### 7.4 Findings
 
@@ -414,7 +415,11 @@ The rest of the root comment carries the v0.4.4 §28.4 fields as bold labels, on
 
 **Anchors.** A thread anchors to a right-side line of `git diff <base> <head>`, that is an added or context line, identified by `path`, `line`, and optionally `start_line` for a range. `review post` MUST validate every anchor locally against that diff and MUST refuse to post an anchor outside the commentable set, because the forge silently drops such comments (§11.2). A finding about content that is not in the diff is anchored to the most relevant commentable line and says so under **Evidence**.
 
-**ID allocation.** Finding IDs are sequential across the PR. `review post` allocates the next ID as one plus the largest `<n>` among all root comments on the PR whose first line parses as a finding line, regardless of author, review, or resolution state; the first finding on a PR is `REV-1`. The Reviewer supplies severity, category, title, anchor, and body for each thread in the `--threads` file; `review post` prepends the finding line with the allocated ID. The same defect MUST NOT receive a second ID: a later Reviewer that revisits an existing finding replies on its thread.
+**ID allocation.** Finding IDs are sequential across the PR. `review post` allocates the next ID as one plus the largest `<n>` among all finding IDs on the PR, whether they appear in a root comment's finding line or in a tagged review's `## Findings` or `## Unanchored findings` list, regardless of author, review, or resolution state; the first finding on a PR is `REV-1`. The Reviewer supplies severity, category, title, anchor, and body for each thread in the `--threads` file; `review post` prepends the finding line with the allocated ID. The same defect MUST NOT receive a second ID: a later Reviewer that revisits an existing finding replies on its thread.
+
+**Association.** A finding belongs to the tagged review whose `## Findings` list names its ID (§7.3), not to the forge review record that happens to hold its root comment. Its thread is the root comment on the PR whose finding line carries that ID; there is at most one such root. This holds whether the root was created together with the review, by the fallback of §11.1, or by `thread open`.
+
+**Unanchored findings.** When the fallback of §11.1 cannot create a root for a listed finding, the finding's full text, starting with its finding line, is appended under `## Unanchored findings` in the review body. Such a finding keeps its ID, severity, and place in the review's list; when blocking it counts as an unsettled blocking finding, so it blocks approval and, having no thread for a disposition, blocks the next launch; it is never dropped. The recovery route is `thread open --pr <N> --finding REV-<n> --path <path> --line <line> [--start-line <line>]`, run by the Reviewer identity in the same pass or by either identity later, which validates the anchor locally and posts a root comment consisting of the finding line and the body copied from the review; from then on the finding has an ordinary thread. `status` lists unanchored findings and reports `open_threads` as the next action while any exist (§7.9).
 
 **Severity.** Blocking findings are the substantive actionable findings of §12.3; optional findings are advisory and never block approval.
 
@@ -446,7 +451,7 @@ followed by what it ran. After `NOT FIXED`, the Implementer MUST post a new disp
 
 **Settled threads.** A thread is settled when its latest verification is `VERIFIED fixed` or `VERIFIED rejection accepted`, or when a `DECISION` with `finding=REV-<n>` for that thread is newer than its latest disposition and a later Reviewer has replied `VERIFIED fixed` or `VERIFIED rejection accepted` after checking compliance with the decision. A settled thread is closed for later Reviewers unless new evidence appears; a later Reviewer MUST NOT reopen it merely because it would have judged differently. New evidence is raised as a new finding that cites it. `thread resolve` marks settled threads resolved on the forge where the API allows it; resolution state is a convenience for readers, never authority.
 
-**Same-head reconsideration.** When every open blocking thread's latest disposition is `rejected` and no code changed, the next review targets the same head. `reviewer launch` accepts a head equal to the latest tagged review's head only in that case; a `fixed` disposition requires a changed revision (v0.4.4 §26.5 and §26.13, retained in PR form).
+**Same-head reconsideration.** When every open blocking thread's latest disposition is `rejected` and no code changed, the next review targets the same head. `reviewer launch` accepts a head equal to the latest tagged review's head only in that case, or when a Task amendment (§7.6) is newer than that review, because the amended Task must be reviewed even if the code did not change; a `fixed` disposition requires a changed revision (v0.4.4 §26.5 and §26.13, retained in PR form).
 
 **Optional threads.** Optional findings MAY receive a one-line disposition or none. An optional thread never blocks a launch or an approval. After a merge the Implementer SHOULD reply "not pursued" or point to the follow-up issue on any optional thread left open, and `thread resolve` MAY resolve it.
 
@@ -458,8 +463,9 @@ A Developer decision is a PR conversation comment, posted by the Developer or by
 AGENT_SQUAD/0.5.0 DECISION finding=<REV-n|none> [budget=<n>]
 ```
 
-- `finding=REV-<n>` settles the question raised by that thread; `finding=none` settles a question that is not tied to one thread, such as an approach, an interpretation, a task amendment (§7.2), a continuation after a stop (§7.7), or a budget-only extension.
-- The body records the Developer's actual decision and any constraints. The question is identified by the `finding=` value; the latest decision on the same question is authoritative.
+- `finding=REV-<n>` settles the question raised by that thread; the thread is the question, and the latest decision naming it is authoritative for it.
+- `finding=none` records a *general decision*: an approach, an interpretation, a Task amendment (§7.2), a continuation after a stop (§7.7), or a budget-only extension. General decisions are cumulative: every general decision remains in force, and a later general decision supersedes an earlier one only where its body says so explicitly and links the earlier decision comment. A budget-only or continuation decision therefore never erases an unrelated design or task decision, and a Reviewer applies all general decisions together.
+- The body records the Developer's actual decision and any constraints. A general decision that amends the Task (§7.2) MUST contain the complete amended `## Task` section, so the amendment and its time are derivable from the PR without consulting edit history: a decision body that contains a level-2 `## Task` heading is a *Task amendment*. The Implementer edits the PR body to the same text.
 - `budget=<n>` sets the effective review budget for this PR to `<n>` (§7.8). `decision post` MUST refuse a value that is not greater than the number of reviews already used.
 - Every Reviewer reads all decisions before reviewing, treats the latest decision on a question as authoritative for that question, verifies that the implementation complies with it, continues to report defects within the decided approach, and does not re-litigate the decided choice (v0.4.4 §26.17 and §29, retained).
 - A decision MUST NOT silently redefine the task (v0.4.4 §21.5): a material task change is an explicit edit of `## Task` accompanied by a `finding=none` decision that says so.
@@ -518,9 +524,10 @@ Derived facts:
 - **Threads.** For each finding: ID, severity, category, title, anchor, the opening review, the latest disposition, the latest verification, whether it is settled, and the forge resolution state.
 - **Decisions and stops** in timestamp order.
 - **Budget** as in §7.8.
-- **Gates.** `stopped` (the latest `STOPPED` is newer than the latest `DECISION`); `needs_decision` (the latest tagged review has verdict `needs_human` with no newer `DECISION`, or an unsettled blocking thread's latest disposition is `needs-human` with no newer `DECISION` naming it); `unaddressed_findings` (an unsettled blocking thread has no disposition newer than its latest verification); `same_head_requires_rejections` (§7.5); `budget_exhausted`; `not_pushed` (§6.4); `reviewer_live` (a live Herdr agent is named for the current head).
+- **Evidence.** The complete PR body with its `## Task` and `## Implementation report` sections; the full body of every tagged review; every finding with its root comment body and every reply body; every decision and stop body; each with author login, forge ID, and timestamp, so that a Reviewer can perform every check in §12.3 through this output alone.
+- **Gates.** `stopped` (the latest `STOPPED` is newer than the latest `DECISION`); `needs_decision` (the latest tagged review has verdict `needs_human` with no newer `DECISION`, or an unsettled blocking thread's latest disposition is `needs-human` with no newer `DECISION` naming it); `unanchored_findings` (§7.4); `unaddressed_findings` (an unsettled blocking thread has no disposition newer than its latest verification); `same_head_requires_rejections` (§7.5); `task_amended` (a Task amendment is newer than the latest tagged review, §7.6); `budget_exhausted`; `not_pushed` (§6.4); `reviewer_live` (a live Herdr agent is named for the current head).
 - **Approval** as in §7.10, with the list of reasons when the head is not agent-approved.
-- **Next action**, the first of these whose condition holds: `merged` (the PR is merged); `closed` (closed without merge); `stopped`; `needs_decision` (that gate or `budget_exhausted`); `address_findings` (`unaddressed_findings`); `push` (`not_pushed` or `same_head_requires_rejections`); `reviewer_live` (a Reviewer for the current head is live and no current review exists); `approved` (agent-approved); `launch_review` (otherwise).
+- **Next action**, the first of these whose condition holds: `merged` (the PR is merged); `closed` (closed without merge); `approved` (agent-approved); `stopped`; `needs_decision` (that gate, or `budget_exhausted` when another review would be needed); `open_threads` (`unanchored_findings`); `address_findings` (`unaddressed_findings`); `push` (`not_pushed`, or `same_head_requires_rejections` without `task_amended`); `reviewer_live` (a Reviewer for the current head is live and no current review exists); `launch_review` (otherwise). Approval is evaluated before the gates that only prohibit launching another review: an approving review that is the first of one, the third of three, or the fourth of four after an extension yields `approved`, whereas a `changes_requested` review that exhausts the budget yields `stopped` once the Reviewer has posted its `STOPPED` (§7.8) and `needs_decision` if it has not.
 
 `status` prints the next action first and the reasons that led to it. It MUST make a current review that the Implementer has not acted on prominent; that is how a lost Herdr notification is discovered (§8.7). `--json` prints the same facts as one object.
 
@@ -534,7 +541,8 @@ A revision is **agent-approved** when all of the following hold:
 2. that review's forge `commit_id` equals the current PR head;
 3. the PR head equals the `HEAD` of the implementation worktree, which is the registered worktree whose checked-out branch is the PR's head branch;
 4. no `STOPPED` is newer than that review;
-5. because the Reviewer identity is distinct in v0.5.0, that review's forge state is `APPROVED`; a review whose header says `approved` but whose state is not `APPROVED` is reported as a mismatch and is not repaired.
+5. because the Reviewer identity is distinct in v0.5.0, that review's forge state is `APPROVED`; a review whose header says `approved` but whose state is not `APPROVED` is reported as a mismatch and is not repaired;
+6. no Task amendment (§7.6) is newer than that review, because the review evaluated the earlier Task; an edit that touches only the `## Implementation report` section has no effect on approval. After a Task amendment the same head MAY be reviewed again without a code change (§7.5), and `status` reports `launch_review`.
 
 The Implementer reports "approved at `<full-sha>`, ready to merge" and waits. Nothing merges automatically.
 
@@ -576,7 +584,7 @@ The adapter uses these installed Herdr commands and result types and verifies th
 
 `agent-squad reviewer launch --pr <N>` performs, in order:
 
-1. fetches the base branch, derives the state (§7.9), and refuses on any gate: `not_pushed`, `stopped`, `needs_decision`, `unaddressed_findings`, `same_head_requires_rejections`, `budget_exhausted`; refuses when a live agent already carries the Reviewer name (use `reviewer adopt` or `reviewer close`);
+1. fetches the base branch, derives the state (§7.9), and refuses on any gate: `not_pushed`, `stopped`, `needs_decision`, `unanchored_findings`, `unaddressed_findings`, `same_head_requires_rejections` (unless `task_amended`), `budget_exhausted`; refuses when a live agent already carries the Reviewer name (use `reviewer adopt` or `reviewer close`);
 2. computes the target (§6.1) and refuses an empty scope;
 3. creates the detached review worktree at the head, or reuses an existing clean one at that head (`review-worktree create`), verifies its `HEAD`, and creates the scratch directory;
 4. opens the worktree in Herdr and verifies that the opened path equals the review worktree:
@@ -692,6 +700,7 @@ This section supersedes v0.4.4 §19. The file is `<control-root>/config.json`:
   "forge": {"kind": "github", "owner": "MagiLand", "repo": "agent-squad"},
   "implementer": {"agent_name": "implementer", "kind": "codex", "forge_account": "patrickhe"},
   "reviewer": {"kind": "claude", "start_args": [], "forge_account": "patrick-magiland"},
+  "developer_accounts": [],
   "base_branch": "main",
   "max_review_passes": 3,
   "merge_method": "merge",
@@ -712,6 +721,7 @@ This section supersedes v0.4.4 §19. The file is `<control-root>/config.json`:
 | `reviewer.kind` | string | `"claude"` | `"claude"` or `"codex"` |
 | `reviewer.start_args` | array of strings | `[]` | each non-empty, no null bytes; passed to `agent start` after `--` |
 | `reviewer.forge_account` | string | required, no default | non-empty |
+| `developer_accounts` | array of strings | `[]` | forge logins, besides the Implementer identity, whose directly posted `DECISION` comments count (§7.1); each non-empty and different from `reviewer.forge_account` |
 | `base_branch` | string | the remote's default branch at `init`, else `"main"` | non-empty; no whitespace, `..`, or null bytes; MUST exist on the remote |
 | `max_review_passes` | integer | `3` | at least 1 |
 | `merge_method` | string | `"merge"` | `"merge"` or `"squash"` |
@@ -754,11 +764,12 @@ This section supersedes v0.4.4 §32. `agent-squad` remains a standard-library Py
 | Forge | `pr reviews --pr <N>` | read | tagged reviews with header fields, forge state, and current flag; malformed reviews as diagnostics | PR not readable |
 | Forge | `review post --as reviewer --pr <N> --head <sha> --base <sha> --verdict <verdict> --body <file> --threads <file>` | reviewer | the header; finding IDs (§7.4); anchors (§11.2); verdict consistency (§7.3) | head is not the PR head; base invalid; anchors invalid; verdict inconsistent with threads; the forge rejects the review after the §11.1 fallback |
 | Forge | `thread reply --as <role> --pr <N> --finding REV-<n> --body <file>` | either | the thread's root comment from the finding ID | the first line is a tagged line that violates §7.1 or §7.5; finding unknown |
+| Forge | `thread open --as <role> --pr <N> --finding REV-<n> --path <path> --line <line> [--start-line <line>]` | either | the finding's text from the tagged review that lists it as unanchored (§7.4); the anchor validated (§11.2) | finding unknown or already has a thread; anchor invalid |
 | Forge | `thread resolve --as reviewer --pr <N> --finding REV-<n>` | reviewer | the thread node ID | the thread is blocking and not settled |
 | Forge | `decision post --as implementer --pr <N> --finding <REV-n\|none> [--budget <n>] --body <file>` | implementer | the header | `budget` not greater than `used`; finding unknown |
 | Forge | `stop post --as <role> --pr <N> --head <sha> --reason <reason> --body <file>` | either | the header | reason outside the vocabulary; head not a full SHA |
 | Forge | `pr merge --as implementer --pr <N> [--accept-moved-base]` | implementer | approval validity, moved base, merge verification (§7.10) | not agent-approved (exit 4); base moved without the flag (exit 4); the forge refuses; verification fails; a cleanup step fails (exit 3) |
-| Derived state | `status --pr <N> [--json]` | read | everything in §7.9 | PR not readable |
+| Derived state | `status --pr <N> [--json]` | read | everything in §7.9, including under `--json` the full PR body and every review, thread, reply, decision, and stop body with author and timestamp | PR not readable |
 | Reviewer lifecycle | `review-worktree create --pr <N> --head <sha>` | none | the worktree path of §5.2; an existing clean worktree at that head is reused | head not present locally; the path exists and is not a clean worktree at that head |
 | Reviewer lifecycle | `review-worktree remove --pr <N> --head <sha>` | none | the worktree path | the path is not a squad worktree |
 | Reviewer lifecycle | `reviewer launch --pr <N>` | read | §8.3 | any gate (exit 4); Herdr failure; blocked (exit 3) |
@@ -786,7 +797,7 @@ Deterministic checks (v0.4.4 §20.1 amended):
 
 ### 10.4 Reads used by the skills
 
-The skills obtain every fact through `status --pr <N> --json`, `pr head`, `pr reviews`, and `issue view`; they do not call `gh` directly and never see a token.
+The skills obtain every fact through `status --pr <N> --json`, `pr head`, `pr reviews`, and `issue view`; they do not call `gh` directly and never see a token. `status --json` is the complete evidence interface: it carries the PR body, so the Reviewer takes its spec from the approved `## Task` section there rather than from the issue, and it carries every review, thread, reply, decision, and stop body with author and timestamp (§7.9), so a fresh Reviewer can verify every disposition, read every decision, and inspect every finding's evidence without any other read.
 
 ---
 
@@ -798,7 +809,7 @@ The adapter invokes the `gh` executable found on `PATH`. v0.4.4 §14 applies: it
 
 - **PR record:** `GET /repos/{owner}/{repo}/pulls/{N}` for `head.sha`, `head.ref`, `base.ref`, `base.sha`, `state`, `merged`, `merge_commit_sha`, and `mergeable_state`; `POST /repos/{owner}/{repo}/pulls` to create; `PATCH .../pulls/{N}` to update the body.
 - **Merge-base:** computed locally with Git after fetching the base branch; `GET .../compare/{base}...{head}` (`merge_base_commit.sha`) MAY cross-check it.
-- **Reviews:** `POST .../pulls/{N}/reviews` with `commit_id`, `body`, `event` (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`), and `comments[]` of `{path, line, side: "RIGHT", start_line?, start_side?, body}`. On a batch rejection the adapter re-validates the anchors, posts the review with the same body and event and no comments, then posts each comment with `POST .../pulls/{N}/comments` including `commit_id`; any comment that still fails is appended verbatim under a `## Unanchored findings` section of the review body through `PUT .../pulls/{N}/reviews/{id}`, and the command exits 1 after reporting. Nothing already posted is deleted.
+- **Reviews:** `POST .../pulls/{N}/reviews` with `commit_id`, `body`, `event` (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`), and `comments[]` of `{path, line, side: "RIGHT", start_line?, start_side?, body}`. On a batch rejection the adapter re-validates the anchors, posts the review with the same body and event and no comments (its `## Findings` list still names every finding, which keeps the association of §7.4), then posts each comment with `POST .../pulls/{N}/comments` including `commit_id`; the forge attaches such comments to synthetic reviews without headers, which are not tagged reviews and never count. Any comment that still fails is appended, starting with its finding line, under a `## Unanchored findings` section of the review body through `PUT .../pulls/{N}/reviews/{id}`, and the command exits 1 after reporting so the Reviewer can re-anchor it with `thread open` (§7.4). Nothing already posted is deleted, and the review remains one logical review.
 - **Stranded drafts:** before posting, `GET .../pulls/{N}/reviews` is scanned for a `PENDING` review by the Reviewer identity; one is submitted with `POST .../pulls/{N}/reviews/{id}/events` and `event: COMMENT`, never deleted, because a pending draft blocks a new review and may hold finished replies.
 - **Threads and replies:** `POST .../pulls/{N}/comments/{root_id}/replies` posts a reply. Enumeration goes per review, `GET .../pulls/{N}/reviews/{id}/comments` for every review, because the flat `GET .../pulls/{N}/comments` listing can omit replies; the flat listing supplies `line`, `start_line`, and `side` for anchors, which the per-review listing reports as `null`. Thread node IDs and resolution state come from GraphQL `repository.pullRequest.reviewThreads`, paginated, and resolution uses the `resolveReviewThread` mutation.
 - **Conversation comments:** `GET` and `POST .../issues/{N}/comments` for decisions and stops.
@@ -835,10 +846,10 @@ This section supersedes v0.4.4 §35. Two skills, each a directory with one `SKIL
 An outline; each rule is mandatory content of the skill text. Markers refer to the current Implementer prompt.
 
 1. **Task statement [new].** Read the issue with `issue view`; draft `## Task` (objective, acceptance criteria, constraints, non-goals); present it to the Developer once and wait for approval; then work autonomously until the first handback.
-2. **Implementation workflow [adapted].** Use the dedicated worktree `<worktree_root>/issue-<N>` on a branch named `<type>/issue-<N>-<slug>`; understand the issue and relevant existing code before making changes; implement the requested change without unnecessary scope expansion; run the relevant tests, checks, and validation; commit and push; open the PR with `pr create` including both sections; update the report with `pr report` on every later push; list changes to agent instruction or control-plane files under "Areas worth extra review".
+2. **Implementation workflow [adapted].** Use the dedicated worktree `<worktree_root>/issue-<N>` on a branch following the consuming repository's naming policy (use `<type>/issue-<N>-<slug>` when no policy is specified); understand the issue and relevant existing code before making changes; implement the requested change without unnecessary scope expansion; run the relevant tests, checks, and validation; commit and push; open the PR with `pr create` including both sections; update the report with `pr report` on every later push; list changes to agent instruction or control-plane files under "Areas worth extra review".
 3. **Request a review [adapted].** Run `reviewer launch --pr <N>`; on exit 4 report the gate to the Developer; on exit 3 tell the Developer which pane needs an answer and later run `reviewer adopt`; never send keys.
 4. **Asynchronous handoff [verbatim]** as quoted in §8.8, after a successful `reviewer launch` or `reviewer adopt`.
-5. **Handling review feedback [adapted].** On a `REVIEW_RESULT` prompt or a "check the PR" instruction, run `status --pr <N>` first and act on the derived next action; read the review directly from the GitHub PR, including inline threads and suggestions, and treat the PR as the authoritative source; independently evaluate each substantive actionable finding; fix findings that are valid; do not change the code merely to satisfy findings that are incorrect, inappropriate, already resolved, or no longer applicable; record a `DISPOSITION` reply on every blocking thread with `thread reply`; run the relevant tests and validation after making changes; commit and push; update the report; then `reviewer close` for the finished Reviewer and `reviewer launch` for the new head.
+5. **Handling review feedback [adapted].** On a `REVIEW_RESULT` prompt or a "check the PR" instruction, run `status --pr <N>` first and act on the derived next action; read the review directly from the GitHub PR, including inline threads and suggestions, and treat the PR as the authoritative source; independently evaluate each substantive actionable finding; fix findings that are valid; do not change the code merely to satisfy findings that are incorrect, inappropriate, already resolved, or no longer applicable; if `status` reports `open_threads`, open a thread for each unanchored finding with `thread open` before anything else; record a `DISPOSITION` reply on every blocking thread with `thread reply`; run the relevant tests and validation after making changes; commit and push; update the report; then `reviewer close` for the finished Reviewer and `reviewer launch` for the new head.
 6. **Non-blocking and optional findings [verbatim]:**
 
    > Treat non-blocking and optional findings as advisory, not mandatory.
@@ -855,7 +866,7 @@ An outline; each rule is mandatory content of the skill text. Markers refer to t
    >
    > Unimplemented optional findings that have been reasonably dispositioned do not prevent the PR from being complete or approved.
 
-7. **Needs-human [adapted].** On a `needs_human` verdict, or before posting a `needs-human` disposition, relay the decision required to the Developer; record the Developer's answer with `decision post`, quoting the Developer; only then request another review.
+7. **Needs-human and decisions [adapted].** On a `needs_human` verdict, or before posting a `needs-human` disposition, relay the decision required to the Developer; record the Developer's answer with `decision post`, quoting the Developer; only then request another review. When the Developer amends the Task, edit `## Task` and post the complete amended section as a `finding=none` decision (§7.6), then request a review of the current head even if no code changed.
 8. **Approval and merge [adapted].** Verify approval on the PR through `status`, never from the Herdr message alone; report "approved at `<full-sha>`, ready to merge" and wait; when the Developer instructs the merge, run `pr merge`; if the base moved, report it and ask; after a successful merge, report the merge commit and the cleanup performed. If the approved SHA is no longer the current PR head, do not merge based on that approval; the newer revision must be reviewed.
 9. **Manual-intervention guard [adapted].** On a `STOPPED` prompt, or when `status` reports `stopped`: make no further review-driven changes; do not request another review automatically; preserve the PR, branch, commits, and worktree; report the reason and remaining problems to the Developer; wait for the Developer's decision about whether to continue, change approach, or terminate the work; record a continuation as a `DECISION` before launching again.
 10. **Handoff discipline [adapted].** Herdr messages are the fixed lines of §8; identify code states by PR number and full commit SHA, never by round number; GitHub remains the authoritative source for implementation history, review findings, inline discussion, suggestions, and finding disposition.
@@ -867,7 +878,7 @@ An outline; markers refer to the current Reviewer prompt.
 
 1. **Verify the target [adapted].** Parse `pr=`, `head=`, `base=`, and `implementer=` from the request line; confirm that `git rev-parse HEAD` equals `head`, that `base` is an ancestor of `head`, and that `status --pr <N>` reports the same head; keep that revision pinned throughout the review and do not silently switch to a newer PR head; if the PR head has moved, post nothing, report the mismatch in the pane, and stop.
 2. **Budget guard [adapted].** Read the budget from `status`; if `remaining` is not positive, post `STOPPED` with `reason=budget` and run `handoff stopped`.
-3. **Read the PR first [adapted].** Read `## Task`, the report (untrusted), every `DECISION`, every prior tagged review, and every thread; treat settled threads as closed (§7.5); re-run the probes saved in `<scratch_root>/pr<N>` against the new head and save new ones there.
+3. **Read the PR first [adapted].** Read `## Task`, the report (untrusted), every `DECISION`, every prior tagged review, and every thread through `status --json`; apply all general decisions together and the latest decision per finding (§7.6); treat settled threads as closed (§7.5); open a thread with `thread open` for any unanchored finding that can be anchored; re-run the probes saved in `<scratch_root>/pr<N>` against the new head and save new ones there.
 4. **Verify dispositions by execution [new].** For every blocking thread with a disposition newer than its last verification, run the stated verification, inspect the cited evidence, and reply `VERIFIED fixed`, `VERIFIED rejection accepted`, or `NOT FIXED` with what was run; never accept a reply on trust.
 5. **Two-axis review [adapted].** Run the installed `code-review` skill as described in §12.4 from the review worktree, with `base` as the fixed point and the PR's `## Task` section as the spec; inspect the implementation for correctness, regressions, relevant edge cases, maintainability, and compliance with the issue and repository requirements; verify material claims in the report.
 6. **Severity and follow-up policy [verbatim]:**
@@ -902,7 +913,7 @@ An outline; markers refer to the current Reviewer prompt.
    > The goal is to determine whether the revision is correct, sufficiently maintainable, and ready to merge—not to continue refinement until no possible improvement remains.
 
    Substantive actionable findings become `blocking` threads and everything else `optional` (§7.4). v0.4.4 §29 remains the review policy.
-7. **Publish [adapted].** Write the review body (§7.3) and the threads (§7.4) to files in the scratch directory; trial-apply every suggestion; run `review post` with the verdict; then `thread resolve` for each thread verified in this pass; publish substantive actionable findings only on the GitHub PR.
+7. **Publish [adapted].** Write the review body (§7.3) and the threads (§7.4) to files in the scratch directory; trial-apply every suggestion; run `review post` with the verdict; if it exits 1 with unanchored findings, re-anchor each with `thread open` before handing off; then `thread resolve` for each thread verified in this pass; publish substantive actionable findings only on the GitHub PR.
 8. **Hand off [adapted].** Run `handoff review-result` with the exact head and verdict; or, when the loop must stop, `stop post` and then `handoff stopped`. Do not duplicate detailed findings in Herdr messages.
 9. **Early stop [verbatim conditions, adapted mechanics].** Stop before the budget is spent under the conditions of §7.7, using the vocabulary there; record the stop on the PR; after the review that exhausts the budget with substantive findings remaining, stop with `reason=budget`.
 10. **Asynchronous handoff [verbatim]:**
@@ -976,6 +987,9 @@ This section supersedes v0.4.4 §33. In every case the PR is preserved and re-de
 | Review with a header but a mismatching forge state | Reported; not approving; the Reviewer identity posts a corrected review |
 | PR head moved after launch | The Reviewer detects the mismatch (§12.3 rule 1) and posts nothing; the Implementer closes it and launches for the new head |
 | Batch review rejected by the forge | §11.1 fallback; residual failures land in the review body; exit 1 |
+| Blocking finding still unanchored after the fallback | It stays listed in the review body with its ID; `status` shows `open_threads`; the Reviewer, or later either identity, runs `thread open`; approval and the next launch stay blocked until the finding is settled |
+| Tagged `DECISION` by an unauthorized author | Reported as a diagnostic; no effect on the budget, the gates, or the Task; the Developer or the Implementer posts the decision |
+| Task amended after an approval | The approval is invalid (§7.10 condition 6); `status` shows `launch_review` for the same head; the next review evaluates the amended Task |
 | Stranded pending draft | Submitted as a comment review before posting |
 | Anchor outside the diff | Refused locally before posting |
 | Base branch moved before merge | `pr merge` refuses without `--accept-moved-base`; the Developer decides |
@@ -1009,7 +1023,11 @@ This section supersedes v0.4.4 §36. Automated tests use `unittest`, never call 
 Required coverage:
 
 - parsing and rendering of the `REVIEW`, `DECISION`, and `STOPPED` headers, the finding line, the `DISPOSITION` and verification lines, and the Herdr request, result, and stop lines, including rejection of every malformed variant (wrong tag, leading zeros, extra tokens, abbreviated SHAs, wrong case, missing fields);
-- the authorship rules of §7.1;
+- the authorship rules of §7.1, including an authorized direct decision, an Implementer-posted quoted decision, and a syntactically valid decision by an unrelated author, of which only the first two alter the budget, the gates, or the Task;
+- cumulative general decisions: two independent general decisions, then a budget-only extension, then an explicit revision of one decision, after which only the revised question changes;
+- next-action ordering: approval at used/effective 1/1, 3/3, and 4/4 after an extension yields `approved`, and a budget-exhausting `changes_requested` yields `stopped` or `needs_decision`;
+- Task amendment: approval at head H against Task A is invalid after an amendment to Task B without a code change, and a report-only edit leaves it valid;
+- fallback association: a `changes_requested` review whose batch failed but whose comments succeeded individually, and one whose blocking comment also failed, both keep one logical review and the finding's ID and offer recovery through `thread open`;
 - finding-ID allocation across reviews, authors, and resolved threads;
 - budget derivation, including `budget=` decisions, malformed reviews, and reviews at replaced heads;
 - `STOPPED` and `DECISION` ordering, including equal timestamps;
@@ -1031,6 +1049,7 @@ With the fake forge and the fake Herdr, in temporary repositories:
 - `review post` with the batch rejection fallback, a stranded pending draft, and the unanchored-findings append;
 - reply enumeration per review when the flat listing omits replies;
 - `thread resolve` through the fake GraphQL endpoint;
+- `thread open` for an unanchored finding by each identity, with `status` reporting `open_threads` until then;
 - `status` across scripted PR states covering every next action of §7.9;
 - `pr merge` with `merge` and `squash`, a moved base with and without `--accept-moved-base`, a forge refusal, and a cleanup failure;
 - `doctor` catching each misconfiguration the live trials hit (§17.4).
@@ -1049,7 +1068,8 @@ With the fake forge and the fake Herdr, in temporary repositories:
 8. `decision post` with `budget=4`; `reviewer launch` succeeds; the fourth review approves.
 9. `pr merge` is refused while the base branch has been advanced on the fake remote, then succeeds with `--accept-moved-base`; integration is verified by ancestry with `merge`; a second PR on the same fake repository is then merged with `squash` on a base that has not moved, verifying tree identity; after each merge the issue worktree, branch, review worktrees, and scratch directory are gone.
 10. Lost notification: with the fake Herdr set to fail `agent prompt`, a scripted review is posted and `handoff review-result` fails; `status` still reports the current review and the correct next action.
-11. Cleanup verification: no tracked runtime files, no registered review worktrees, the temporary root removed, retained resources reported on failure.
+11. Fallback: with the fake forge set to reject the batch, a review is posted body-first and its findings individually; with one comment also failing, `status` shows `open_threads`, `thread open` recovers the finding, and the loop continues with one logical review counted.
+12. Cleanup verification: no tracked runtime files, no registered review worktrees, the temporary root removed, retained resources reported on failure.
 
 The runner MUST NOT commit an intentional defect into a real development checkout, and it MUST work from a source export without `.git`, as today.
 
@@ -1144,6 +1164,9 @@ Within the operating assumptions of §3.3, v0.5.0 MUST guarantee:
 12. Nothing merges without the Developer's instruction; a merge is verified by ancestry or tree identity; a moved base is reported before merging.
 13. Every forge mutation runs as exactly one configured identity, and no token is ever printed.
 14. The normal loop proceeds without Developer message relay.
+15. A `DECISION` by an author other than the Implementer identity or a configured Developer login has no effect.
+16. A finding listed by a tagged review cannot be lost by a partial posting failure, and approval cannot overlook it.
+17. A material Task amendment invalidates every earlier approval.
 
 ### 18.2 Non-guarantees
 
@@ -1191,7 +1214,10 @@ v0.4.4 §8 is retained in full. Additionally, v0.5.0 does not include:
 6. The finding category has a grammar and a recommended vocabulary (§7.4); the plan left `<category>` open.
 7. `pr merge` requires `--accept-moved-base` to proceed on a moved base (§7.10); that is how "leaves the choice to the Developer" is enforced.
 8. Read-only commands default to the identity implied by the current worktree (§10.1).
-9. The `## Unanchored findings` fallback and the exit-status vocabulary (§10.1, §11.1) are specified so that the skills can branch on outcomes.
+9. The `## Unanchored findings` fallback, the `thread open` recovery command, and the exit-status vocabulary (§7.4, §10.1, §11.1) are specified so that a partial posting failure cannot lose a finding and the skills can branch on outcomes.
+10. An optional `developer_accounts` configuration field (§9), absent from the plan's example, authorizes a Developer login that differs from the Implementer identity to post decisions directly, which plan Section 3.6 allows; every other author's decision is a diagnostic.
+11. General decisions are cumulative and a Task amendment must carry the amended section (§7.6), so that plan Section 3.6's "latest decision on a question" cannot let a budget extension erase an unrelated decision, and so that approval validity can require review against the amended Task (§7.10 condition 6).
+12. A review's `## Findings` list is the authoritative association between a review and its findings (§7.3, §7.4), because the forge cannot attach a standalone comment to an existing review.
 
 ---
 
