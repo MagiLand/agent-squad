@@ -2,13 +2,13 @@
 
 ## Project Structure & Module Organization
 
-The repository is currently at the approved-specification stage. `docs/agent-squad-v0.4.4-spec.md` is the canonical implementation baseline; do not treat files under ignored `.local/` as project inputs.
+The implementation baseline is `docs/agent-squad-v0.5.0-spec.md`, the approved delta over `docs/agent-squad-v0.4.4-spec.md`; do not treat files under ignored `.local/` as project inputs.
 
 Implementation should follow the specification's focused increments. Production code belongs under `src/agent_squad/`, with the installed command defined in `cli.py`. Put unit tests in `tests/unit/`, Git and process integration tests in `tests/integration/`, reusable data in `tests/fixtures/`, smoke tooling in `scripts/`, and consumer examples in `examples/`. Prefer combining small modules over creating shallow wrappers.
 
 ## Build, Test, and Development Commands
 
-No executable package or Makefile exists yet. Once Increment 1 adds them, preserve these repository-level commands:
+Preserve these repository-level commands:
 
 - `make test` — run the deterministic automated suite.
 - `make smoke` — exercise the self-contained disposable-repository workflow.
@@ -23,7 +23,7 @@ Target Python 3.11 or later and use four-space indentation. Follow `snake_case` 
 
 ## Testing Guidelines
 
-Use `unittest`; name files `test_*.py` and test methods `test_<behavior>`. Every state transition, validator, atomic write, locking rule, recovery path, and Git identity check needs deterministic coverage. Use temporary repositories and fake Herdr processes for integration tests; automated tests must not call real models. The specification defines required coverage in Section 36; no numeric coverage threshold is currently set.
+Use `unittest`; name files `test_*.py` and test methods `test_<behavior>`. Every protocol derivation, validator, configuration write, recovery path, and Git identity check needs deterministic coverage. Use temporary repositories and fake Herdr processes for integration tests; automated tests must not call real models. The delta defines required coverage in Section 16; no numeric coverage threshold is currently set.
 
 ## Commit & Pull Request Guidelines
 

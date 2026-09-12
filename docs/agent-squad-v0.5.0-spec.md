@@ -273,7 +273,7 @@ v0.4.4 §12 and §13 are amended:
 - `gh` is invoked as an external executable found on `PATH`, with argument arrays and `shell=False`; the installed runtime still requires no third-party library;
 - kept and adapted: `cli.py`, `initialization.py`, `herdr.py`, `doctor.py`, `preflight.py`;
 - added (names are suggestions): `forge.py` (GitHub adapter, §11), `conventions.py` (grammars, parsing, derived state, §7), `anchors.py` (§11.2), `worktrees.py`, `templates.py` (handoff lines, §8), and the packaged skill files `skills/squad-implementer/SKILL.md` and `skills/squad-reviewer/SKILL.md` (§12);
-- removed in Increment 5: run and round state, storage locks, bundle artifacts, submissions, review submissions and applications, marker recovery, and their tests.
+- removed in Increment 1: run and round state, storage locks, bundle artifacts, submissions, review submissions and applications, marker recovery, and their tests.
 
 The `make test`, `make smoke`, and `make doctor` targets are preserved.
 
@@ -811,6 +811,7 @@ The skills obtain every fact through `status --pr <N> --json`, `pr head`, `pr re
 
 The adapter invokes the `gh` executable found on `PATH`. v0.4.4 §14 applies: it verifies `gh --version` and `gh auth token --user` at `doctor` time and does not hard-code observed versions. It uses:
 
+- **Issues:** `GET /repos/{owner}/{repo}/issues/{N}` for title, body, and labels, and `GET .../issues/{N}/comments` for comments used by `issue view` and `pr create`.
 - **PR record:** `GET /repos/{owner}/{repo}/pulls/{N}` for `head.sha`, `head.ref`, `base.ref`, `base.sha`, `state`, `merged`, `merge_commit_sha`, and `mergeable_state`; `POST /repos/{owner}/{repo}/pulls` to create; `PATCH .../pulls/{N}` to update the body.
 - **Merge-base:** computed locally with Git after fetching the base branch; `GET .../compare/{base}...{head}` (`merge_base_commit.sha`) MAY cross-check it.
 - **Reviews:** `POST .../pulls/{N}/reviews` with `commit_id`, `body`, `event` (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`), and `comments[]` of `{path, line, side: "RIGHT", start_line?, start_side?, body}`. On a batch rejection the adapter re-validates the anchors and posts the review with the same event and no comments, with the body extended by a `## Unanchored findings` section that holds the complete text of every finding, starting with each finding line, so that this first successful write persists all evidence on the PR (§7.4); its `## Findings` list keeps the association. It then posts each root with `POST .../pulls/{N}/comments` including `commit_id`; the forge attaches such comments to synthetic reviews without headers, which are not tagged reviews and never count. A root that still fails is reported, the command exits 1, and the Reviewer re-anchors it with `thread open` (§7.4). The review body is never edited afterwards, nothing already posted is deleted, and the review remains one logical review. Resumption is explicit: `review post --resume <review-id>` identifies the interrupted review by its forge ID, verifies that it is a tagged review by the Reviewer identity with the same header and the same `## Findings` list, posts no second review, and creates only the roots that are missing, so an interruption at any point is recovered without a second logical review. A plain `review post` never suppresses a review on the strength of a matching header: a fresh pass at the same head (§7.5) is a new formal review that MUST be published and counted (§7.8), and after a Task amendment it is the fresh approval's submission time that restores approval validity (§7.10).
@@ -1105,23 +1106,23 @@ Each increment is one issue under milestone v0.5.0 and one PR. Increment 0 is th
 
 ### 17.1 Increment 1: GitHub adapter and derived state
 
-Build the GitHub adapter (§11.1), the convention grammars and derivation (§7), anchor validation (§11.2), the fake forge (§11.3), configuration schema 2 and `init` (§9), and the commands `pr head`, `pr reviews`, `pr create`, `pr report`, `review post`, `thread reply`, `thread resolve`, `decision post`, `stop post`, `issue view`, and `status`. Done when the forge steps of the smoke scenario pass against the fake forge and `review post` has been exercised once on a real disposable GitHub PR as `patrick-magiland`, with the evidence recorded (§16.5).
+Build the GitHub adapter (§11.1), the convention grammars and derivation (§7), anchor validation (§11.2), the fake forge (§11.3), configuration schema 2 and `init` (§9), and the commands `pr head`, `pr reviews`, `pr create`, `pr report`, `review post`, `thread reply`, `thread open`, `thread resolve`, `decision post`, `stop post`, `issue view`, and `status`. First remove the v0.4.4 machinery listed in §5.6 in a separate commit. Keep the applicable `doctor` checks working with schema 2 and build the partial smoke runner for the forge steps of §16.3; later increments extend it. Done when the forge steps of the smoke scenario pass against the fake forge and `review post` has been exercised once on a real disposable GitHub PR as `patrick-magiland`, with the evidence recorded (§16.5).
 
 ### 17.2 Increment 2: Reviewer lifecycle
 
-Build `review-worktree create` and `remove`, `reviewer launch`, `adopt`, and `close`, the handoff templates and both `handoff` commands (§8), blocked detection, and the delivery experiment (prompt after start versus initial prompt). Done when the fake-Herdr tests pass, one real Claude Code Reviewer and one real Codex Reviewer have been launched and closed, the delivery mechanism per harness is recorded, and trust inheritance for linked worktrees is confirmed or the persistent-Reviewer fallback adopted (§13.3).
+Build `review-worktree create` and `remove`, `reviewer launch`, `adopt`, and `close`, `doctor --live-reviewer` (§10.3), the handoff templates and both `handoff` commands (§8), blocked detection, and the delivery experiment (prompt after start versus initial prompt). Done when the fake-Herdr tests pass, one real Claude Code Reviewer and one real Codex Reviewer have been launched and closed, the delivery mechanism per harness is recorded, and trust inheritance for linked worktrees is confirmed or the persistent-Reviewer fallback adopted (§13.3).
 
 ### 17.3 Increment 3: Skills
 
 Write both `SKILL.md` files (§12.2, §12.3), `skill install` (§12.1), and `pr merge` (§7.10). Done when a real loop on the disposable repository reaches approval and a human-gated merge from a single interactive session.
 
-### 17.4 Increment 4: Doctor and preflight
+### 17.4 Increment 4: Doctor
 
-Adapt `doctor` and `doctor --live-reviewer` to §10.3: two forge identities distinct and authorized, Herdr schema, socket reachability from the configured Implementer kind, worktree and scratch roots, skill installation, orphaned Reviewers and worktrees. Done when `doctor` catches each misconfiguration the live trials hit.
+Adapt `doctor` to §10.3: two forge identities distinct and authorized, Herdr schema, socket reachability from the configured Implementer kind, worktree and scratch roots, skill installation, orphaned Reviewers and worktrees. Done when `doctor` catches each misconfiguration the live trials hit.
 
-### 17.5 Increment 5: Smoke, documentation, removal, release
+### 17.5 Increment 5: Smoke, documentation, release
 
-Build the smoke runner (§16.3); rewrite `README.md` and `docs/workflow-verification.md` for the PR-based loop; remove the v0.4.4 machinery listed in §5.6; set the version to 0.5.0; run the live trials (§16.4) and record the evidence (§16.5).
+Build the smoke runner (§16.3); rewrite `README.md` and `docs/workflow-verification.md` for the PR-based loop; set the version to 0.5.0; run the live trials (§16.4) and record the evidence (§16.5).
 
 ### 17.6 Definition of done
 
@@ -1226,6 +1227,7 @@ v0.4.4 §8 is retained in full. Additionally, v0.5.0 does not include:
 11. General decisions are cumulative and a Task amendment must carry the amended section (§7.6), so that plan Section 3.6's "latest decision on a question" cannot let a budget extension erase an unrelated decision, and so that approval validity can require review against the amended Task (§7.10 condition 6).
 12. A review's `## Findings` list is the authoritative association between a review and its findings (§7.3, §7.4), because the forge cannot attach a standalone comment to an existing review; the fallback persists every finding's full text in its first write, and `review post --resume <review-id>` completes an interrupted publication without suppressing a fresh same-head review (§11.1).
 13. `decision post --task` owns a Task amendment together with its mirror into the PR body, and the effective Task is derived from the latest amendment (§7.6, §10.2), so the skills never need `gh` for a Task edit.
+14. With no users and no backward compatibility required, the removal of the v0.4.4 machinery moves to Increment 1. `doctor --live-reviewer` moves to Increment 2 because the delivery and trust experiment (§13.3) needs it there (issue #42, decided 2026-09-12).
 
 ---
 

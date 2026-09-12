@@ -1,709 +1,502 @@
-"""Repository discovery, configuration, and safe initialization."""
+"""Git discovery and schema 2 configuration;
+
+no review state is stored locally.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 import json
 import os
-from pathlib import Path, PurePosixPath
-import stat
+from pathlib import Path
+import re
 import subprocess
+import tempfile
+from urllib.parse import urlsplit
 
-from .storage import InvalidJsonError, atomic_write, decode_json
 from .validation import JsonValidator
 
-
-SCHEMA_VERSION = 1
 CONTROL_DIRECTORY_NAME = ".agent-squad"
 REVIEW_DIRECTORY_NAME = ".agent-squad-review"
-CONFIGURATION_FILE_NAME = "config.json"
-LOCAL_EXCLUDE_PATTERNS = (
-    f"{CONTROL_DIRECTORY_NAME}/",
-    f"{REVIEW_DIRECTORY_NAME}/",
-)
+LOCAL_EXCLUDE_PATTERNS = (".agent-squad/", ".agent-squad-review/")
 
 
 class AgentSquadError(Exception):
-    """Base class for actionable user-facing failures."""
+    """An actionable command failure."""
 
 
 class ConfigurationError(AgentSquadError):
-    """Raised when repository-local configuration is invalid."""
+    """An invalid configuration."""
 
 
-class RepositoryError(AgentSquadError):
-    """Raised when the current directory is not a usable Git worktree."""
+class GateError(AgentSquadError):
+    """An action refused by the review protocol (exit 4)."""
 
 
-class InitializationError(AgentSquadError):
-    """Raised when validated initialization cannot be completed safely."""
+class RetainedError(AgentSquadError):
+    """A published Task amendment whose body mirror needs repair (exit 3)."""
 
 
 class AgentKind(StrEnum):
-    """Supported installed agent harnesses."""
-
     CLAUDE = "claude"
     CODEX = "codex"
 
 
-_VALIDATOR = JsonValidator(
-    ConfigurationError,
-    reject_null_strings=False,
-)
-_require_object = _VALIDATOR.require_object
-_check_fields = _VALIDATOR.check_fields
-_require_string = _VALIDATOR.require_string
-_require_int = _VALIDATOR.require_int
+V = JsonValidator(ConfigurationError)
+
+
+def decode_json(content: str) -> object:
+    """Read strict JSON, including duplicate-key and non-finite rejection."""
+
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate JSON field: {key}")
+            result[key] = value
+        return result
+
+    def constant(value: str) -> None:
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    return json.loads(
+        content, object_pairs_hook=pairs, parse_constant=constant
+    )
+
+
+@dataclass(frozen=True)
+class ForgeConfiguration:
+    kind: str
+    owner: str
+    repo: str
 
 
 @dataclass(frozen=True)
 class ImplementerConfiguration:
-    """Configured identity and harness kind for the Implementer."""
-
     agent_name: str
     kind: AgentKind
+    forge_account: str
 
 
 @dataclass(frozen=True)
 class ReviewerConfiguration:
-    """Configured Reviewer harness and native start arguments."""
-
     kind: AgentKind
     start_args: tuple[str, ...]
+    forge_account: str
 
 
 @dataclass(frozen=True)
 class Configuration:
-    """Validated schema-versioned repository configuration."""
-
     schema_version: int
+    forge: ForgeConfiguration
     implementer: ImplementerConfiguration
     reviewer: ReviewerConfiguration
-    base_ref: str
-    review_worktree_root: Path
-    max_completed_change_reviews: int
-    allowed_generated_paths: tuple[str, ...]
+    developer_accounts: tuple[str, ...]
+    base_branch: str
+    max_review_passes: int
+    merge_method: str
+    worktree_root: str
+    scratch_root: str
 
     @classmethod
-    def from_dict(cls, value: object) -> "Configuration":
-        """Validate and construct configuration from decoded JSON."""
-
-        data = _require_object(value, "configuration")
-        _check_fields(
+    def from_dict(cls, value: object) -> Configuration:
+        data = V.require_object(value, "configuration")
+        if data.get("schema_version") == 1:
+            raise ConfigurationError(
+                "schema 1 is unsupported; move config.json aside and rerun "
+                "agent-squad init with both accounts"
+            )
+        V.check_fields(
             data,
             required={
                 "schema_version",
+                "forge",
                 "implementer",
                 "reviewer",
-                "base_ref",
-                "review_worktree_root",
-                "max_completed_change_reviews",
+                "base_branch",
+                "max_review_passes",
+                "merge_method",
+                "worktree_root",
+                "scratch_root",
             },
-            optional={"allowed_generated_paths"},
+            optional={"developer_accounts"},
             path="configuration",
         )
-
-        schema_version = _require_int(
-            data["schema_version"],
-            "configuration.schema_version",
+        if V.require_int(data["schema_version"], "schema_version") != 2:
+            raise ConfigurationError("schema_version must equal 2")
+        forge = V.require_object(data["forge"], "forge")
+        V.check_fields(forge, required={"kind", "owner", "repo"}, path="forge")
+        if forge["kind"] != "github":
+            raise ConfigurationError("forge.kind must be github")
+        for key in ("owner", "repo"):
+            text = V.require_string(forge[key], f"forge.{key}")
+            if re.search(r"[/\s]", text):
+                raise ConfigurationError(
+                    f"forge.{key} cannot contain / or whitespace"
+                )
+        implementer = V.require_object(data["implementer"], "implementer")
+        reviewer = V.require_object(data["reviewer"], "reviewer")
+        V.check_fields(
+            implementer,
+            required={"agent_name", "kind", "forge_account"},
+            path="implementer",
         )
-        if schema_version != SCHEMA_VERSION:
+        V.check_fields(
+            reviewer,
+            required={"kind", "start_args", "forge_account"},
+            path="reviewer",
+        )
+        name = V.require_string(
+            implementer["agent_name"], "implementer.agent_name"
+        )
+        if re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) is None:
+            raise ConfigurationError("implementer.agent_name is invalid")
+        kinds = [
+            V.require_enum(role["kind"], f"{label}.kind", AgentKind)
+            for label, role in [
+                ("implementer", implementer),
+                ("reviewer", reviewer),
+            ]
+        ]
+        accounts = [
+            V.require_string(role["forge_account"], f"{label}.forge_account")
+            for label, role in [
+                ("implementer", implementer),
+                ("reviewer", reviewer),
+            ]
+        ]
+        if accounts[0].casefold() == accounts[1].casefold():
             raise ConfigurationError(
-                f"configuration.schema_version must be {SCHEMA_VERSION}"
+                "Implementer and Reviewer accounts must differ"
             )
-
-        implementer_data = _require_object(
-            data["implementer"], "configuration.implementer"
+        args = string_list(reviewer["start_args"], "reviewer.start_args")
+        developers = string_list(
+            data.get("developer_accounts", []), "developer_accounts"
         )
-        _check_fields(
-            implementer_data,
-            required={"agent_name", "kind"},
-            optional=set(),
-            path="configuration.implementer",
-        )
-        implementer_name = _require_string(
-            implementer_data["agent_name"],
-            "configuration.implementer.agent_name",
-        )
-        implementer_kind = _VALIDATOR.require_enum(
-            implementer_data["kind"],
-            "configuration.implementer.kind",
-            AgentKind,
-        )
-
-        reviewer_data = _require_object(
-            data["reviewer"], "configuration.reviewer"
-        )
-        _check_fields(
-            reviewer_data,
-            required={"kind"},
-            optional={"start_args"},
-            path="configuration.reviewer",
-        )
-        reviewer_kind = _VALIDATOR.require_enum(
-            reviewer_data["kind"],
-            "configuration.reviewer.kind",
-            AgentKind,
-        )
-        start_args_value = reviewer_data.get("start_args", [])
-        start_args = _require_string_list(
-            start_args_value,
-            "configuration.reviewer.start_args",
-        )
-
-        base_ref = _require_string(data["base_ref"], "configuration.base_ref")
-        if base_ref != base_ref.strip() or "\x00" in base_ref:
+        if any(
+            login.casefold() == accounts[1].casefold() for login in developers
+        ):
             raise ConfigurationError(
-                "configuration.base_ref must not contain surrounding "
-                "whitespace or null bytes"
+                "developer_accounts must exclude the Reviewer"
             )
-
-        review_root_text = _require_string(
-            data["review_worktree_root"],
-            "configuration.review_worktree_root",
-        )
-        if "\x00" in review_root_text:
+        branch = V.require_string(data["base_branch"], "base_branch")
+        if re.search(r"\s", branch) or ".." in branch:
             raise ConfigurationError(
-                "configuration.review_worktree_root must not contain "
-                "null bytes"
+                "base_branch cannot contain whitespace or .."
             )
-        review_root = Path(review_root_text).expanduser()
-        if not review_root.is_absolute():
-            raise ConfigurationError(
-                "configuration.review_worktree_root must be an absolute path"
-            )
-
-        review_limit = _require_int(
-            data["max_completed_change_reviews"],
-            "configuration.max_completed_change_reviews",
-        )
-        if review_limit < 1:
-            raise ConfigurationError(
-                "configuration.max_completed_change_reviews must be a "
-                "positive integer"
-            )
-
-        generated_paths = _VALIDATOR.require_narrow_relative_paths(
-            data.get("allowed_generated_paths", []),
-            "configuration.allowed_generated_paths",
-        )
-
+        budget = V.require_int(data["max_review_passes"], "max_review_passes")
+        if budget < 1:
+            raise ConfigurationError("max_review_passes must be positive")
+        method = V.require_string(data["merge_method"], "merge_method")
+        if method not in ("merge", "squash"):
+            raise ConfigurationError("merge_method must be merge or squash")
+        roots = [
+            V.require_string(data[key], key)
+            for key in ("worktree_root", "scratch_root")
+        ]
         return cls(
-            schema_version=schema_version,
-            implementer=ImplementerConfiguration(
-                agent_name=implementer_name,
-                kind=implementer_kind,
-            ),
-            reviewer=ReviewerConfiguration(
-                kind=reviewer_kind,
-                start_args=start_args,
-            ),
-            base_ref=base_ref,
-            review_worktree_root=review_root,
-            max_completed_change_reviews=review_limit,
-            allowed_generated_paths=generated_paths,
+            2,
+            ForgeConfiguration(**forge),
+            ImplementerConfiguration(name, kinds[0], accounts[0]),
+            ReviewerConfiguration(kinds[1], args, accounts[1]),
+            developers,
+            branch,
+            budget,
+            method,
+            *roots,
         )
 
     def to_dict(self) -> dict[str, object]:
-        """Return the stable JSON representation of this configuration."""
+        return json.loads(json.dumps(asdict(self)))
 
-        return {
-            "schema_version": self.schema_version,
-            "implementer": {
-                "agent_name": self.implementer.agent_name,
-                "kind": self.implementer.kind,
-            },
-            "reviewer": {
-                "kind": self.reviewer.kind,
-                "start_args": list(self.reviewer.start_args),
-            },
-            "base_ref": self.base_ref,
-            "review_worktree_root": str(self.review_worktree_root),
-            "max_completed_change_reviews": self.max_completed_change_reviews,
-            "allowed_generated_paths": list(self.allowed_generated_paths),
-        }
+    def account(self, role: str) -> str:
+        if role not in ("implementer", "reviewer"):
+            raise ConfigurationError(f"unknown role: {role}")
+        return getattr(self, role).forge_account
+
+
+def string_list(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ConfigurationError(f"{label} must be an array")
+    return tuple(
+        V.require_string(item, f"{label}[{i}]") for i, item in enumerate(value)
+    )
+
+
+def run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AgentSquadError(f"git {arguments[0]} failed: {error}") from None
+
+
+def git_output(root: Path, *arguments: str) -> str:
+    result = run_git(root, *arguments)
+    if result.returncode:
+        raise AgentSquadError(result.stderr.strip() or result.stdout.strip())
+    return result.stdout.rstrip("\n")
 
 
 @dataclass(frozen=True)
-class GitWorktree:
-    """Resolved invocation directory and canonical Git worktree paths."""
-
-    invocation_directory: Path
+class Worktree:
     root: Path
-    common_directory: Path
-    git_directory: Path
-    local_exclude_path: Path
+    head: str
+    branch: str | None
+
+
+def list_worktrees(root: Path) -> tuple[Worktree, ...]:
+    fields: dict[str, str] = {}
+    result = []
+    for line in git_output(
+        root, "worktree", "list", "--porcelain", "-z"
+    ).split("\0"):
+        if not line:
+            if "worktree" in fields:
+                result.append(
+                    Worktree(
+                        Path(fields["worktree"]).resolve(),
+                        fields.get("HEAD", ""),
+                        fields.get("branch"),
+                    )
+                )
+            fields = {}
+        else:
+            key, _, value = line.partition(" ")
+            fields[key] = value
+    return tuple(result)
 
 
 @dataclass(frozen=True)
-class InitializationResult:
-    """Effective repository state after successful initialization."""
+class Repository:
+    root: Path
+    primary: Path
+    common: Path
+    configuration: Configuration | None = None
 
-    repository_root: Path
-    configuration_path: Path
-    git_exclude_path: Path
-    configuration_created: bool
-    git_exclude_updated: bool
+    @property
+    def control_root(self) -> Path:
+        return self.primary / CONTROL_DIRECTORY_NAME
+
+    @property
+    def configuration_path(self) -> Path:
+        return self.control_root / "config.json"
+
+    def resolve_root(self, value: str) -> Path:
+        return (self.primary / Path(value).expanduser()).resolve()
+
+    def default_role(self) -> str:
+        if self.configuration is not None:
+            parent = self.resolve_root(self.configuration.worktree_root)
+            if self.root.parent == parent and re.fullmatch(
+                r"reviewer-pr[1-9][0-9]*-[0-9a-f]{7}", self.root.name
+            ):
+                return "reviewer"
+        return "implementer"
 
 
-@dataclass(frozen=True)
-class InitializedRepository:
-    """An initialized worktree and its validated local configuration."""
+def discover_git_worktree(start: Path) -> Repository:
+    if git_output(start, "rev-parse", "--is-bare-repository") != "false":
+        raise AgentSquadError("a non-bare Git worktree is required")
+    root = Path(git_output(start, "rev-parse", "--show-toplevel")).resolve()
+    common = Path(git_output(root, "rev-parse", "--git-common-dir"))
+    common = (root / common).resolve()
+    worktrees = list_worktrees(root)
+    if not worktrees:
+        raise AgentSquadError("cannot discover the primary worktree")
+    return Repository(root, worktrees[0].root, common)
 
-    worktree: GitWorktree
-    control_root: Path
-    configuration_path: Path
-    configuration: Configuration
 
-
-def default_review_worktree_root() -> Path:
-    """Return the default root for disposable review worktrees."""
-
-    default_data_home = Path.home() / ".local" / "share"
-    configured_data_home = os.environ.get("XDG_DATA_HOME")
-    if configured_data_home:
-        data_home = Path(configured_data_home).expanduser()
-        if not data_home.is_absolute():
-            data_home = default_data_home
-    else:
-        data_home = default_data_home
-    review_root = data_home / "agent-squad" / "worktrees"
-    try:
-        return review_root.resolve(strict=False)
-    except (OSError, RuntimeError) as error:
+def validate_roots(repository: Repository, *, writable: bool = False) -> None:
+    config = repository.configuration
+    assert config is not None
+    roots = [
+        repository.resolve_root(config.worktree_root),
+        repository.resolve_root(config.scratch_root),
+    ]
+    if roots[0].is_relative_to(roots[1]) or roots[1].is_relative_to(roots[0]):
         raise ConfigurationError(
-            "the default review worktree root cannot be resolved; check "
-            f"XDG_DATA_HOME and HOME: {error}"
-        ) from error
+            "worktree_root and scratch_root must not overlap"
+        )
+    for root in roots:
+        for worktree in list_worktrees(repository.root):
+            if root.is_relative_to(worktree.root) and not root.is_relative_to(
+                worktree.root / CONTROL_DIRECTORY_NAME
+            ):
+                raise ConfigurationError(
+                    "root inside a worktree must be under .agent-squad/:"
+                    f" {root}"
+                )
+        if writable:
+            root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=root) as stream:
+                stream.write(b"root write probe")
+                stream.flush()
 
 
-def matches_allowed_generated_path(
-    candidate: str,
-    configured_paths: tuple[str, ...],
-) -> bool:
-    """Return whether a repository-relative path is explicitly allowed."""
-
-    path = PurePosixPath(candidate)
-    for configured in configured_paths:
-        allowed = PurePosixPath(configured)
+def load_initialized_repository(start: Path) -> Repository:
+    repository = discover_git_worktree(start)
+    try:
         if (
-            path == allowed
-            or path.parts[: len(allowed.parts)] == allowed.parts
+            repository.control_root.is_symlink()
+            or repository.configuration_path.is_symlink()
         ):
-            return True
-    return False
+            raise ConfigurationError(
+                "control root and config.json must not be symlinks"
+            )
+        config = Configuration.from_dict(
+            decode_json(
+                repository.configuration_path.read_text(encoding="utf-8")
+            )
+        )
+        repository = Repository(
+            repository.root, repository.primary, repository.common, config
+        )
+        validate_roots(repository)
+        return repository
+    except (OSError, ValueError, ConfigurationError) as error:
+        raise ConfigurationError(f"{error}; run agent-squad init") from None
 
 
-def is_agent_squad_runtime_path(candidate: str) -> bool:
-    """Return whether a path belongs to Agent Squad local runtime state."""
-
-    path = PurePosixPath(candidate)
-    return bool(path.parts) and path.parts[0] in {
-        CONTROL_DIRECTORY_NAME,
-        REVIEW_DIRECTORY_NAME,
-    }
-
-
-def default_configuration(review_worktree_root: Path) -> Configuration:
-    """Build the minimal default configuration defined by the specification."""
-
-    return Configuration.from_dict(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "implementer": {
-                "agent_name": "codex-main",
-                "kind": "codex",
-            },
-            "reviewer": {
-                "kind": "claude",
-                "start_args": [],
-            },
-            "base_ref": "origin/main",
-            "review_worktree_root": str(review_worktree_root),
-            "max_completed_change_reviews": 4,
-            "allowed_generated_paths": [],
-        }
-    )
-
-
-def load_configuration(path: Path) -> Configuration:
-    """Load and fully validate an existing configuration file."""
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as error:
-        raise ConfigurationError(f"{path} must contain UTF-8 JSON") from error
-    except OSError as error:
-        raise ConfigurationError(f"cannot read {path}: {error}") from error
-
-    try:
-        decoded = decode_json(raw)
-    except InvalidJsonError as error:
+def remote_coordinates(url: str) -> tuple[str, str]:
+    path = urlsplit(url).path if "://" in url else url.split(":", 1)[-1]
+    parts = path.rstrip("/").split("/")
+    if len(parts) < 2 or not parts[-2] or not parts[-1]:
         raise ConfigurationError(
-            f"{path.name} contains invalid JSON: {error}"
-        ) from error
-    return Configuration.from_dict(decoded)
-
-
-def discover_git_worktree(start: Path) -> GitWorktree:
-    """Resolve the current non-bare Git worktree and its common metadata."""
-
-    working_directory = start.resolve(strict=False)
-    if not working_directory.is_dir():
-        raise RepositoryError(
-            f"current path is not a directory: {working_directory}"
+            "cannot derive owner/repo from origin; use --owner and --repo"
         )
+    return parts[-2], parts[-1].removesuffix(".git")
 
-    inside_result = run_git(
-        working_directory,
-        "rev-parse",
-        "--is-inside-work-tree",
+
+def atomic_config(path: Path, config: Configuration) -> None:
+    """Publish configuration only after its temporary write succeeds."""
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".config-", dir=path.parent
     )
-    if inside_result.returncode != 0:
-        detail = inside_result.stderr.strip()
-        suffix = f" Git reported: {detail}" if detail else ""
-        raise RepositoryError(
-            "Git could not confirm that the current directory is inside a "
-            "Git worktree. Run agent-squad init from a non-bare Git "
-            f"checkout.{suffix}"
-        )
-    if inside_result.stdout.strip() != "true":
-        raise RepositoryError(
-            "the current directory is not inside a Git worktree. "
-            "Run agent-squad init from a non-bare Git checkout."
-        )
-
-    root = _git_path(working_directory, "--show-toplevel")
-    common_directory = _git_path(working_directory, "--git-common-dir")
-    git_directory = _git_path(working_directory, "--git-dir")
-    if not all(
-        path.is_dir() for path in (root, common_directory, git_directory)
-    ):
-        raise RepositoryError(
-            "Git returned repository paths that do not exist; inspect the "
-            "worktree and retry initialization"
-        )
-
-    return GitWorktree(
-        invocation_directory=working_directory,
-        root=root,
-        common_directory=common_directory,
-        git_directory=git_directory,
-        local_exclude_path=common_directory / "info" / "exclude",
-    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(config.to_dict(), stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.exists() or path.is_symlink():
+            raise ConfigurationError(
+                "config.json appeared during init; rerun to validate it"
+            )
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def initialize_repository(
     start: Path,
     *,
-    review_worktree_root: Path | None = None,
-) -> InitializationResult:
-    """Create or validate local configuration and Git exclusions."""
+    implementer_account: str,
+    reviewer_account: str,
+    owner: str | None = None,
+    repo: str | None = None,
+    base_branch: str | None = None,
+) -> dict[str, object]:
+    from .forge import GitHub
 
-    worktree = discover_git_worktree(start)
-    control_root = worktree.root / CONTROL_DIRECTORY_NAME
-    configuration_path = control_root / CONFIGURATION_FILE_NAME
-
-    _validate_control_root(control_root)
-    configuration_exists = _validate_configuration_path(configuration_path)
-    if configuration_exists:
-        configuration = load_configuration(configuration_path)
-        configuration_bytes = None
+    repository = discover_git_worktree(start)
+    url = git_output(repository.root, "remote", "get-url", "origin")
+    derived_owner, derived_repo = (
+        (owner, repo) if owner and repo else remote_coordinates(url)
+    )
+    # ls-remote reads the real default, even when origin/HEAD is not installed.
+    refs = git_output(
+        repository.root, "ls-remote", "--symref", "origin", "HEAD"
+    )
+    match = re.search(r"^ref: refs/heads/(.+)\tHEAD$", refs, re.MULTILINE)
+    branch = base_branch or (match.group(1) if match else "main")
+    defaults = Configuration.from_dict(
+        {
+            "schema_version": 2,
+            "forge": {
+                "kind": "github",
+                "owner": owner or derived_owner,
+                "repo": (repo or derived_repo).removesuffix(".git"),
+            },
+            "implementer": {
+                "agent_name": "implementer",
+                "kind": "codex",
+                "forge_account": implementer_account,
+            },
+            "reviewer": {
+                "kind": "claude",
+                "start_args": [],
+                "forge_account": reviewer_account,
+            },
+            "developer_accounts": [],
+            "base_branch": branch,
+            "max_review_passes": 3,
+            "merge_method": "merge",
+            "worktree_root": ".agent-squad/worktrees",
+            "scratch_root": ".agent-squad/review-scratch",
+        }
+    )
+    exists = (
+        repository.configuration_path.exists()
+        or repository.configuration_path.is_symlink()
+    )
+    if exists:
+        repository = load_initialized_repository(start)
     else:
-        review_root = review_worktree_root or default_review_worktree_root()
-        configuration = default_configuration(review_root)
-        configuration_bytes = _encode_configuration(configuration)
-    _validate_review_worktree_root(configuration, worktree.root)
-
-    exclude_path = worktree.local_exclude_path
-    original_exclude = _read_local_exclude(exclude_path)
-    updated_exclude = _add_local_exclude_patterns(original_exclude)
-    exclude_needs_update = updated_exclude != original_exclude
-
-    created_paths: list[Path] = []
-    configuration_created = False
-    try:
-        if not control_root.exists():
-            control_root.mkdir(mode=0o700)
-            created_paths.append(control_root)
-
-        if configuration_bytes is not None:
-            atomic_write(configuration_path, configuration_bytes, mode=0o600)
-            configuration_created = True
-            created_paths.append(configuration_path)
-
-        if exclude_needs_update:
-            info_directory = exclude_path.parent
-            if not info_directory.exists():
-                info_directory.mkdir(mode=0o755)
-                created_paths.append(info_directory)
-            atomic_write(
-                exclude_path,
-                updated_exclude,
-                mode=_file_mode(exclude_path),
-            )
-    except OSError as error:
-        rollback_errors = _rollback_created_paths(created_paths)
-        rollback_note = (
-            " Rollback also encountered: " + "; ".join(rollback_errors)
-            if rollback_errors
-            else ""
+        if repository.control_root.is_symlink():
+            raise ConfigurationError("control root must not be a symlink")
+        repository = Repository(
+            repository.root, repository.primary, repository.common, defaults
         )
-        raise InitializationError(
-            f"could not complete initialization: {error}.{rollback_note}"
-        ) from error
-
-    return InitializationResult(
-        repository_root=worktree.root,
-        configuration_path=configuration_path,
-        git_exclude_path=exclude_path,
-        configuration_created=configuration_created,
-        git_exclude_updated=exclude_needs_update,
+    config = repository.configuration
+    assert config is not None
+    remote_branch = git_output(
+        repository.root,
+        "ls-remote",
+        "--heads",
+        "origin",
+        f"refs/heads/{config.base_branch}",
     )
-
-
-def load_initialized_repository(start: Path) -> InitializedRepository:
-    """Discover an initialized worktree and validate its configuration."""
-
-    worktree = discover_git_worktree(start)
-    control_root = worktree.root / CONTROL_DIRECTORY_NAME
-    configuration_path = control_root / CONFIGURATION_FILE_NAME
-
-    if not control_root.exists() and not control_root.is_symlink():
-        raise InitializationError(
-            "Agent Squad is not initialized in this worktree; run "
-            "agent-squad init first"
-        )
-    _validate_control_root(control_root)
-    if not _validate_configuration_path(configuration_path):
-        raise InitializationError(
-            "Agent Squad configuration is missing; run agent-squad init "
-            "to create it"
-        )
-    configuration = load_configuration(configuration_path)
-    _validate_review_worktree_root(configuration, worktree.root)
-    return InitializedRepository(
-        worktree=worktree,
-        control_root=control_root,
-        configuration_path=configuration_path,
-        configuration=configuration,
-    )
-
-
-def _require_string_list(
-    value: object,
-    path: str,
-) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ConfigurationError(f"{path} must be a JSON array of strings")
-    strings: list[str] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item:
-            raise ConfigurationError(
-                f"{path}[{index}] must be a non-empty string"
-            )
-        if "\x00" in item:
-            raise ConfigurationError(
-                f"{path}[{index}] must not contain null bytes"
-            )
-        strings.append(item)
-    return tuple(strings)
-
-
-def _validate_review_worktree_root(
-    configuration: Configuration,
-    implementation_root: Path,
-) -> None:
-    canonical_implementation_root = implementation_root.resolve(strict=False)
-    try:
-        canonical_review_root = configuration.review_worktree_root.resolve(
-            strict=False
-        )
-    except (OSError, RuntimeError) as error:
+    if not remote_branch:
         raise ConfigurationError(
-            "configuration.review_worktree_root cannot be resolved: "
-            f"{error}"
-        ) from error
-    review_lineage = (
-        canonical_review_root,
-        *canonical_review_root.parents,
-    )
-    is_inside_worktree = canonical_implementation_root in review_lineage
-    if not is_inside_worktree:
-        try:
-            implementation_identity = _existing_path_identity(
-                canonical_implementation_root
-            )
-        except OSError as error:
-            raise RepositoryError(
-                "cannot inspect the implementation worktree "
-                f"{canonical_implementation_root}: {error}"
-            ) from error
-        if implementation_identity is None:
-            raise RepositoryError(
-                "the implementation worktree disappeared during "
-                f"initialization: {canonical_implementation_root}"
-            )
-
-        try:
-            is_inside_worktree = any(
-                _existing_path_identity(candidate)
-                == implementation_identity
-                for candidate in review_lineage
-            )
-        except OSError as error:
-            raise ConfigurationError(
-                "configuration.review_worktree_root cannot be inspected: "
-                f"{error}"
-            ) from error
-
-    if is_inside_worktree:
-        raise ConfigurationError(
-            "configuration.review_worktree_root must be outside the "
-            "implementation worktree"
+            f"base_branch does not exist on origin: {config.base_branch}"
         )
-
-
-def _existing_path_identity(path: Path) -> tuple[int, int] | None:
-    try:
-        status = path.stat()
-    except FileNotFoundError:
-        return None
-    return status.st_dev, status.st_ino
-
-
-def _encode_configuration(configuration: Configuration) -> bytes:
-    text = json.dumps(configuration.to_dict(), indent=2, ensure_ascii=False)
-    return f"{text}\n".encode("utf-8")
-
-
-def run_git(
-    working_directory: Path,
-    *arguments: str,
-) -> subprocess.CompletedProcess[str]:
-    """Run Git with an argument array and captured UTF-8 text output."""
-
-    try:
-        return subprocess.run(
-            ["git", *arguments],
-            cwd=working_directory,
-            check=False,
-            shell=False,
-            text=True,
-            encoding="utf-8",
-            errors="surrogateescape",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError as error:
-        raise RepositoryError(
-            "Git is not installed or is not available on PATH"
-        ) from error
-    except OSError as error:
-        raise RepositoryError(f"could not run Git: {error}") from error
-
-
-def _git_path(working_directory: Path, argument: str) -> Path:
-    result = run_git(working_directory, "rev-parse", argument)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or "unknown Git error"
-        raise RepositoryError(f"git rev-parse {argument} failed: {detail}")
-    raw_path = result.stdout.rstrip("\r\n")
-    if not raw_path:
-        raise RepositoryError(
-            f"git rev-parse {argument} returned an empty path"
-        )
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = working_directory / path
-    return path.resolve(strict=False)
-
-
-def _validate_control_root(control_root: Path) -> None:
-    if control_root.is_symlink():
-        raise InitializationError(
-            f"{control_root} is a symbolic link; the canonical control root "
-            "must be a repository directory"
-        )
-    if control_root.exists() and not control_root.is_dir():
-        raise InitializationError(f"{control_root} must be a directory")
-
-
-def _validate_configuration_path(configuration_path: Path) -> bool:
-    if configuration_path.is_symlink():
-        raise InitializationError(
-            f"{configuration_path} is a symbolic link; refusing to read or "
-            "overwrite it"
-        )
-    if not configuration_path.exists():
-        return False
-    if not configuration_path.is_file():
-        raise InitializationError(
-            f"{configuration_path} must be a regular file"
-        )
-    return True
-
-
-def _read_local_exclude(path: Path) -> bytes:
-    if path.is_symlink():
-        raise InitializationError(
-            f"{path} is a symbolic link; refusing to replace Git's local "
-            "exclude"
-        )
-    if path.exists() and not path.is_file():
-        raise InitializationError(
-            f"Git local exclude path must be a regular file: {path}"
-        )
-    if path.parent.is_symlink() or (
-        path.parent.exists() and not path.parent.is_dir()
-    ):
-        raise InitializationError(
-            f"Git metadata path must be a directory: {path.parent}"
-        )
-    if not path.exists():
-        return b""
-    try:
-        return path.read_bytes()
-    except OSError as error:
-        raise InitializationError(
-            f"cannot read Git local exclude {path}: {error}"
-        ) from error
-
-
-def _add_local_exclude_patterns(content: bytes) -> bytes:
-    existing_lines = {line.rstrip(b"\r") for line in content.splitlines()}
+    GitHub(repository, "implementer").repository_record()
+    validate_roots(repository, writable=True)
+    repository.control_root.mkdir(parents=True, exist_ok=True)
+    exclude = repository.common / "info/exclude"
+    if exclude.is_symlink():
+        raise ConfigurationError("info/exclude must not be a symlink")
+    content = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     missing = [
-        pattern.encode("utf-8")
-        for pattern in LOCAL_EXCLUDE_PATTERNS
-        if pattern.encode("utf-8") not in existing_lines
+        p for p in LOCAL_EXCLUDE_PATTERNS if p not in content.splitlines()
     ]
-    if not missing:
-        return content
-
-    updated = bytearray(content)
-    if updated and not updated.endswith((b"\n", b"\r")):
-        updated.extend(b"\n")
-    for pattern in missing:
-        updated.extend(pattern)
-        updated.extend(b"\n")
-    return bytes(updated)
-
-
-def _file_mode(path: Path) -> int:
-    if not path.exists():
-        return 0o644
-    return stat.S_IMODE(path.stat().st_mode)
-
-
-def _rollback_created_paths(created_paths: list[Path]) -> list[str]:
-    errors: list[str] = []
-    for path in reversed(created_paths):
-        try:
-            if path.is_symlink() or not path.is_dir():
-                path.unlink(missing_ok=True)
-            else:
-                path.rmdir()
-        except OSError as error:
-            errors.append(f"could not remove newly created {path}: {error}")
-    return errors
+    if missing:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as stream:
+            stream.write(
+                ("\n" if content and not content.endswith("\n") else "")
+                + "\n".join(missing)
+                + "\n"
+            )
+    if not exists:
+        atomic_config(repository.configuration_path, config)
+    differences = {
+        k: {"configured": v, "default": defaults.to_dict()[k]}
+        for k, v in config.to_dict().items()
+        if v != defaults.to_dict()[k]
+    }
+    return {
+        "configuration_path": str(repository.configuration_path),
+        "created": not exists,
+        "differences": differences,
+    }

@@ -1,4 +1,4 @@
-"""Installed Herdr discovery and deterministic review-request delivery."""
+"""Read-only installed Herdr discovery and agent inspection."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ import re
 import shutil
 import subprocess
 
-from .initialization import AgentKind, AgentSquadError
-from .storage import InvalidJsonError, decode_json
+from .initialization import AgentKind, AgentSquadError, decode_json
 
 
 class HerdrError(AgentSquadError):
@@ -30,10 +29,6 @@ class HerdrInstallation:
     executable: Path
     version: str
     protocol: int
-
-
-
-
 
 
 class HerdrClient:
@@ -87,8 +82,6 @@ class HerdrClient:
         agent_kind: AgentKind,
         *,
         role: str,
-        diagnostics: bool = False,
-        live: bool = False,
     ) -> HerdrInstallation:
         """Validate schema, live protocol, commands, and agent integration."""
 
@@ -115,14 +108,16 @@ class HerdrClient:
 
         for arguments, expected_fragments in self._HELP_CHECKS:
             output = self._run(arguments).stdout
-            if diagnostics and arguments == ("agent", "start", "--help"):
+            if arguments == ("agent", "start", "--help"):
                 kinds = re.search(
                     r"--kind\b.*?\[possible values:\s*([^]]+)\]",
-                    output, re.DOTALL,
+                    output,
+                    re.DOTALL,
                 )
                 supported = (
                     {value.strip() for value in kinds.group(1).split(",")}
-                    if kinds else set()
+                    if kinds
+                    else set()
                 )
                 if agent_kind.value not in supported:
                     raise HerdrError(
@@ -167,9 +162,7 @@ class HerdrClient:
             None,
         )
         role_status = (
-            None
-            if role_line is None
-            else role_line.split(":", 1)[1].strip()
+            None if role_line is None else role_line.split(":", 1)[1].strip()
         )
         if role_status is None or not role_status.startswith("current"):
             raise HerdrError(
@@ -228,7 +221,7 @@ class HerdrClient:
             definition = request_definitions.get(definition_name)
             if not isinstance(definition, dict):
                 raise HerdrError(
-                    f"Herdr schema lacks parameter definition "
+                    "Herdr schema lacks parameter definition "
                     f"{definition_name}"
                 )
             properties = definition.get("properties")
@@ -280,7 +273,6 @@ class HerdrClient:
                 f"contracts: {', '.join(missing_results)}"
             )
 
-
     def inspect_agent(
         self,
         name: str,
@@ -308,7 +300,6 @@ class HerdrClient:
                 )
         return agent
 
-
     def snapshot(self) -> dict[str, object]:
         """Read the installed session's resource inventory."""
 
@@ -320,12 +311,6 @@ class HerdrClient:
         if not isinstance(value, dict):
             raise HerdrError("Herdr snapshot has no snapshot object")
         return value
-
-
-
-
-
-
 
     def _resolve_executable(self) -> Path:
         if self._executable is not None:
@@ -399,7 +384,6 @@ class HerdrClient:
                 f"expected {expected_kind.value!r}"
             )
 
-
     def _run(
         self,
         arguments: tuple[str, ...],
@@ -455,7 +439,7 @@ class HerdrClient:
     def _decode_object(content: str, label: str) -> dict[str, object]:
         try:
             value = decode_json(content)
-        except InvalidJsonError as error:
+        except ValueError as error:
             raise HerdrError(f"{label} is not valid JSON: {error}") from error
         if not isinstance(value, dict):
             raise HerdrError(f"{label} must be a JSON object")
