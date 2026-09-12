@@ -534,7 +534,7 @@ Derived facts:
 
 `status` prints the next action first and the reasons that led to it. It MUST make a current review that the Implementer has not acted on prominent; that is how a lost Herdr notification is discovered (§8.7). `--json` prints the same facts as one object.
 
-Every command re-derives the state when it runs. Re-running a command cannot create a duplicate logical review because identity is the review target, not a counter; a second review at the same head is legitimate only under §7.5. A tagged review whose `commit_id` is not the PR head is not current; it is neither stale, invalid, nor superseded in the v0.4.4 sense, and no classification machinery exists for it.
+Every command re-derives the state when it runs. A review's forge ID identifies its publication; the review target and header do not uniquely identify it, because a fresh review at the same head is legitimate under §7.5. Re-running `review post --resume <review-id>` completes only that identified publication and never creates a second logical review (§11.1). A plain `review post` publishes a new formal review and increases the used budget, even when its header matches an earlier review (§7.8). A tagged review whose `commit_id` is not the PR head is not current; it is neither stale, invalid, nor superseded in the v0.4.4 sense, and no classification machinery exists for it.
 
 ### 7.10 Approval validity and merge
 
