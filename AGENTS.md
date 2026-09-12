@@ -31,7 +31,7 @@ Current history uses short, imperative, typed subjects such as `docs: establish 
 
 ## Security & Local State
 
-Do not commit `.local/`, `.agent-squad/`, `.agent-squad-review/`, credentials, or generated review bundles. Preserve exact Git object identities and never treat a detached worktree as a security sandbox.
+Do not commit `.local/`, `.agent-squad/`, `.agent-squad-review/`, credentials, or generated review output. Preserve exact Git object identities and never treat a detached worktree as a security sandbox.
 
 ## Agent skills
 
