@@ -178,4 +178,4 @@ class InitDoctorTests(unittest.TestCase):
                 "REV-1",
                 expected=2,
             )
-            f.cli("doctor", "--live-reviewer", expected=2)
+            self.assertTrue(f.cli("doctor", "--live-reviewer")["ok"])

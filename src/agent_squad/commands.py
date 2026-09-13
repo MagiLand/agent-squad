@@ -41,6 +41,7 @@ from .initialization import (
     run_git,
 )
 from .validation import JsonValidator
+from .herdr import HerdrClient, HerdrError, reviewer_name
 
 V = JsonValidator(AgentSquadError)
 
@@ -56,7 +57,13 @@ def is_ancestor(root: Path, earlier: str, later: str) -> bool:
     )
 
 
-def state_for(repository: Repository, snapshot: Snapshot) -> dict:
+def state_for(
+    repository: Repository,
+    snapshot: Snapshot,
+    *,
+    herdr_client: HerdrClient | None = None,
+    include_reviewer: bool = False,
+) -> dict:
     pr = snapshot.pr
     # Fetch the exact branches without updating any checked-out branch.
     git_output(
@@ -110,6 +117,16 @@ def state_for(repository: Repository, snapshot: Snapshot) -> dict:
             "--untracked-files=no",
         )
     )
+    live = False
+    if include_reviewer:
+        client = herdr_client or HerdrClient(repository.primary)
+        try:
+            live = (
+                client.get_agent(reviewer_name(pr.number, pr.head)) is not None
+            )
+        except HerdrError:
+            # Scheduling hints never make forge-derived status unavailable.
+            pass
     return derive(
         snapshot,
         repository.configuration,
@@ -118,6 +135,7 @@ def state_for(repository: Repository, snapshot: Snapshot) -> dict:
         lambda a, b: is_ancestor(repository.root, a, b),
         base_tip=tip,
         dirty=dirty,
+        reviewer_live=live,
     )
 
 

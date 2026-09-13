@@ -322,6 +322,7 @@ def derive(
     *,
     base_tip: str,
     dirty: bool = False,
+    reviewer_live: bool = False,
 ) -> dict:
     """Reconstruct all §7.9 facts without reading or writing protocol files."""
     pr = snapshot.pr
@@ -721,7 +722,7 @@ def derive(
         "not_pushed": (
             implementation is None or implementation.head != pr.head or dirty
         ),
-        "reviewer_live": False,
+        "reviewer_live": reviewer_live,
     }
     approval_reasons = []
     conditions = [
@@ -766,6 +767,10 @@ def derive(
             "push",
             gates["not_pushed"] or (same_head and not gates["task_amended"]),
         ),
+        (
+            "reviewer_live",
+            reviewer_live and not any(r["current"] for r in reviews),
+        ),
         ("launch_review", True),
     ]
     action = next(a for a, applies in action_conditions if applies)
@@ -783,6 +788,9 @@ def derive(
             "push a clean changed revision matching the PR branch and head"
         ],
         "launch_review": ["review launch gates are clear"],
+        "reviewer_live": [
+            "Reviewer for the current head is live; no current review exists"
+        ],
     }[action]
     acted = bool(
         latest

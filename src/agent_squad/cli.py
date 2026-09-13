@@ -1,4 +1,4 @@
-"""The Increment 1 command surface."""
+"""The PR-authoritative forge and Reviewer lifecycle commands."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ import sys
 from . import __version__
 from .anchors import Anchor
 from . import commands
+from . import reviewer
 from .doctor import diagnose
 from .forge import GitHub
+from .herdr import HerdrClient
 from .initialization import (
     AgentSquadError,
     GateError,
@@ -45,6 +47,7 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--json", action="store_true")
     doctor = groups.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--live-reviewer", action="store_true")
 
     def command(
         group: str, names: tuple[str, ...]
@@ -109,6 +112,20 @@ def parser() -> argparse.ArgumentParser:
         stop.add_argument("--" + name, required=True)
     status = groups.add_parser("status")
     common(status)
+    worktrees = command("review-worktree", ("create", "remove"))
+    for p in worktrees.values():
+        common(p)
+        p.add_argument("--head", required=True)
+    reviewers = command("reviewer", ("launch", "adopt", "close"))
+    for p in reviewers.values():
+        common(p)
+    reviewers["close"].add_argument("--head")
+    handoffs = command("handoff", ("review-result", "stopped"))
+    for p in handoffs.values():
+        common(p)
+        p.add_argument("--head", required=True)
+    handoffs["review-result"].add_argument("--verdict", required=True)
+    handoffs["stopped"].add_argument("--reason", required=True)
     return root
 
 
@@ -125,11 +142,40 @@ def execute(args: argparse.Namespace) -> dict:
         )
     # doctor reports invalid configuration as one of its prerequisite failures.
     if args.group == "doctor":
-        return diagnose(cwd)
+        return diagnose(cwd, live_reviewer=args.live_reviewer)
     repository = load_initialized_repository(cwd)
     role = args.role or repository.default_role()
     forge = GitHub(repository, role)
     key = (args.group, getattr(args, "command", None))
+    if args.group == "review-worktree":
+        worktree = reviewer.ReviewWorktree.for_pr(
+            repository, args.pr, args.head
+        )
+        return (
+            worktree.create()
+            if args.command == "create"
+            else worktree.remove()
+        )
+    if key == ("reviewer", "launch"):
+        return reviewer.launch(repository, forge, args.pr)
+    if key == ("reviewer", "adopt"):
+        return reviewer.adopt(repository, forge, args.pr)
+    if key == ("reviewer", "close"):
+        worktree = reviewer.ReviewWorktree.for_pr(
+            repository, args.pr, args.head or forge.pr(args.pr).head
+        )
+        return reviewer.close_reviewer(
+            worktree, HerdrClient(repository.primary)
+        )
+    if args.group == "handoff":
+        return reviewer.handoff(
+            repository,
+            forge,
+            args.pr,
+            args.head,
+            verdict=getattr(args, "verdict", None),
+            reason=getattr(args, "reason", None),
+        )
     if key == ("issue", "view"):
         return forge.issue(args.issue)
     if key == ("pr", "create"):
@@ -195,7 +241,11 @@ def execute(args: argparse.Namespace) -> dict:
             args.reason,
             commands.read_file(args.body),
         )
-    state = commands.state_for(repository, forge.snapshot(args.pr))
+    state = commands.state_for(
+        repository,
+        forge.snapshot(args.pr),
+        include_reviewer=args.group == "status",
+    )
     if key == ("pr", "head"):
         return {
             **state["target"],
@@ -235,7 +285,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'{d["severity"].upper()} {d["check"]}: {d["detail"]}')
         else:
             print(json.dumps(result, indent=2, default=json_default))
-        return 1 if args.group == "doctor" and not result["ok"] else 0
+        return result.get(
+            "exit_code",
+            1 if args.group == "doctor" and not result["ok"] else 0,
+        )
     except (AgentSquadError, OSError, ValueError) as error:
         print("error: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return (

@@ -253,6 +253,8 @@ The suggested layout is:
 
 Worktrees nested under the excluded control directory are ordinary linked Git worktrees: the outer `git status` stays clean, `git worktree list` registers them, and `git worktree remove --force` removes them. The default keeps them inside the launch directory so a sandboxed harness whose writable root is its launch directory can still write to them. An absolute `worktree_root` outside the repository is permitted.
 
+**Resource ownership clarification (issue #43, Developer decision, 2026-09-13).** The tool records ownership in each linked worktree's Git administrative directory. The record contains the exact target and checkout identity and, after opening in Herdr, the workspace, pane, terminal IDs, and harness kind. It contains no review result, verdict, budget, or handoff status. Reuse and removal require this record to match the live Git resource; workspace cleanup also checks the recorded Herdr identities and isolation. A matching path and head alone do not establish ownership of a manually created checkout. This resource metadata is permitted alongside Git's worktree metadata; GitHub remains the sole source of review authority.
+
 ### 5.3 Scratch root
 
 `scratch_root` (default `.agent-squad/review-scratch`) holds one directory per PR, `<scratch_root>/pr<N>`. `reviewer launch` creates it. Reviewers write probe scripts, harnesses, and notes there so the next Reviewer can re-run them against the new head. It survives across review passes and is removed by `pr merge` after a successful merge (§15). Its contents are never authoritative; a later Reviewer treats them as an untrusted aid, exactly like the implementation report.
@@ -747,7 +749,7 @@ This section supersedes v0.4.4 §32. `agent-squad` remains a standard-library Py
 
 ### 10.1 Common rules
 
-- **No protocol state.** No command writes a file that records a verdict, disposition, decision, stop, budget, or handoff status. The only things the CLI writes locally are `config.json`, worktrees, scratch directories, and installed skill copies.
+- **No protocol state.** No command writes a file that records a verdict, disposition, decision, stop, budget, or handoff status. The only things the CLI writes locally are `config.json`, worktrees (including the resource ownership metadata of §5.2), scratch directories, and installed skill copies.
 - **Identity.** Every forge mutation takes `--as implementer|reviewer` (§4.5). Read-only forge commands accept `--as` and default to `reviewer` when run inside a squad review worktree and to `implementer` otherwise.
 - **Context.** Every command discovers the control root through the Git common directory (§5.1) and validates the configuration before doing anything else.
 - **Output.** Human-readable output by default; `--json` prints one JSON object. Errors are one line on standard error, prefixed `error:`.
@@ -1228,6 +1230,7 @@ v0.4.4 §8 is retained in full. Additionally, v0.5.0 does not include:
 12. A review's `## Findings` list is the authoritative association between a review and its findings (§7.3, §7.4), because the forge cannot attach a standalone comment to an existing review; the fallback persists every finding's full text in its first write, and `review post --resume <review-id>` completes an interrupted publication without suppressing a fresh same-head review (§11.1).
 13. `decision post --task` owns a Task amendment together with its mirror into the PR body, and the effective Task is derived from the latest amendment (§7.6, §10.2), so the skills never need `gh` for a Task edit.
 14. With no users and no backward compatibility required, the removal of the v0.4.4 machinery moves to Increment 1. `doctor --live-reviewer` moves to Increment 2 because the delivery and trust experiment (§13.3) needs it there (issue #42, decided 2026-09-12).
+15. Resource ownership is recorded in linked-worktree Git metadata so cleanup can distinguish tool-created resources from a manually created checkout with the same name and head (§5.2; issue #43, Developer-approved clarification, 2026-09-13). This metadata carries no review or handoff status.
 
 ---
 

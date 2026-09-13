@@ -113,6 +113,7 @@ class ForgeFixture:
             PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
             PYTHONPATH=str(SRC_ROOT),
             FAKE_FORGE_MODEL=str(self.model_path),
+            FAKE_HERDR_MODEL=str(self.root / "herdr.json"),
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
             GIT_TERMINAL_PROMPT="0",
@@ -186,6 +187,30 @@ class ForgeFixture:
         model = self.read_model()
         model["settings"].update(values)
         self.save_model(model)
+
+    def herdr_model(self) -> dict:
+        path = Path(self.env["FAKE_HERDR_MODEL"])
+        return (
+            json.loads(path.read_text())
+            if path.exists()
+            else {
+                "workspaces": [],
+                "tabs": [],
+                "panes": [],
+                "agents": [],
+                "calls": [],
+                "next_id": 1,
+                "settings": {},
+            }
+        )
+
+    def save_herdr(self, model: dict) -> None:
+        Path(self.env["FAKE_HERDR_MODEL"]).write_text(json.dumps(model))
+
+    def herdr_settings(self, **values: object) -> None:
+        model = self.herdr_model()
+        model["settings"].update(values)
+        self.save_herdr(model)
 
     def cli(
         self, *args: str, expected: int = 0, cwd: Path | None = None

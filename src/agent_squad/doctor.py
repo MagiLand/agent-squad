@@ -24,7 +24,12 @@ class Diagnostic:
     detail: str
 
 
-def diagnose(start: Path, *, herdr_client: HerdrClient | None = None) -> dict:
+def diagnose(
+    start: Path,
+    *,
+    herdr_client: HerdrClient | None = None,
+    live_reviewer: bool = False,
+) -> dict:
     diagnostics = []
 
     def check(name: str, action: Callable[[], object]) -> bool:
@@ -126,7 +131,27 @@ def diagnose(start: Path, *, herdr_client: HerdrClient | None = None) -> dict:
             diagnostics.append(
                 Diagnostic("Implementer identity", severity, str(error))
             )
+    live = None
+    retained = False
+    if live_reviewer and not any(d.severity == "error" for d in diagnostics):
+        from .reviewer import live_probe
+        from .initialization import RetainedError
+
+        try:
+            live = live_probe(repository, client)
+            diagnostics.append(Diagnostic("live Reviewer", "ok", str(live)))
+        except RetainedError as error:
+            retained = True
+            diagnostics.append(
+                Diagnostic("live Reviewer", "error", str(error))
+            )
     return {
         "ok": not any(d.severity == "error" for d in diagnostics),
         "diagnostics": [asdict(d) for d in diagnostics],
+        "live_reviewer": live,
+        "exit_code": (
+            3
+            if retained
+            else 1 if any(d.severity == "error" for d in diagnostics) else 0
+        ),
     }
