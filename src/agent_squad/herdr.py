@@ -28,7 +28,7 @@ class HerdrCommandError(HerdrError):
 # Selected by the live delivery experiment, not by consumer configuration.
 REVIEW_DELIVERY = {
     AgentKind.CLAUDE: "agent_prompt",
-    AgentKind.CODEX: "agent_prompt",
+    AgentKind.CODEX: "initial_prompt",
 }
 AGENT_NAME = r"[a-z][a-z0-9_-]{0,31}"
 AGENT_STATES = {"idle", "working", "blocked", "done", "unknown"}

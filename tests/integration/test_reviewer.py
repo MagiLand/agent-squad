@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-import sys
 import unittest
 
 from tests.forge_support import ForgeFixture, finding
@@ -155,7 +154,7 @@ class ReviewerTests(unittest.TestCase):
         )
         self.worktree("remove")
 
-    def test_start_arguments_and_initial_prompt_fallback(self) -> None:
+    def test_codex_initial_prompt_preserves_start_arguments(self) -> None:
         f = self.f
         path = f.repo / ".agent-squad/config.json"
         config = json.loads(path.read_text())
@@ -163,18 +162,8 @@ class ReviewerTests(unittest.TestCase):
             kind="codex", start_args=["--add-dir", str(f.root)]
         )
         path.write_text(json.dumps(config))
-        source = (
-            "from agent_squad.herdr import REVIEW_DELIVERY; "
-            "from agent_squad.initialization import AgentKind; "
-            "from agent_squad.cli import main; "
-            "REVIEW_DELIVERY[AgentKind.CODEX]='initial_prompt'; "
-            "raise SystemExit(main(['reviewer','launch','--pr','1','--json']))"
-        )
-        result = f.run([sys.executable, "-c", source], cwd=f.worktree)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            json.loads(result.stdout)["delivery"], "initial_prompt"
-        )
+        result = self.lifecycle("launch")
+        self.assertEqual(result["delivery"], "initial_prompt")
         calls = f.herdr_model()["calls"]
         starts = [
             c
