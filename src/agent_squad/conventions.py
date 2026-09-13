@@ -320,6 +320,7 @@ def derive(
     base: str,
     ancestor: Callable[[str, str], bool],
     *,
+    base_tip: str,
     dirty: bool = False,
 ) -> dict:
     """Reconstruct all §7.9 facts without reading or writing protocol files."""
@@ -482,7 +483,7 @@ def derive(
                 or fields["head"] != review.commit_id
                 or review.state == "PENDING"
                 or not ancestor(fields["base"], fields["head"])
-                or not ancestor(fields["base"], pr.base)
+                or not ancestor(fields["base"], base_tip)
             ):
                 raise AgentSquadError(
                     "review target, commit, base ancestry, or submission is"
@@ -702,13 +703,11 @@ def derive(
     same_head = bool(
         latest
         and latest["head"] == pr.head
-        and (
-            not blocking
-            or not all(
-                f["latest_disposition"]
-                and f["latest_disposition"]["value"] == "rejected"
-                for f in blocking
-            )
+        and blocking
+        and not all(
+            f["latest_disposition"]
+            and f["latest_disposition"]["value"] == "rejected"
+            for f in blocking
         )
     )
     gates = {
@@ -800,6 +799,7 @@ def derive(
             "head": pr.head,
             "head_branch": pr.head_branch,
             "base": base,
+            "base_tip": base_tip,
             "base_branch": pr.base_branch,
         },
         "pr": asdict(pr),

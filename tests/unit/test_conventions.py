@@ -14,6 +14,8 @@ from agent_squad.conventions import (
     parse_line,
     render_line,
     replace_section,
+    review_findings,
+    section,
     validate_pr_body,
     validate_section,
 )
@@ -193,6 +195,7 @@ def derive_state(
         worktrees,
         A,
         lambda a, b: a == b or a == A or (a == H and b == J),
+        base_tip=A,
     )
 
 
@@ -247,7 +250,6 @@ class GrammarTests(unittest.TestCase):
             line.replace(H, H[:7]),
             line.replace(H, H.upper()),
             line.replace(" base=" + A, ""),
-            line + "\r",
             "DISPOSITION fixed " + J[:12],
             "VERIFIED rejected",
             "NOT FIXED yet",
@@ -292,8 +294,202 @@ class GrammarTests(unittest.TestCase):
         with self.assertRaises(AgentSquadError):
             validate_section("## Task\n\nOne\n\n## Extra\nTwo\n", "Task")
 
+    def test_section_validators_reject_duplicate_empty_and_wrong_report(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(AgentSquadError, "duplicate ## Task"):
+            section(TASK + TASK, "Task")
+        with self.assertRaisesRegex(AgentSquadError, "must not be empty"):
+            validate_section("## Task\n\n", "Task")
+        with self.assertRaisesRegex(AgentSquadError, "seven prescribed"):
+            validate_section(
+                "## Implementation report\n\nIncomplete.",
+                "Implementation report",
+            )
+        with self.assertRaisesRegex(AgentSquadError, "list findings or say"):
+            review_findings("## Findings\n\n")
+        for listing in (
+            "REV-1 [blocking] Finding\nREV-1 [blocking] Finding",
+            "REV-1 [blocking]   ",
+            "Not a finding",
+        ):
+            with self.subTest(listing=listing), self.assertRaisesRegex(
+                AgentSquadError, "invalid or duplicate"
+            ):
+                review_findings("## Findings\n\n" + listing)
+
 
 class DerivedStateTests(unittest.TestCase):
+    def test_review_verdict_gates_are_rederived_from_untrusted_forge(
+        self,
+    ) -> None:
+        opened = review(
+            10, "changes_requested", findings="REV-1 [blocking] Finding"
+        )
+        cases = [
+            (
+                (review(10, findings="REV-1 [blocking] Finding"),),
+                (),
+                "unsettled blocking",
+            ),
+            ((opened, review(12)), (root(),), "unsettled blocking"),
+            ((review(10, "changes_requested"),), (), "no blocking finding"),
+            (
+                (
+                    review(
+                        10,
+                        "changes_requested",
+                        findings="REV-1 [optional] Finding",
+                    ),
+                ),
+                (),
+                "no blocking finding",
+            ),
+            (
+                (
+                    opened,
+                    review(
+                        12,
+                        "changes_requested",
+                        findings="REV-1 [blocking] Finding",
+                    ),
+                ),
+                (root(),),
+                "listed by more than one",
+            ),
+        ]
+        for reviews, comments, detail in cases:
+            with self.subTest(detail=detail, reviews=reviews):
+                state = derive_state(
+                    snapshot(reviews=reviews, comments=comments)
+                )
+                self.assertEqual(state["budget"]["used"], len(reviews) - 1)
+                self.assertFalse(state["approval"]["approved"])
+                self.assertTrue(
+                    any(
+                        d["kind"] == "malformed_review"
+                        and detail in d["detail"]
+                        for d in state["diagnostics"]
+                    )
+                )
+
+    def test_changes_requested_needs_verification_during_this_pass(
+        self,
+    ) -> None:
+        opened = review(
+            10, "changes_requested", findings="REV-1 [blocking] Finding"
+        )
+        verify = reply(12, "NOT FIXED", author="reviewer")
+        s = snapshot(
+            reviews=(opened, review(13, "changes_requested")),
+            comments=(root(), verify),
+        )
+        self.assertEqual(derive_state(s)["budget"]["used"], 2)
+        for ident in (9, 14):
+            with self.subTest(verification_time=ident):
+                state = derive_state(
+                    replace(
+                        s,
+                        comments=(
+                            root(),
+                            reply(ident, "NOT FIXED", author="reviewer"),
+                        ),
+                    )
+                )
+                self.assertEqual(state["budget"]["used"], 1)
+                self.assertEqual(
+                    state["diagnostics"][0]["kind"], "malformed_review"
+                )
+
+    def test_review_target_and_submission_validity(self) -> None:
+        good = review(10)
+        cases = [
+            replace(good, state="PENDING"),
+            replace(good, commit_id=J),
+            replace(
+                good,
+                evidence=replace(
+                    good.evidence,
+                    body=good.evidence.body.replace("pr=1", "pr=2"),
+                ),
+            ),
+            replace(
+                good,
+                evidence=replace(
+                    good.evidence,
+                    body=good.evidence.body.replace("base=" + A, "base=" + J),
+                ),
+            ),
+            replace(
+                good,
+                evidence=replace(
+                    good.evidence,
+                    body=good.evidence.body.replace("base=" + A, "base=" + H),
+                ),
+            ),
+        ]
+        for invalid in cases:
+            with self.subTest(review=invalid):
+                state = derive_state(snapshot(reviews=(invalid,)))
+                self.assertEqual(state["budget"]["used"], 0)
+                self.assertEqual(
+                    state["diagnostics"][0]["kind"], "malformed_review"
+                )
+
+    def test_duplicate_roots_and_implementer_recovery_text_are_not_authority(
+        self,
+    ):
+        opening = root()
+        reviewed = review(
+            10,
+            "changes_requested",
+            findings="REV-1 [blocking] Finding",
+            fallback=opening.evidence.body,
+        )
+        wrong_copy = replace(
+            opening,
+            evidence=replace(
+                opening.evidence,
+                author="dev",
+                body=opening.evidence.body + " Edit.",
+            ),
+        )
+        duplicate = replace(opening, evidence=replace(opening.evidence, id=12))
+        wrong_title = replace(
+            opening,
+            evidence=replace(
+                opening.evidence,
+                body=opening.evidence.body.replace("Finding", "Other", 1),
+            ),
+        )
+        for comments, diagnostic in [
+            ((wrong_copy,), "unauthorized"),
+            ((opening, duplicate), "duplicate_finding"),
+            ((wrong_title,), "malformed_finding"),
+        ]:
+            with self.subTest(diagnostic=diagnostic):
+                state = derive_state(
+                    snapshot(reviews=(reviewed,), comments=comments)
+                )
+                self.assertEqual(state["next_action"], "open_threads")
+                self.assertIsNone(state["findings"][0]["root"])
+                self.assertIn(
+                    diagnostic, [d["kind"] for d in state["diagnostics"]]
+                )
+
+    def test_specific_decision_cannot_amend_task_or_budget(self) -> None:
+        invalid = decision(
+            11,
+            finding="REV-1",
+            budget=5,
+            body="Decided.\n\n## Task\n\nUnapproved objective.",
+        )
+        state = derive_state(snapshot(conversation=(invalid,)))
+        self.assertEqual(state["decisions"], [])
+        self.assertEqual(state["budget"]["effective"], 3)
+        self.assertNotIn("Unapproved", state["effective_task"])
+        self.assertEqual(state["diagnostics"][0]["kind"], "malformed")
+
     def test_approval_precedes_budget_gates_at_each_limit(self) -> None:
         for count in (1, 3, 4):
             with self.subTest(count=count):
@@ -522,6 +718,17 @@ class DerivedStateTests(unittest.TestCase):
                 "needs_decision"
             ]
         )
+
+    def test_decided_needs_human_review_can_repeat_without_a_commit(
+        self,
+    ) -> None:
+        s = snapshot(
+            reviews=(review(10, "needs_human"),),
+            conversation=(decision(11),),
+        )
+        state = derive_state(s)
+        self.assertFalse(state["gates"]["same_head_requires_rejections"])
+        self.assertEqual(state["next_action"], "launch_review")
 
     def test_fallback_association_unanchored_and_optional(self) -> None:
         blocking = root()

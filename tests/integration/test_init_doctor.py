@@ -7,6 +7,56 @@ from tests.forge_support import ForgeFixture
 
 
 class InitDoctorTests(unittest.TestCase):
+    def test_bare_repository_is_refused_before_configuration_writes(
+        self,
+    ) -> None:
+        with ForgeFixture() as f:
+            result = f.cli(
+                "init",
+                "--implementer-account",
+                "developer",
+                "--reviewer-account",
+                "reviewer",
+                cwd=f.origin,
+                expected=1,
+            )
+            self.assertIn("non-bare Git worktree is required", result["error"])
+            self.assertFalse((f.origin / ".agent-squad").exists())
+
+    def test_missing_base_branch_prevents_initialization(self) -> None:
+        with ForgeFixture() as f:
+            result = f.cli(
+                "init",
+                "--implementer-account",
+                "developer",
+                "--reviewer-account",
+                "reviewer",
+                "--base-branch",
+                "missing",
+                expected=1,
+            )
+            self.assertIn(
+                "base_branch does not exist on origin", result["error"]
+            )
+            self.assertFalse((f.repo / ".agent-squad/config.json").exists())
+
+    def test_symlinked_control_root_and_configuration_are_refused(
+        self,
+    ) -> None:
+        for target in ("control", "config"):
+            with self.subTest(target=target), ForgeFixture() as f:
+                f.initialize()
+                control = f.repo / ".agent-squad"
+                path = (
+                    control if target == "control" else control / "config.json"
+                )
+                saved = f.root / "saved"
+                path.rename(saved)
+                path.symlink_to(saved, target_is_directory=target == "control")
+                result = f.cli("issue", "view", "--issue", "1", expected=1)
+                self.assertIn("must not be symlinks", result["error"])
+                self.assertTrue(path.is_symlink())
+
     def test_init_defaults_remote_default_and_no_overwrite(self) -> None:
         with ForgeFixture() as f:
             f.git("branch", "-m", "trunk")

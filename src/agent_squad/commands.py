@@ -93,11 +93,8 @@ def state_for(repository: Repository, snapshot: Snapshot) -> dict:
         "--verify",
         f"refs/remotes/origin/{pr.base_branch}^{{commit}}",
     )
-    if tip != pr.base:
-        raise AgentSquadError(
-            "base branch changed while reading the PR; rerun to derive a"
-            " consistent target"
-        )
+    # GitHub's PR base SHA can lag behind the branch. Ancestry and the
+    # review target use the fetched tip, not that informational snapshot.
     base = git_output(repository.root, "merge-base", tip, pr.head)
     worktrees = list_worktrees(repository.root)
     implementation = next(
@@ -119,6 +116,7 @@ def state_for(repository: Repository, snapshot: Snapshot) -> dict:
         worktrees,
         base,
         lambda a, b: is_ancestor(repository.root, a, b),
+        base_tip=tip,
         dirty=dirty,
     )
 
@@ -231,7 +229,9 @@ def load_threads(value: object) -> list[FindingInput]:
         ):
             if (
                 re.search(
-                    rf"^\*\*{label}\*\*[: ]*\S", item["body"], re.MULTILINE
+                    rf"^\*\*{label}\*\*[: ]*[^\s:]",
+                    item["body"],
+                    re.MULTILINE,
                 )
                 is None
             ):
@@ -310,7 +310,7 @@ def post_review(
     if snapshot.pr.head != head:
         raise AgentSquadError("review head is not the current PR head")
     if not is_ancestor(repository.root, base, head) or not is_ancestor(
-        repository.root, base, snapshot.pr.base
+        repository.root, base, state["target"]["base_tip"]
     ):
         raise AgentSquadError(
             "review base must be an ancestor of head and the base branch"
@@ -461,12 +461,14 @@ def reply_thread(
         raise GateError("finding has no root; use thread open first")
     if parsed and "sha" in parsed.fields:
         sha = parsed.fields["sha"]
-        if not is_ancestor(
-            repository.root, sha, state["target"]["head"]
-        ) or is_ancestor(repository.root, sha, finding["opening_head"]):
+        if run_git(
+            repository.root, "cat-file", "-e", f"{sha}^{{commit}}"
+        ).returncode or is_ancestor(
+            repository.root, sha, finding["opening_head"]
+        ):
             raise AgentSquadError(
-                "fixed SHA must be reachable from head and absent from the"
-                " finding opening head"
+                "fixed SHA must name a local commit absent from the finding"
+                " opening head"
             )
     return asdict(forge.reply(number, finding["root"]["id"], body))
 

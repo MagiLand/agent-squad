@@ -47,7 +47,7 @@ def run_smoke() -> dict:
             expected=4,
         )
         f.decision(fid="REV-1")
-        head = f.push("value = 1\nsecond = 20\nthird = 3\n")
+        head = f.commit("value = 1\nsecond = 20\nthird = 3\n")
         f.reply(
             "REV-1",
             f"DISPOSITION fixed {head}\n\nScripted fix; python -m unittest.",
@@ -57,6 +57,16 @@ def run_smoke() -> dict:
             "DISPOSITION rejected\n\nThe scripted example already meets the"
             " requirement.",
         )
+        before_push = f.status()
+        # The earlier needs-human disposition still has its Developer
+        # decision; the new fixed disposition takes effect after the push.
+        assert before_push["next_action"] == "push"
+        assert any(
+            d["kind"] == "invalid_disposition"
+            for d in before_push["diagnostics"]
+        )
+        f.git("push", "origin", "HEAD", cwd=f.worktree)
+        assert f.status()["next_action"] == "launch_review"
         f.cli(
             "pr",
             "report",

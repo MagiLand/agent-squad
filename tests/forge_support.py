@@ -220,12 +220,16 @@ class ForgeFixture:
         self.git("worktree", "add", "-b", "issue-1", str(self.worktree))
         return self.push("value = 1\nsecond = 2\nthird = 3\n")
 
-    def push(self, text: str) -> str:
+    def commit(self, text: str) -> str:
         (self.worktree / "example.py").write_text(text)
         self.git("add", "example.py", cwd=self.worktree)
         self.git("commit", "-m", "test: change fixture", cwd=self.worktree)
-        self.git("push", "-u", "origin", "HEAD", cwd=self.worktree)
         return self.git("rev-parse", "HEAD", cwd=self.worktree)
+
+    def push(self, text: str) -> str:
+        head = self.commit(text)
+        self.git("push", "-u", "origin", "HEAD", cwd=self.worktree)
+        return head
 
     def create_pr(self) -> dict:
         return self.cli(
@@ -247,6 +251,8 @@ class ForgeFixture:
         threads: list[dict] | None = None,
         *,
         resume: int | None = None,
+        head: str | None = None,
+        base: str | None = None,
         expected: int = 0,
     ) -> dict:
         file = self.write("threads.json", json.dumps(threads or []))
@@ -258,9 +264,9 @@ class ForgeFixture:
             "--pr",
             "1",
             "--head",
-            self.git("rev-parse", "HEAD", cwd=self.worktree),
+            head or self.git("rev-parse", "HEAD", cwd=self.worktree),
             "--base",
-            self.base,
+            base or self.base,
             "--verdict",
             verdict,
             "--body",

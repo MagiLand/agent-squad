@@ -79,7 +79,10 @@ class Evidence:
             positive(data.get("id"), "evidence.id"),
             V.require_string(user.get("login"), "evidence.user.login"),
             V.require_timestamp(timestamp, "evidence.timestamp"),
-            text_value(data.get("body"), "evidence.body"),
+            text_value(
+                "" if data.get("body") is None else data["body"],
+                "evidence.body",
+            ).replace("\r\n", "\n"),
         )
 
 

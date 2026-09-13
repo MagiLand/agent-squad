@@ -81,3 +81,17 @@ Binary files a/pic and b/pic differ
             " @@\n+++ a source line\n+@@ another source line\n"
         )
         self.assertEqual(parse_diff(diff), {"file": {1, 2}})
+
+    def test_malformed_diff_hunks_and_headers_are_refused(self) -> None:
+        for diff, error in [
+            (
+                "+++ b/file\n@@ -1 +1 @@\ninvalid\n",
+                "invalid unified diff hunk",
+            ),
+            ("+++ b/file\n@@ invalid @@\n", "invalid unified diff header"),
+        ]:
+            with (
+                self.subTest(diff=diff),
+                self.assertRaisesRegex(AgentSquadError, error),
+            ):
+                parse_diff(diff)

@@ -19,6 +19,244 @@ class ForgeCommandTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
 
+    def test_moved_base_uses_fetched_tip_with_frozen_pr_base(self) -> None:
+        f = self.f
+        f.git("switch", "main")
+        (f.repo / "base-only.txt").write_text("Base advanced.\n")
+        f.git("add", "base-only.txt")
+        f.git("commit", "-m", "test: advance main")
+        tip = f.git("rev-parse", "HEAD")
+        f.git("push", "origin", "main")
+        state = f.status()
+        self.assertEqual(f.read_model()["prs"]["1"]["base"]["sha"], f.base)
+        self.assertNotEqual(tip, f.base)
+        self.assertEqual(state["target"]["base"], f.base)
+        self.assertEqual(state["target"]["base_tip"], tip)
+        f.cli("pr", "head", "--pr", "1")
+        f.cli("pr", "reviews", "--pr", "1")
+        f.review("needs_human")
+        # Incorporating the moved base makes it a valid review base even
+        # though the forge's informational base.sha is still the old commit.
+        f.git("merge", "--no-edit", "main", cwd=f.worktree)
+        f.git("push", "origin", "HEAD", cwd=f.worktree)
+        f.base = tip
+        f.review("approved")
+        self.assertEqual(f.status()["next_action"], "approved")
+        self.assertEqual(f.status()["budget"]["used"], 2)
+
+    def test_fixed_disposition_precedes_push_and_is_rederived(self) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        (f.worktree / "example.py").write_text("value = 2\nsecond = 2\n")
+        f.git("add", "example.py", cwd=f.worktree)
+        f.git("commit", "-m", "test: fix before push", cwd=f.worktree)
+        head = f.git("rev-parse", "HEAD", cwd=f.worktree)
+        f.reply("REV-1", f"DISPOSITION fixed {head}")
+        before = f.status()
+        self.assertEqual(before["next_action"], "address_findings")
+        self.assertIn(
+            "invalid_disposition", [d["kind"] for d in before["diagnostics"]]
+        )
+        f.git("push", "origin", "HEAD", cwd=f.worktree)
+        after = f.status()
+        self.assertEqual(after["next_action"], "launch_review")
+        self.assertEqual(
+            after["findings"][0]["latest_disposition"]["sha"], head
+        )
+
+    def test_null_descriptions_and_browser_decision(self) -> None:
+        f = self.f
+        model = f.read_model()
+        model["issues"]["1"]["body"] = None
+        model["prs"] = {}
+        f.save_model(model)
+        self.assertEqual(f.cli("issue", "view", "--issue", "1")["body"], "")
+        f.create_pr()
+        f.review("needs_human")
+        f.decision(budget=5, task=TASK.replace("Exercise", "Amend"))
+        model = f.read_model()
+        comment = model["prs"]["1"]["conversation"][0]
+        comment["body"] = comment["body"].replace("\n", "\r\n")
+        f.save_model(model)
+        state = f.status()
+        self.assertEqual(state["next_action"], "launch_review")
+        self.assertEqual(state["budget"]["effective"], 5)
+        self.assertIn("Amend", state["effective_task"])
+        self.assertEqual(state["diagnostics"], [])
+        model = f.read_model()
+        model["prs"]["1"]["body"] = None
+        f.save_model(model)
+        state = f.status()
+        self.assertIn(
+            "malformed_pr_body", [d["kind"] for d in state["diagnostics"]]
+        )
+
+    def test_review_verdict_and_target_guards_refuse_before_writing(
+        self,
+    ) -> None:
+        f = self.f
+        child = f.git(
+            "commit-tree",
+            f.git("rev-parse", "HEAD^{tree}", cwd=f.worktree),
+            "-p",
+            self.head,
+            "-m",
+            "Unpushed child",
+            cwd=f.worktree,
+        )
+        for options, expected, error in [
+            (
+                {"verdict": "approved", "threads": [finding()]},
+                4,
+                "approval requires",
+            ),
+            ({"verdict": "changes_requested"}, 1, "requires a blocking"),
+            (
+                {
+                    "verdict": "changes_requested",
+                    "threads": [finding("optional")],
+                },
+                1,
+                "requires a blocking",
+            ),
+            (
+                {"verdict": "approved", "head": f.base},
+                1,
+                "not the current PR head",
+            ),
+            (
+                {"verdict": "approved", "base": self.head},
+                1,
+                "ancestor of head and the base branch",
+            ),
+            (
+                {"verdict": "approved", "base": child},
+                1,
+                "ancestor of head and the base branch",
+            ),
+        ]:
+            with self.subTest(options=options):
+                result = f.review(**options, expected=expected)
+                self.assertIn(error, result["error"])
+                self.assertEqual(f.read_model()["prs"]["1"]["reviews"], [])
+        f.review("changes_requested", [finding()])
+        self.assertIn(
+            "approval requires", f.review("approved", expected=4)["error"]
+        )
+        self.assertEqual(len(f.read_model()["prs"]["1"]["reviews"]), 1)
+        f.reply("REV-1", "NOT FIXED", "reviewer")
+        f.review("changes_requested")
+        self.assertEqual(f.status()["budget"]["used"], 2)
+        # A verification consumed by the preceding pass cannot justify another.
+        self.assertIn(
+            "during this pass",
+            f.review("changes_requested", expected=1)["error"],
+        )
+        self.assertEqual(len(f.read_model()["prs"]["1"]["reviews"]), 2)
+
+    def test_decision_report_and_recovery_guards_refuse_without_mutation(
+        self,
+    ) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        for body in ("", "DISPOSITION rejected"):
+            with self.subTest(body=body):
+                result = f.cli(
+                    "decision",
+                    "post",
+                    "--as",
+                    "implementer",
+                    "--pr",
+                    "1",
+                    "--finding",
+                    "none",
+                    "--body",
+                    f.write("invalid.md", body),
+                    expected=1,
+                )
+                self.assertIn(
+                    "decision body must contain decision prose",
+                    result["error"],
+                )
+                self.assertEqual(
+                    f.read_model()["prs"]["1"]["conversation"], []
+                )
+        result = f.decision(fid="REV-1", task=TASK, expected=1)
+        self.assertIn("Task amendment requires", result["error"])
+        self.assertEqual(f.read_model()["prs"]["1"]["conversation"], [])
+        model = f.read_model()
+        model["prs"]["1"]["comments"] = []
+        f.save_model(model)
+        result = f.cli(
+            "thread",
+            "open",
+            "--as",
+            "reviewer",
+            "--pr",
+            "1",
+            "--finding",
+            "REV-1",
+            "--path",
+            "example.py",
+            "--line",
+            "2",
+            expected=1,
+        )
+        self.assertIn("no Unanchored findings text", result["error"])
+        self.assertEqual(f.read_model()["prs"]["1"]["comments"], [])
+        model = f.read_model()
+        model["prs"]["1"]["state"] = "closed"
+        f.save_model(model)
+        result = f.cli(
+            "pr",
+            "report",
+            "--as",
+            "implementer",
+            "--pr",
+            "1",
+            "--report",
+            f.write(
+                "changed-report.md",
+                REPORT.replace("Scripted fixture.", "Do not publish."),
+            ),
+            expected=1,
+        )
+        self.assertIn("PR is not open", result["error"])
+        self.assertNotIn("Do not publish", f.read_model()["prs"]["1"]["body"])
+
+    def test_silently_omitted_root_is_recovered_without_another_review(
+        self,
+    ) -> None:
+        f = self.f
+        f.settings(reject_batch=True, drop_root=True)
+        inputs = [finding()]
+        result = f.review("changes_requested", inputs, expected=1)
+        self.assertIn("forge omitted roots", result["error"])
+        state = f.status()
+        self.assertEqual(state["next_action"], "open_threads")
+        ident = state["reviews"][0]["id"]
+        f.settings(drop_root=False)
+        f.review("changes_requested", inputs, resume=ident)
+        final = f.status()
+        self.assertEqual(final["budget"]["used"], 1)
+        self.assertEqual(final["next_action"], "address_findings")
+        self.assertEqual(len(final["findings"]), 1)
+        self.assertIsNotNone(final["findings"][0]["root"])
+
+    def test_interruption_before_write_repeats_and_counts_once(self) -> None:
+        f = self.f
+        f.settings(interrupt_before_review=True)
+        self.assertIn(
+            "before review write", f.review("approved", expected=1)["error"]
+        )
+        self.assertEqual(f.read_model()["prs"]["1"]["reviews"], [])
+        self.assertEqual(f.status()["budget"]["used"], 0)
+        f.review("approved")
+        state = f.status()
+        self.assertEqual(state["budget"]["used"], 1)
+        self.assertEqual(state["next_action"], "approved")
+        self.assertEqual(len(f.read_model()["prs"]["1"]["reviews"]), 1)
+
     def test_all_mutations_use_the_selected_identity_without_switching(
         self,
     ) -> None:
@@ -189,6 +427,21 @@ class ForgeCommandTests(unittest.TestCase):
                 "--line",
                 "2",
             )
+            calls = f.read_model()["calls"]
+            writes = [
+                c
+                for c in calls
+                if c["arguments"][0] == "api"
+                and c["arguments"][1].endswith("/comments")
+                and "POST" in c["arguments"]
+            ]
+            expected_account = (
+                "developer" if role == "implementer" else "reviewer"
+            )
+            self.assertEqual(writes[-1]["account"], expected_account)
+            self.assertEqual(
+                writes[-1]["GH_TOKEN"], "fake-token-" + expected_account
+            )
             self.assertFalse(f.status()["gates"]["unanchored_findings"])
         self.assertEqual(f.status()["budget"]["used"], 1)
         f.cli(
@@ -270,6 +523,7 @@ class ForgeCommandTests(unittest.TestCase):
         f.reply("REV-1", "DISPOSITION rejected", "reviewer", expected=1)
         f.reply("REV-1", f"DISPOSITION fixed {self.head}", expected=1)
         f.reply("REV-1", "DISPOSITION fixed abc123", expected=1)
+        f.reply("REV-1", "DISPOSITION fixed " + "f" * 40, expected=1)
         f.cli(
             "thread",
             "resolve",

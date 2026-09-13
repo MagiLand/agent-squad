@@ -69,7 +69,6 @@ def remote_sha(branch):
 def refresh(pr):
     if pr["state"] == "open" and model.get("origin"):
         pr["head"]["sha"] = remote_sha(pr["head"]["ref"])
-        pr["base"]["sha"] = remote_sha(pr["base"]["ref"])
     return pr
 
 
@@ -264,6 +263,8 @@ if parts[5] == "reviews":
             fail("User can only have one pending review per pull request")
         if payload["event"] == "APPROVE" and account == pr["user"]["login"]:
             fail("Can not approve your own pull request")
+        if settings.pop("interrupt_before_review", False):
+            fail("injected interruption before review write", 503)
         if settings.get("reject_batch") and payload.get("comments"):
             fail("batch anchor rejection")
         review = review_record(
