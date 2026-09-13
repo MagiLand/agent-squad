@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stateful deterministic Herdr fixture; starts no processes or models."""
+"""Stateful deterministic Herdr fixture; starts no harnesses or models."""
 
 import json
 import os
