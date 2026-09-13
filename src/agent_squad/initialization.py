@@ -35,7 +35,7 @@ class GateError(AgentSquadError):
 
 
 class RetainedError(AgentSquadError):
-    """A published Task amendment whose body mirror needs repair (exit 3)."""
+    """Resources retained, or a published Task mirror to repair (exit 3)."""
 
 
 class AgentKind(StrEnum):

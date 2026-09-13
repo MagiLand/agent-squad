@@ -1,4 +1,4 @@
-"""Read-only installed Herdr discovery and agent inspection."""
+"""Installed Herdr discovery, resource operations, and fixed handoff lines."""
 
 from __future__ import annotations
 
@@ -10,10 +10,93 @@ import shutil
 import subprocess
 
 from .initialization import AgentKind, AgentSquadError, decode_json
+from .conventions import SHA, TAG, render_line
 
 
 class HerdrError(AgentSquadError):
     """Raised when installed Herdr capabilities or delivery are unusable."""
+
+
+class HerdrCommandError(HerdrError):
+    """A failed command with Herdr's machine-readable error code preserved."""
+
+    def __init__(self, message: str, code: str | None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Selected by the live delivery experiment, not by consumer configuration.
+REVIEW_DELIVERY = {
+    AgentKind.CLAUDE: "agent_prompt",
+    AgentKind.CODEX: "initial_prompt",
+}
+AGENT_NAME = r"[a-z][a-z0-9_-]{0,31}"
+AGENT_STATES = {"idle", "working", "blocked", "done", "unknown"}
+
+
+def reviewer_name(pr: int, head: str) -> str:
+    """Return the reserved name after validating the complete target."""
+    if type(pr) is not int or pr < 1 or re.fullmatch(SHA, head) is None:
+        raise AgentSquadError(
+            "review target requires a PR number and full SHA"
+        )
+    name = f"reviewer-pr{pr}-{head[:7]}"
+    if re.fullmatch(AGENT_NAME, name) is None:
+        raise AgentSquadError("PR number exceeds the Herdr agent-name limit")
+    return name
+
+
+def request_line(
+    kind: AgentKind, pr: int, head: str, base: str, implementer: str
+) -> str:
+    """Render the exact harness-specific request of §8.3."""
+    reviewer_name(pr, head)
+    if (
+        re.fullmatch(SHA, base) is None
+        or re.fullmatch(AGENT_NAME, implementer) is None
+    ):
+        raise AgentSquadError("invalid review base or Implementer agent name")
+    prefix = {AgentKind.CLAUDE: "/", AgentKind.CODEX: "$"}[kind]
+    return (
+        f"{prefix}squad-reviewer pr={pr} head={head} base={base}"
+        f" implementer={implementer}"
+    )
+
+
+def result_message(pr: int, head: str, verdict: str) -> str:
+    """Render the fixed result line and per-verdict instruction of §8.5."""
+    reviewer_name(pr, head)
+    render_line("review", pr=pr, head=head, base=head, verdict=verdict)
+    sentences = {
+        "approved": (
+            f"Run agent-squad status --pr {pr}, report the approval to the"
+            " Developer, and do not merge without the Developer's instruction."
+        ),
+        "changes_requested": (
+            f"Run agent-squad status --pr {pr}, evaluate every blocking thread"
+            " on the PR, and record dispositions before requesting another"
+            " review."
+        ),
+        "needs_human": (
+            f"Run agent-squad status --pr {pr} and relay the decision required"
+            " to the Developer."
+        ),
+    }
+    return (
+        f"{TAG} REVIEW_RESULT pr={pr} head={head} verdict={verdict}\n"
+        + sentences[verdict]
+    )
+
+
+def stopped_message(pr: int, head: str, reason: str) -> str:
+    """Render the fixed stop line and instruction of §8.5."""
+    reviewer_name(pr, head)
+    render_line("stop", head=head, reason=reason)
+    return (
+        f"{TAG} STOPPED pr={pr} head={head} reason={reason}\n"
+        f"Automated review has stopped; run agent-squad status --pr {pr} and"
+        " relay the reason and the remaining problems to the Developer."
+    )
 
 
 def format_herdr_error(value: str) -> str:
@@ -39,6 +122,10 @@ class HerdrClient:
         "agent.prompt": "AgentPromptParams",
         "agent.start": "AgentStartParams",
         "worktree.open": "WorktreeOpenParams",
+        "worktree.remove": "WorktreeRemoveParams",
+        "workspace.get": "WorkspaceTarget",
+        "workspace.close": "WorkspaceCloseParams",
+        "session.snapshot": "EmptyParams",
     }
     _REQUIRED_RESULTS = {
         "agent_info",
@@ -46,23 +133,35 @@ class HerdrClient:
         "agent_started",
         "session_snapshot",
         "worktree_opened",
+        "worktree_removed",
+        "workspace_info",
+        "ok",
     }
     _REQUIRED_PARAMETER_FIELDS = {
         "AgentTarget": {"target"},
         "AgentPromptParams": {"target", "text"},
         "AgentStartParams": {"name", "kind", "pane_id", "args"},
         "WorktreeOpenParams": {"cwd", "path", "label", "focus"},
+        "WorktreeRemoveParams": {"workspace_id", "force"},
+        "WorkspaceTarget": {"workspace_id"},
+        "WorkspaceCloseParams": {"workspace_id"},
+        "EmptyParams": set(),
     }
     _HELP_CHECKS = (
         (("agent", "--help"), ("start", "prompt", "get")),
         (("agent", "start", "--help"), ("--kind", "--pane")),
         (("agent", "prompt", "--help"), ()),
         (("agent", "get", "--help"), ()),
-        (("worktree", "--help"), ("open",)),
+        (("worktree", "--help"), ("open", "remove")),
         (
             ("worktree", "open", "--help"),
             ("--cwd", "--path", "--label", "--no-focus"),
         ),
+        (("worktree", "remove", "--help"), ("--workspace", "--force")),
+        (("workspace", "--help"), ("get", "close")),
+        (("workspace", "get", "--help"), ("workspace_id",)),
+        (("workspace", "close", "--help"), ("workspace_id",)),
+        (("api", "snapshot", "--help"), ()),
     )
 
     def __init__(
@@ -224,7 +323,7 @@ class HerdrClient:
                     "Herdr schema lacks parameter definition "
                     f"{definition_name}"
                 )
-            properties = definition.get("properties")
+            properties = definition.get("properties", {})
             if not isinstance(properties, dict):
                 raise HerdrError(
                     f"Herdr parameter definition {definition_name} has no "
@@ -311,6 +410,79 @@ class HerdrClient:
         if not isinstance(value, dict):
             raise HerdrError("Herdr snapshot has no snapshot object")
         return value
+
+    def get_agent(self, name: str) -> dict[str, object] | None:
+        """Read a named agent, distinguishing absence from server failure."""
+        return self._get_agent(name)
+
+    def open_worktree(self, primary: Path, path: Path, name: str) -> dict:
+        """Open exactly the supplied checkout without changing UI focus."""
+        return self._response_result(
+            self._run(
+                (
+                    "worktree",
+                    "open",
+                    "--cwd",
+                    str(primary),
+                    "--path",
+                    str(path),
+                    "--label",
+                    name,
+                    "--no-focus",
+                )
+            ),
+            expected_type="worktree_opened",
+        )
+
+    def start_agent(
+        self, name: str, kind: AgentKind, pane: str, args: tuple[str, ...]
+    ) -> dict:
+        """Start an interactive agent; leave blocked sessions running."""
+        arguments = (
+            "agent",
+            "start",
+            name,
+            "--kind",
+            kind.value,
+            "--pane",
+            pane,
+        )
+        if args:
+            arguments += ("--", *args)
+        return self._response_result(
+            self._run(arguments), expected_type="agent_started"
+        )
+
+    def prompt(self, name: str, message: str) -> None:
+        """Send once, without waiting for the receiving agent's turn."""
+        self._response_result(
+            self._run(("agent", "prompt", name, message)),
+            expected_type="agent_prompted",
+        )
+
+    def workspace(self, workspace_id: str) -> dict:
+        result = self._response_result(
+            self._run(("workspace", "get", workspace_id)),
+            expected_type="workspace_info",
+        )
+        workspace = result.get("workspace")
+        if not isinstance(workspace, dict):
+            raise HerdrError("Herdr workspace-get has no workspace object")
+        return workspace
+
+    def remove_worktree(self, workspace_id: str) -> dict:
+        return self._response_result(
+            self._run(
+                ("worktree", "remove", "--workspace", workspace_id, "--force")
+            ),
+            expected_type="worktree_removed",
+        )
+
+    def close_workspace(self, workspace_id: str) -> None:
+        self._response_result(
+            self._run(("workspace", "close", workspace_id)),
+            expected_type="ok",
+        )
 
     def _resolve_executable(self) -> Path:
         if self._executable is not None:
@@ -413,7 +585,12 @@ class HerdrClient:
             error = _decode_error_response(result.stderr or result.stdout)
             detail = error[1] if error is not None else _process_detail(result)
             command = " ".join(("herdr", *arguments[:2]))
-            raise HerdrError(f"{command} failed: {detail}")
+            raise HerdrCommandError(
+                f"{command} failed"
+                + (f" ({error[0]})" if error is not None else "")
+                + f": {detail}",
+                error[0] if error is not None else None,
+            )
         return result
 
     def _response_result(

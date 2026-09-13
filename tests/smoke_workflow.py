@@ -1,4 +1,4 @@
-"""The forge steps of §16.3, with scripted reviews and decisions."""
+"""The forge and Herdr steps of §16.3, with scripted reviews and decisions."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ def run_smoke() -> dict:
         f.cli("doctor")
         head = f.candidate()
         f.create_pr()
+        f.cli("reviewer", "launch", "--pr", "1")
         assert f.cli("issue", "view", "--issue", "1")["labels"] == [
             "ready-for-agent"
         ]
@@ -25,6 +26,16 @@ def run_smoke() -> dict:
                 finding("optional", "Advisory finding"),
             ],
         )
+        f.cli(
+            "handoff",
+            "review-result",
+            "--pr",
+            "1",
+            "--head",
+            head,
+            "--verdict",
+            "changes_requested",
+        )
         assert f.status()["next_action"] == "address_findings"
         f.reply(
             "REV-1", "DISPOSITION needs-human\n\nScripted policy question."
@@ -34,7 +45,7 @@ def run_smoke() -> dict:
             gated["gates"]["needs_decision"]
             and gated["next_action"] == "needs_decision"
         )
-        # Increment 2 adds reviewer launch. The derived gate is the check here.
+        f.cli("reviewer", "launch", "--pr", "1", expected=4)
         f.cli(
             "thread",
             "resolve",
@@ -47,6 +58,7 @@ def run_smoke() -> dict:
             expected=4,
         )
         f.decision(fid="REV-1")
+        previous = head
         head = f.commit("value = 1\nsecond = 20\nthird = 3\n")
         f.reply(
             "REV-1",
@@ -77,6 +89,8 @@ def run_smoke() -> dict:
             "--report",
             f.report,
         )
+        f.cli("reviewer", "close", "--pr", "1", "--head", previous)
+        f.cli("reviewer", "launch", "--pr", "1")
         f.reply(
             "REV-1",
             "VERIFIED fixed\n\nScripted execution evidence.",
@@ -100,8 +114,10 @@ def run_smoke() -> dict:
             )
         f.review("approved")
         assert f.status()["next_action"] == "approved"
+        f.cli("reviewer", "close", "--pr", "1")
         head = f.push("value = 1\nsecond = 20\nthird = 30\n")
         assert f.status()["next_action"] == "launch_review"
+        f.cli("reviewer", "launch", "--pr", "1")
         f.review("changes_requested", [finding(title="Budget finding")])
         f.cli(
             "stop",
@@ -118,12 +134,25 @@ def run_smoke() -> dict:
             f.write("stop.md", "Scripted budget exhausted."),
         )
         assert f.status()["next_action"] == "stopped"
+        f.cli(
+            "handoff",
+            "stopped",
+            "--pr",
+            "1",
+            "--head",
+            head,
+            "--reason",
+            "budget",
+        )
+        f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        f.cli("reviewer", "close", "--pr", "1")
         f.decision(budget=4)
         f.reply(
             "REV-4",
             "DISPOSITION rejected\n\nScripted reconsideration evidence.",
         )
         assert f.status()["next_action"] == "launch_review"
+        f.cli("reviewer", "launch", "--pr", "1")
         f.reply(
             "REV-4",
             "VERIFIED rejection accepted\n\nScripted probe passed.",
@@ -137,6 +166,23 @@ def run_smoke() -> dict:
             "used": 4,
             "remaining": 0,
         }
+        f.herdr_settings(prompt_failure=True)
+        f.cli(
+            "handoff",
+            "review-result",
+            "--pr",
+            "1",
+            "--head",
+            head,
+            "--verdict",
+            "approved",
+            expected=1,
+        )
+        lost = f.status()
+        assert lost["current_review_unacted"]["head"] == head
+        assert lost["next_action"] == "approved"
+        f.herdr_settings(prompt_failure=False)
+        f.cli("reviewer", "close", "--pr", "1")
         # Isolated recovery exercise follows an explicit scripted budget
         # extension.
         f.decision(budget=6)
@@ -197,6 +243,7 @@ def run_smoke() -> dict:
             "verifications",
             "decisions",
             "stop",
+            "Herdr process states and messages",
         ],
         "commands": commands,
         "cleanup": "owned temporary repository and all worktrees removed",
