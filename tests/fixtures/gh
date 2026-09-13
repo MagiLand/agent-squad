@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Scriptable GitHub fixture. Tokens in this model are exclusively fake."""
+
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
+
+model_path = Path(os.environ["FAKE_FORGE_MODEL"])
+model = json.loads(model_path.read_text())
+settings = model.setdefault("settings", {})
+arguments = sys.argv[1:]
+token = os.environ.get("GH_TOKEN")
+account = token.removeprefix("fake-token-") if token else None
+payload = json.load(sys.stdin) if "--input" in arguments else None
+model.setdefault("calls", []).append(
+    {
+        "arguments": arguments,
+        "GH_TOKEN": token,
+        "account": account,
+        "body": payload,
+    }
+)
+
+
+def save():
+    model_path.write_text(json.dumps(model, indent=2) + "\n")
+
+
+def output(value):
+    save()
+    print(json.dumps(value))
+    raise SystemExit(0)
+
+
+def fail(message, status=422):
+    save()
+    print(f"gh: {message} (HTTP {status})", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def record(body, author=None):
+    model["next_id"] = model.get("next_id", 100) + 1
+    ident = model["next_id"]
+    date = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=ident)
+    return {
+        "id": ident,
+        "body": body,
+        "user": {"login": author or account},
+        "created_at": date.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def remote_sha(branch):
+    result = subprocess.run(
+        ["git", "rev-parse", f"refs/heads/{branch}"],
+        cwd=model["origin"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def refresh(pr):
+    if pr["state"] == "open" and model.get("origin"):
+        pr["head"]["sha"] = remote_sha(pr["head"]["ref"])
+    return pr
+
+
+def review_record(pr, body, event, head):
+    review = record(body)
+    review.update(
+        commit_id=head,
+        state={
+            "APPROVE": "APPROVED",
+            "REQUEST_CHANGES": "CHANGES_REQUESTED",
+            "COMMENT": "COMMENTED",
+            "PENDING": "PENDING",
+        }[event],
+    )
+    review["submitted_at"] = (
+        None if event == "PENDING" else review["created_at"]
+    )
+    pr.setdefault("reviews", []).append(review)
+    return review
+
+
+def root_record(pr, body, anchor, review_id=None):
+    if review_id is None:
+        review_id = review_record(pr, "", "COMMENT", anchor["commit_id"])["id"]
+    comment = record(body)
+    comment.update(
+        pull_request_review_id=review_id,
+        path=anchor["path"],
+        line=anchor["line"],
+        start_line=anchor.get("start_line"),
+        side="RIGHT",
+        in_reply_to_id=None,
+    )
+    pr.setdefault("comments", []).append(comment)
+    pr.setdefault("threads", []).append(
+        {
+            "id": f'T-{comment["id"]}',
+            "isResolved": False,
+            "comments": {"nodes": [{"databaseId": comment["id"]}]},
+        }
+    )
+    return comment
+
+
+def paged(values, query):
+    size = int(query.get("per_page", ["100"])[0])
+    page = int(query.get("page", ["1"])[0])
+    return values[(page - 1) * size : page * size]
+
+
+if arguments == ["--version"]:
+    save()
+    print("gh version fixture-1")
+    raise SystemExit(0)
+if arguments[:3] == ["auth", "token", "--user"]:
+    save()
+    print("fake-token-" + arguments[3])
+    raise SystemExit(0)
+if not arguments or arguments[0] != "api":
+    fail("unsupported command", 400)
+if not token or not token.startswith("fake-token-"):
+    fail("fake token required", 401)
+endpoint = arguments[1]
+method = (
+    arguments[arguments.index("--method") + 1]
+    if "--method" in arguments
+    else "GET"
+)
+if endpoint == "/user":
+    output({"login": settings.get("login_mismatch", account)})
+if endpoint == "graphql":
+    variables = payload["variables"]
+    if "resolveReviewThread" in payload["query"]:
+        for pr in model.get("prs", {}).values():
+            for thread in pr.get("threads", []):
+                if thread["id"] == variables["id"]:
+                    thread["isResolved"] = True
+                    output(
+                        {
+                            "data": {
+                                "resolveReviewThread": {
+                                    "thread": {
+                                        "id": thread["id"],
+                                        "isResolved": True,
+                                    }
+                                }
+                            }
+                        }
+                    )
+        fail("unknown thread", 404)
+    pr = model["prs"][str(variables["pr"])]
+    offset = int(variables.get("cursor") or 0)
+    size = settings.get("thread_page_size", 100)
+    threads = pr.get("threads", [])
+    has_next = offset + size < len(threads)
+    output(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": threads[offset : offset + size],
+                            "pageInfo": {
+                                "hasNextPage": has_next,
+                                "endCursor": (
+                                    str(offset + size) if has_next else None
+                                ),
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+parsed = urlsplit(endpoint)
+query = parse_qs(parsed.query)
+parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
+if len(parts) == 3 and parts[0] == "repos":
+    output(
+        {
+            "id": 1,
+            "full_name": "/".join(parts[1:3]),
+            "permissions": {"push": True},
+        }
+    )
+if len(parts) < 4 or parts[0] != "repos":
+    fail("unsupported endpoint", 404)
+kind = parts[3]
+number = parts[4] if len(parts) > 4 else None
+prs = model.setdefault("prs", {})
+if kind == "issues":
+    if len(parts) == 5:
+        output(model["issues"][number])
+    if parts[5:] == ["comments"]:
+        target = prs.get(number) or model["issues"].get(number)
+        if method == "POST":
+            comment = record(payload["body"])
+            target.setdefault("conversation", []).append(comment)
+            output(comment)
+        output(paged(target.get("conversation", []), query))
+if kind != "pulls":
+    fail("unsupported endpoint", 404)
+if number is None:
+    if method == "POST":
+        number = str(max([int(k) for k in prs] + [0]) + 1)
+        pr = record(payload["body"])
+        pr.update(
+            number=int(number),
+            title=payload["title"],
+            head={"ref": payload["head"], "sha": remote_sha(payload["head"])},
+            base={"ref": payload["base"], "sha": remote_sha(payload["base"])},
+            state="open",
+            merged=False,
+            merge_commit_sha=None,
+            mergeable_state="clean",
+            reviews=[],
+            comments=[],
+            conversation=[],
+            threads=[],
+        )
+        prs[number] = pr
+        output(pr)
+    head = query.get("head", [""])[0].partition(":")[2]
+    output(
+        paged(
+            [refresh(pr) for pr in prs.values() if pr["head"]["ref"] == head],
+            query,
+        )
+    )
+pr = refresh(prs[number])
+if len(parts) == 5:
+    if method == "PATCH":
+        if settings.get("fail_mirror"):
+            fail("injected Task mirror failure", 503)
+        pr["body"] = payload["body"]
+    output(pr)
+if parts[5] == "merge":
+    if payload["sha"] != pr["head"]["sha"]:
+        fail("Head branch was modified", 409)
+    pr.update(merged=True, state="closed", merge_commit_sha=payload["sha"])
+    output(
+        {"merged": True, "sha": payload["sha"], "message": "merged fixture"}
+    )
+if parts[5] == "reviews":
+    if len(parts) == 6:
+        if method == "GET":
+            output(paged(pr["reviews"], query))
+        if any(
+            r["state"] == "PENDING" and r["user"]["login"] == account
+            for r in pr["reviews"]
+        ):
+            fail("User can only have one pending review per pull request")
+        if payload["event"] == "APPROVE" and account == pr["user"]["login"]:
+            fail("Can not approve your own pull request")
+        if settings.pop("interrupt_before_review", False):
+            fail("injected interruption before review write", 503)
+        if settings.get("reject_batch") and payload.get("comments"):
+            fail("batch anchor rejection")
+        review = review_record(
+            pr, payload["body"], payload["event"], payload["commit_id"]
+        )
+        for index, comment in enumerate(payload.get("comments", [])):
+            if index in settings.get("drop_batch_comments", []):
+                continue
+            root_record(pr, comment["body"], comment, review["id"])
+        if settings.pop("interrupt_after_body", False) and not payload.get(
+            "comments"
+        ):
+            fail("injected interruption after durable body write", 503)
+        output(review)
+    review_id = int(parts[6])
+    review = next(r for r in pr["reviews"] if r["id"] == review_id)
+    if parts[7:] == ["events"]:
+        review["state"] = "COMMENTED"
+        review["submitted_at"] = record("")["created_at"]
+        output(review)
+    if parts[7:] == ["comments"]:
+        comments = [
+            dict(c, line=None, start_line=None, side=None)
+            for c in pr["comments"]
+            if c["pull_request_review_id"] == review_id
+        ]
+        output(paged(comments, query))
+if parts[5] == "comments":
+    if len(parts) == 6:
+        if method == "GET":
+            output(
+                paged(
+                    [
+                        c
+                        for c in pr["comments"]
+                        if not (
+                            settings.get("omit_flat_replies")
+                            and c.get("in_reply_to_id")
+                        )
+                    ],
+                    query,
+                )
+            )
+        fid = payload["body"].split("]")[0].removeprefix("[")
+        if fid in settings.get("fail_roots", []):
+            fail("injected root failure")
+        if settings.get("drop_root"):
+            fake = record(payload["body"])
+            fake.update(
+                pull_request_review_id=100,
+                path=payload["path"],
+                line=payload["line"],
+            )
+            output(fake)
+        output(root_record(pr, payload["body"], payload))
+    if parts[7:] == ["replies"]:
+        root = next(c for c in pr["comments"] if c["id"] == int(parts[6]))
+        comment = record(payload["body"])
+        comment.update(
+            pull_request_review_id=root["pull_request_review_id"],
+            in_reply_to_id=root["id"],
+            path=root["path"],
+            line=None,
+            start_line=None,
+            side=None,
+        )
+        pr["comments"].append(comment)
+        output(comment)
+fail("unsupported fixture route: " + endpoint, 404)

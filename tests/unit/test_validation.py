@@ -88,12 +88,12 @@ class JsonValidatorTests(unittest.TestCase):
                     permissive.require_narrow_relative_paths(value, "paths")
 
     def test_protocol_scalars_share_one_contract(self) -> None:
-        run_id = "12345678-1234-5678-9234-567812345678"
+        identifier = "12345678-1234-5678-9234-567812345678"
         timestamp = "2026-08-26T01:02:03Z"
 
         self.assertEqual(
-            self.validator.require_uuid(run_id, "run_id"),
-            run_id,
+            self.validator.require_uuid(identifier, "identifier"),
+            identifier,
         )
         self.assertEqual(
             self.validator.require_digest("a" * 64, "digest"),
@@ -128,7 +128,7 @@ class JsonValidatorTests(unittest.TestCase):
         )
 
         cases = (
-            (lambda: self.validator.require_uuid("bad", "run_id"), "UUID"),
+            (lambda: self.validator.require_uuid("bad", "identifier"), "UUID"),
             (
                 lambda: self.validator.require_digest("A" * 64, "digest"),
                 "lowercase SHA-256",
