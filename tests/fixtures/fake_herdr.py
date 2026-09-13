@@ -127,7 +127,11 @@ elif args == ["api", "schema", "--json"]:
             "schemas": {
                 "request": {
                     "$defs": {
-                        name: {"properties": {f: {} for f in names}}
+                        name: (
+                            {"properties": {f: {} for f in names}}
+                            if names
+                            else {"type": "object"}
+                        )
                         for name, names in fields.items()
                     },
                     "oneOf": [

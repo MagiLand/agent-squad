@@ -154,6 +154,15 @@ class ReviewerTests(unittest.TestCase):
         )
         self.worktree("remove")
 
+    def test_close_removes_created_worktree_without_herdr_workspace(
+        self,
+    ) -> None:
+        self.worktree("create")
+        self.lifecycle("close")
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.f.herdr_model()["workspaces"], [])
+        self.assertNotIn(str(self.path), self.f.git("worktree", "list"))
+
     def test_codex_initial_prompt_preserves_start_arguments(self) -> None:
         f = self.f
         path = f.repo / ".agent-squad/config.json"
@@ -366,13 +375,28 @@ class ReviewerTests(unittest.TestCase):
             any(c[:2] == ["agent", "prompt"] for c in f.herdr_model()["calls"])
         )
         f.review("approved")
-        f.herdr_settings(prompt_failure=True)
-        f.cli(*args, expected=1)
-        self.assertEqual(f.status()["next_action"], "approved")
-        self.assertEqual(
-            f.status()["current_review_unacted"]["head"], self.head
-        )
-        f.herdr_settings(prompt_failure=False)
+        for setting in ("prompt_failure", "prompt_agent_not_found"):
+            with self.subTest(setting=setting):
+                f.herdr_settings(**{setting: True})
+                before = len(f.herdr_model()["calls"])
+                published = f.read_model()["prs"]
+                self.assertIn(
+                    "agent prompt failed", f.cli(*args, expected=1)["error"]
+                )
+                self.assertEqual(
+                    [
+                        c[:2]
+                        for c in f.herdr_model()["calls"][before:]
+                        if c[:2] == ["agent", "prompt"]
+                    ],
+                    [["agent", "prompt"]],
+                )
+                self.assertEqual(f.read_model()["prs"], published)
+                self.assertEqual(f.status()["next_action"], "approved")
+                self.assertEqual(
+                    f.status()["current_review_unacted"]["head"], self.head
+                )
+                f.herdr_settings(**{setting: False})
         result = f.cli(*args)
         self.assertIn(
             "REVIEW_RESULT pr=1 head=" + self.head, result["message"]
@@ -443,6 +467,143 @@ class ReviewerTests(unittest.TestCase):
                 for c in model["calls"]
             )
         )
+
+    def test_launch_refuses_unexpected_opened_path(self) -> None:
+        self.f.herdr_settings(opened_path=str(self.f.root / "elsewhere"))
+        result = self.lifecycle("launch", expected=3)
+        self.assertIn("unexpected worktree or pane", result["error"])
+        self.assertTrue(self.path.exists())
+        self.assertFalse(
+            any(
+                c[:2] == ["agent", "start"] and "--help" not in c
+                for c in self.f.herdr_model()["calls"]
+            )
+        )
+
+    def test_corrupted_herdr_ownership_record_retains_everything(
+        self,
+    ) -> None:
+        self.lifecycle("launch")
+        admin = Path(
+            self.f.git("rev-parse", "--absolute-git-dir", cwd=self.path)
+        )
+        record = admin / "agent-squad-owner.json"
+        original = record.read_text()
+        resource = json.loads(original)["herdr"]
+        for herdr in (
+            {"workspace_id": "w1"},
+            "w1",
+            1,
+            {**resource, "kind": "shell"},
+            {**resource, "terminal_id": ""},
+            {**resource, "pane_id": 1},
+        ):
+            with self.subTest(herdr=herdr):
+                owner = json.loads(original)
+                owner["herdr"] = herdr
+                record.write_text(json.dumps(owner))
+                for command in ("close", "adopt"):
+                    self.assertIn(
+                        "ownership",
+                        self.lifecycle(command, expected=3)["error"],
+                    )
+                self.assertTrue(self.path.exists())
+                self.assertFalse(
+                    any(
+                        c[:2]
+                        in (["worktree", "remove"], ["workspace", "close"])
+                        and "--help" not in c
+                        for c in self.f.herdr_model()["calls"]
+                    )
+                )
+        record.write_text(original)
+        self.lifecycle("close")
+
+    def test_close_refuses_every_isolation_and_identity_mismatch(
+        self,
+    ) -> None:
+        self.lifecycle("launch")
+        original = self.f.herdr_model()
+        primary = str(self.f.repo)
+        changes = {
+            "registration_path": lambda m: m["workspaces"][0][
+                "worktree"
+            ].update(checkout_path=primary),
+            "registration_root": lambda m: m["workspaces"][0][
+                "worktree"
+            ].update(repo_root=str(self.f.worktree)),
+            "registration_linked": lambda m: m["workspaces"][0][
+                "worktree"
+            ].update(is_linked_worktree=False),
+            "snapshot_pane": lambda m: m["panes"].append(
+                {**m["panes"][0], "pane_id": "w1:p9"}
+            ),
+            "snapshot_tab": lambda m: m["tabs"].append(
+                {**m["tabs"][0], "tab_id": "w1:t9"}
+            ),
+            "pane_id": lambda m: m["panes"][0].update(pane_id="w1:p9"),
+            "pane_tab": lambda m: m["panes"][0].update(tab_id="w1:t9"),
+            "active_tab": lambda m: m["workspaces"][0].update(
+                active_tab_id="w1:t9"
+            ),
+            "pane_cwd": lambda m: m["panes"][0].update(cwd=primary),
+            "second_occupant": lambda m: m["agents"].append(
+                {**m["agents"][0], "name": "second"}
+            ),
+            "occupant_kind": lambda m: m["agents"][0].update(agent="codex"),
+            "occupant_terminal": lambda m: m["agents"][0].update(
+                terminal_id="other"
+            ),
+            "occupant_cwd": lambda m: m["agents"][0].update(cwd=primary),
+            "unlisted_agent": lambda m: m.update(agents=[]),
+        }
+        for change, mutate in changes.items():
+            with self.subTest(change=change):
+                model = json.loads(json.dumps(original))
+                mutate(model)
+                self.f.save_herdr(model)
+                self.lifecycle("close", expected=3)
+                self.assertTrue(self.path.exists())
+                self.assertFalse(
+                    any(
+                        c[:2]
+                        in (["worktree", "remove"], ["workspace", "close"])
+                        and "--help" not in c
+                        for c in self.f.herdr_model()["calls"]
+                    )
+                )
+        self.f.save_herdr(original)
+        self.lifecycle("close")
+
+    def test_swapped_in_clone_checkout_with_planted_record_is_refused(
+        self,
+    ) -> None:
+        self.worktree("create")
+        admin = Path(
+            self.f.git("rev-parse", "--absolute-git-dir", cwd=self.path)
+        )
+        clone = self.f.root / "clone"
+        self.f.git("clone", "--quiet", str(self.f.origin), str(clone))
+        foreign = self.f.root / "foreign"
+        self.f.git(
+            "worktree", "add", "--detach", str(foreign), self.head, cwd=clone
+        )
+        foreign_admin = Path(
+            self.f.git("rev-parse", "--absolute-git-dir", cwd=foreign)
+        )
+        (foreign_admin / "agent-squad-owner.json").write_text(
+            (admin / "agent-squad-owner.json").read_text()
+        )
+        (self.path / ".git").write_text(f"gitdir: {foreign_admin}\n")
+        self.assertEqual(
+            self.f.git("rev-parse", "HEAD", cwd=self.path), self.head
+        )
+        for command in ("create", "remove"):
+            self.assertIn(
+                "ownership", self.worktree(command, expected=3)["error"]
+            )
+        self.lifecycle("close", expected=3)
+        self.assertTrue(self.path.exists())
 
     def test_missing_or_forged_ownership_record_retains_worktree(self) -> None:
         self.worktree("create")
