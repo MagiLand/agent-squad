@@ -2,6 +2,7 @@
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import sys
 import unittest
@@ -9,9 +10,11 @@ from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
 from agent_squad.initialization import (
-    RetainedError, load_initialized_repository,
+    RetainedError, git_output, list_worktrees, load_initialized_repository,
 )
-from agent_squad.merging import owned_implementation
+from agent_squad.merging import (
+    implementation_identity, implementation_metadata, owned_implementation,
+)
 
 
 class MergeTests(unittest.TestCase):
@@ -87,6 +90,72 @@ class MergeTests(unittest.TestCase):
             with self.assertRaises(RetainedError):
                 owned_implementation(repository, 1, "issue-1", self.head)
             self.assertEqual(foreign.read_text(), original)
+
+    def test_implementation_git_identity_guards(self) -> None:
+        f = self.f
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.worktree)
+            registered = list_worktrees(f.repo)
+            metadata = implementation_metadata(
+                repository, f.worktree, "issue-1"
+            )
+            admin = metadata.parent
+            alias = admin.parent / "symlink-admin"
+            alias.symlink_to(admin, target_is_directory=True)
+            for command, value in (
+                ("--absolute-git-dir", str(f.root / "foreign-admin")),
+                ("--git-common-dir", str(f.root / "foreign-common")),
+                ("--absolute-git-dir", str(alias)),
+            ):
+                with self.subTest(command=command, value=value):
+                    def altered(root, *arguments):
+                        if command in arguments:
+                            return value
+                        return git_output(root, *arguments)
+
+                    with patch(
+                        "agent_squad.merging.git_output", side_effect=altered
+                    ), self.assertRaisesRegex(RetainedError, "Git identity"):
+                        implementation_metadata(
+                            repository, f.worktree, "issue-1"
+                        )
+            alias.unlink()
+            backlink = admin / "gitdir"
+            original = backlink.read_text()
+            foreign = f.root / "backlink.txt"
+            foreign.write_text(original)
+            try:
+                with patch(
+                    "agent_squad.merging.list_worktrees",
+                    return_value=registered,
+                ):
+                    backlink.unlink()
+                    backlink.symlink_to(foreign)
+                    with self.assertRaisesRegex(RetainedError, "Git identity"):
+                        implementation_metadata(
+                            repository, f.worktree, "issue-1"
+                        )
+                    backlink.unlink()
+                    backlink.write_text(str(f.root / "foreign/.git"))
+                    with self.assertRaisesRegex(RetainedError, "Git identity"):
+                        implementation_metadata(
+                            repository, f.worktree, "issue-1"
+                        )
+            finally:
+                backlink.unlink(missing_ok=True)
+                backlink.write_text(original)
+            with self.assertRaises(RetainedError):
+                implementation_metadata(
+                    replace(repository, primary=f.worktree),
+                    f.worktree, "issue-1",
+                )
+            with self.assertRaises(RetainedError):
+                implementation_metadata(repository, f.worktree, "main")
+            with self.assertRaises(RetainedError):
+                implementation_identity(
+                    replace(repository, root=f.repo), 1, "issue-1"
+                )
+            self.assertTrue(f.worktree.exists())
 
     def test_unowned_review_worktree_is_retained_after_verified_merge(
         self,
