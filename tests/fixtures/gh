@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
+import tempfile
 from urllib.parse import parse_qs, unquote, urlsplit
 
 model_path = Path(os.environ["FAKE_FORGE_MODEL"])
@@ -199,6 +199,13 @@ if len(parts) < 4 or parts[0] != "repos":
 kind = parts[3]
 number = parts[4] if len(parts) > 4 else None
 prs = model.setdefault("prs", {})
+if kind in ("branches", "rules"):
+    if settings.get("rules_status"):
+        fail(settings.get("rules_message", "rules unavailable"),
+             settings["rules_status"])
+    if kind == "branches":
+        output(settings.get("protection", {}))
+    output(paged(settings.get("rules", []), query))
 if kind == "issues":
     if len(parts) == 5:
         output(model["issues"][number])
@@ -246,11 +253,48 @@ if len(parts) == 5:
         pr["body"] = payload["body"]
     output(pr)
 if parts[5] == "merge":
+    if method != "PUT":
+        fail("merge requires PUT", 400)
+    if settings.get("merge_refusal"):
+        fail(settings["merge_refusal"], 405)
+    if settings.get("merge_not_confirmed"):
+        output({"merged": False, "message": "Merge is blocked"})
     if payload["sha"] != pr["head"]["sha"]:
         fail("Head branch was modified", 409)
-    pr.update(merged=True, state="closed", merge_commit_sha=payload["sha"])
+    if settings.get("head_race"):
+        fail("Head branch was modified", 409)
+    method = payload["merge_method"]
+    if method not in ("merge", "squash"):
+        fail("unsupported merge method", 400)
+    with tempfile.TemporaryDirectory(prefix="fake-forge-merge-") as temporary:
+        def git(*args):
+            result = subprocess.run(
+                ["git", *args], cwd=temporary, text=True,
+                capture_output=True, check=True,
+            )
+            return result.stdout.strip()
+
+        git(
+            "clone", "--quiet", "--shared", "--no-checkout",
+            model["origin"], ".",
+        )
+        git("checkout", "--detach", remote_sha(pr["base"]["ref"]))
+        if method == "merge":
+            git("merge", "--no-ff", "--no-edit", pr["head"]["sha"])
+        else:
+            git("merge", "--squash", pr["head"]["sha"])
+            git("commit", "-m", "Squash fixture PR")
+        if settings.get("wrong_merge_tree"):
+            (Path(temporary) / "unreviewed.txt").write_text("unreviewed\n")
+            git("add", "unreviewed.txt")
+            git("commit", "--amend", "--no-edit")
+        merge_commit = git("rev-parse", "HEAD")
+        git("push", "origin", f"HEAD:refs/heads/{pr['base']['ref']}")
+        if settings.get("delete_branch_on_merge"):
+            git("push", "origin", f":refs/heads/{pr['head']['ref']}")
+    pr.update(merged=True, state="closed", merge_commit_sha=merge_commit)
     output(
-        {"merged": True, "sha": payload["sha"], "message": "merged fixture"}
+        {"merged": True, "sha": merge_commit, "message": "merged fixture"}
     )
 if parts[5] == "reviews":
     if len(parts) == 6:

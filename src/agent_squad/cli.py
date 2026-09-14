@@ -12,6 +12,7 @@ from . import __version__
 from .anchors import Anchor
 from . import commands
 from . import reviewer
+from . import skills
 from .doctor import diagnose
 from .forge import GitHub
 from .herdr import HerdrClient
@@ -74,7 +75,10 @@ def parser() -> argparse.ArgumentParser:
 
     issue = command("issue", ("view",))["view"]
     common(issue, number="issue")
-    pr = command("pr", ("head", "reviews", "create", "report"))
+    skill = command("skill", ("install",))["install"]
+    for name in ("claude", "codex", "force", "json"):
+        skill.add_argument("--" + name, action="store_true")
+    pr = command("pr", ("head", "reviews", "create", "report", "merge"))
     for name in ("head", "reviews"):
         common(pr[name])
     common(pr["create"], role="implementer", number="issue", mutation=True)
@@ -83,6 +87,8 @@ def parser() -> argparse.ArgumentParser:
     pr["create"].add_argument("--title")
     common(pr["report"], role="implementer", mutation=True)
     pr["report"].add_argument("--report", required=True)
+    common(pr["merge"], role="implementer", mutation=True)
+    pr["merge"].add_argument("--accept-moved-base", action="store_true")
     review = command("review", ("post",))["post"]
     common(review, role="reviewer", mutation=True)
     for name in ("head", "base", "verdict", "body", "threads"):
@@ -131,6 +137,10 @@ def parser() -> argparse.ArgumentParser:
 
 def execute(args: argparse.Namespace) -> dict:
     cwd = Path.cwd()
+    if args.group == "skill":
+        return skills.install(
+            codex=args.codex, claude=args.claude, force=args.force
+        )
     if args.group == "init":
         return initialize_repository(
             cwd,
@@ -177,7 +187,10 @@ def execute(args: argparse.Namespace) -> dict:
             reason=getattr(args, "reason", None),
         )
     if key == ("issue", "view"):
-        return forge.issue(args.issue)
+        return {
+            **forge.issue(args.issue),
+            "paths": commands.workflow_paths(repository),
+        }
     if key == ("pr", "create"):
         return commands.create_pr(
             repository,
@@ -190,6 +203,13 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("pr", "report"):
         return commands.report_pr(
             forge, args.pr, commands.read_file(args.report)
+        )
+    if key == ("pr", "merge"):
+        from .merging import merge_pr
+
+        return merge_pr(
+            repository, forge, args.pr,
+            accept_moved_base=args.accept_moved_base,
         )
     if key == ("review", "post"):
         return commands.post_review(

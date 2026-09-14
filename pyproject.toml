@@ -28,3 +28,6 @@ version = {attr = "agent_squad.__version__"}
 where = ["src"]
 include = ["agent_squad*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+agent_squad = ["skills/*/SKILL.md"]

@@ -127,7 +127,7 @@ def state_for(
         except HerdrError:
             # Scheduling hints never make forge-derived status unavailable.
             pass
-    return derive(
+    state = derive(
         snapshot,
         repository.configuration,
         worktrees,
@@ -137,6 +137,19 @@ def state_for(
         dirty=dirty,
         reviewer_live=live,
     )
+    return {**state, "paths": workflow_paths(repository, pr=pr.number)}
+
+
+def workflow_paths(repository: Repository, *, pr: int | None = None) -> dict:
+    config = repository.configuration
+    scratch = repository.resolve_root(config.scratch_root)
+    return {
+        "primary": str(repository.primary),
+        "worktree_root": str(repository.resolve_root(config.worktree_root)),
+        "scratch_root": str(scratch),
+        "scratch": str(scratch / f"pr{pr}") if pr else None,
+        "base_branch": config.base_branch,
+    }
 
 
 def find_finding(state: dict, fid: str) -> dict:
@@ -174,16 +187,19 @@ def create_pr(
     if forge.branch_prs(branch):
         raise AgentSquadError("a PR already exists for this branch")
     issue_record = forge.issue(issue)
-    return asdict(
-        forge.create_pr(
-            {
-                "title": title or issue_record["title"],
-                "head": branch,
-                "base": repository.configuration.base_branch,
-                "body": body,
-            }
-        )
+    from .merging import implementation_identity, record_implementation
+
+    metadata, identity = implementation_identity(repository, issue, branch)
+    created = forge.create_pr(
+        {
+            "title": title or issue_record["title"],
+            "head": branch,
+            "base": repository.configuration.base_branch,
+            "body": body,
+        }
     )
+    record_implementation(metadata, identity, created.number)
+    return asdict(created)
 
 
 def report_pr(forge: GitHub, number: int, report: str) -> dict:
