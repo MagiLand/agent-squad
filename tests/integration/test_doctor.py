@@ -457,3 +457,40 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(
             any("/pulls/999" in c["arguments"]
                 for c in f.read_model()["calls"]))
+
+    def test_malformed_orphan_agent_inventory_fails(self) -> None:
+        f = self.f
+        for snapshot in (
+            {}, {"agents": None}, {"agents": [None]},
+            {"agents": [{"name": "reviewer-pr1-aaaaaaa", "cwd": None}]},
+        ):
+            with (
+                self.subTest(snapshot=snapshot),
+                patch.dict(os.environ, f.env, clear=True),
+                patch("agent_squad.doctor.HerdrClient.snapshot",
+                      return_value=snapshot),
+            ):
+                result = diagnose(f.repo)
+            self.assertFalse(result["ok"])
+            self.assertTrue(any(
+                d["check"].startswith("orphan") and d["severity"] == "fail"
+                for d in result["diagnostics"]
+            ))
+            self.assertEqual(f.herdr_model()["workspaces"], [])
+
+    def test_removed_worktree_does_not_hide_its_orphan_agent(self) -> None:
+        f = self.f
+        f.candidate()
+        f.create_pr()
+        name = "reviewer-pr1-aaaaaaa"
+        path = f.repo / ".agent-squad/worktrees" / name
+        model = f.read_model()
+        model["prs"]["1"].update(state="closed", merged=False)
+        f.save_model(model)
+        herdr = f.herdr_model()
+        herdr["agents"] = [{"name": name, "cwd": str(path)}]
+        f.save_herdr(herdr)
+        result = f.cli("doctor")
+        item = self.diagnostic(result, "orphan agent", "warn")
+        self.assertIn(name, item["detail"])
+        self.assertFalse(path.exists())
