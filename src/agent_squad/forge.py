@@ -514,6 +514,44 @@ class GitHub:
             self.api(f"{self.prefix}/pulls", method="POST", body=body)
         )
 
+    def branch_rules(self, branch: str) -> dict[str, object]:
+        """Report classic protection and active rulesets when exposed."""
+        result = {}
+        for name, endpoint in (
+            ("protection", f"branches/{quote(branch, safe='')}/protection"),
+            ("rules", f"rules/branches/{quote(branch, safe='')}"),
+        ):
+            try:
+                value = (
+                    self.listing(f"{self.prefix}/{endpoint}")
+                    if name == "rules"
+                    else self.api(f"{self.prefix}/{endpoint}")
+                )
+                if name == "protection":
+                    object_value(value, "branch protection")
+                result[name] = value
+            except ForgeError as error:
+                if error.status == 404 or (
+                    error.status == 403 and re.search(
+                        r"upgrade|not available.*plan|requires GitHub",
+                        str(error), re.IGNORECASE,
+                    )
+                ):
+                    result[name] = {"visibility": "no rule visible"}
+                else:
+                    raise
+        return result
+
+    def merge(self, number: int, head: str, method: str) -> dict[str, str]:
+        data = object_value(self.api(
+            f"{self.prefix}/pulls/{number}/merge", method="PUT",
+            body={"sha": head, "merge_method": method},
+        ), "merge response")
+        message = text_value(data.get("message"), "merge.message")
+        if not boolean(data.get("merged"), "merge.merged"):
+            raise ForgeError(message, 405)
+        return {"sha": oid(data.get("sha"), "merge.sha"), "message": message}
+
     def branch_prs(self, branch: str) -> list:
         config = self.repository.configuration
         query = urlencode(
