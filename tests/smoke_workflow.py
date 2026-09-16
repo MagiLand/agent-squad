@@ -12,7 +12,14 @@ def run_smoke() -> dict:
     started = time.monotonic()
     with ForgeFixture() as f:
         f.initialize()
-        f.cli("doctor")
+        diagnosed = f.cli("doctor")
+        assert diagnosed["ok"]
+        checks = {d["check"] for d in diagnosed["diagnostics"]}
+        assert {
+            "implementer forge identity", "reviewer forge identity",
+            "Reviewer write permission", "disposable worktree",
+            "installed code-review", "orphan resources",
+        } <= checks
         head = f.candidate()
         f.create_pr()
         f.cli("reviewer", "launch", "--pr", "1")

@@ -103,7 +103,7 @@ def agent(name):
     if name == "implementer":
         return {
             "name": name,
-            "agent": "codex",
+            "agent": settings.get("implementer_kind", "codex"),
             "cwd": os.getcwd(),
             "agent_status": "working",
             "pane_id": "implementer-pane",
@@ -183,7 +183,8 @@ elif args == ["api", "snapshot"]:
     )
 elif args == ["integration", "status"]:
     print("codex: " + os.environ.get("FAKE_HERDR_INTEGRATION", "current"))
-    print("claude: current")
+    print("claude: " + os.environ.get(
+        "FAKE_HERDR_CLAUDE_INTEGRATION", "current"))
 elif args[:2] == ["agent", "get"]:
     if settings.get("unreachable"):
         failure("unreachable", "fixture Herdr is unreachable")

@@ -309,6 +309,13 @@ class GitHub:
             self._token = value
         return self._token
 
+    def version(self) -> str:
+        """Report the installed version without pinning a release number."""
+        value = self._run(["--version"]).strip()
+        if not value:
+            raise ForgeError("gh --version returned no version text")
+        return value
+
     def verify_identity(self) -> None:
         if not self._verified:
             data = object_value(self.api("/user"), "user")
@@ -385,6 +392,26 @@ class GitHub:
         positive(data.get("id"), "repository.id")
         V.require_string(data.get("full_name"), "repository.full_name")
         return data
+
+    def repository_permission(self) -> str:
+        """Read this account's base repository permission, including roles."""
+        data = object_value(
+            self.api(
+                f'{self.prefix}/collaborators/'
+                f'{quote(self.account, safe="")}/permission'
+            ),
+            "collaborator permission",
+        )
+        user = object_value(data.get("user"), "collaborator user")
+        login = V.require_string(user.get("login"), "collaborator login")
+        if login.casefold() != self.account.casefold():
+            raise ForgeError("collaborator permission returned another user")
+        permission = data.get("permission")
+        # GitHub maps maintain to write, triage to read, and custom roles to
+        # their base permission. Do not infer access from role_name.
+        if permission not in ("admin", "write", "read", "none"):
+            raise ForgeError("invalid collaborator permission")
+        return permission
 
     def issue(self, number: int) -> dict[str, object]:
         data = object_value(
