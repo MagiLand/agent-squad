@@ -1,6 +1,6 @@
 ---
 name: squad-implementer
-description: Implement an issue through the Agent Squad PR review loop when the Developer invokes this skill and says "Let's start on issue #N". Resume on its REVIEW_RESULT or STOPPED handoff, or an explicit instruction to check that PR.
+description: "Implement an issue through the Agent Squad PR review loop when the Developer invokes this skill and says \"Let's start on issue #N\". Resume on its REVIEW_RESULT or STOPPED handoff, or an explicit instruction to check that PR."
 ---
 
 # Squad implementer
@@ -186,7 +186,9 @@ remains the authority; do not duplicate detailed findings in Herdr messages.
 
 ## 11. Sandbox
 
-If the harness sandbox blocks the Herdr socket or a write outside the worktree,
-request escalated permission for that exact command once. Report a failed
-escalation and retain resources instead of retrying blindly. Never weaken the
-sandbox or supply permission-bypass arguments on your own.
+If the harness sandbox blocks a CLI command (including OS credential-store
+access), the Herdr socket, or a write outside the worktree, request escalated
+permission for that exact command once. Retry the CLI itself; never retrieve
+credentials directly. Report a failed escalation and retain resources instead
+of retrying blindly. Never weaken the sandbox or supply permission-bypass
+arguments on your own.

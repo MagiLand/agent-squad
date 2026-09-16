@@ -237,8 +237,9 @@ inside the review worktree must stay Git-ignored. Preserve the supplied HEAD.
 
 ## 12. Sandbox
 
-If the sandbox blocks `handoff`, `review post`, the Herdr socket, or a
-scratch-directory write, request escalated permission for that exact command
-once. Report a failed escalation and retain published records and resources
+If the sandbox blocks a CLI command (including OS credential-store access),
+the Herdr socket, or a scratch-directory write, request escalated permission
+for that exact command once. Retry the CLI itself; never retrieve credentials
+directly. Report a failed escalation and retain published records and resources
 instead of retrying blindly. Never weaken the sandbox or send keys to answer
 trust or permission prompts.
