@@ -85,10 +85,13 @@ prerequisite misconfiguration found by a trial needs a doctor check and test.
 ## Evidence status
 
 [Issue #46 evidence](verification/2026-09-16-issue-46.md) records the current
-release validation, exact runtime revision, live-trial progress, limitations,
-and retained resources. The live release proof is incomplete until that record
-contains all required outcomes; a `0.5.0` package version alone is not release
-acceptance.
+release validation, exact runtime revision, all three completed live trials,
+limitations, and retained resources. Both agent directions and the real
+consumer reached approval, a separate human merge instruction, verified
+integration, and owned-resource cleanup. The record distinguishes the seeded
+defect and controlled notification failure from actual reviews and human
+decisions. PR #51 retains the manual review and exact-head CI gates; the
+package version alone does not establish release acceptance.
 
 Earlier increment evidence remains useful within its stated scope:
 
