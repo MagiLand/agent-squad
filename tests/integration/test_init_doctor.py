@@ -121,7 +121,7 @@ class InitDoctorTests(unittest.TestCase):
             f.env["FAKE_HERDR_MISSING_AGENT"] = "1"
             result = f.cli("doctor")
             self.assertTrue(
-                any(d["severity"] == "warning" for d in result["diagnostics"])
+                any(d["severity"] == "warn" for d in result["diagnostics"])
             )
             f.env.pop("FAKE_HERDR_MISSING_AGENT")
             for key, value in [
@@ -141,7 +141,7 @@ class InitDoctorTests(unittest.TestCase):
             result = f.cli("doctor")
             self.assertTrue(
                 any(
-                    d["check"] == "submodules" and d["severity"] == "warning"
+                    d["check"] == "submodules" and d["severity"] == "warn"
                     for d in result["diagnostics"]
                 )
             )

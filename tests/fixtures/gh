@@ -121,11 +121,16 @@ def paged(values, query):
 
 if arguments == ["--version"]:
     save()
-    print("gh version fixture-1")
+    print(settings.get("version", "gh version fixture-1"))
     raise SystemExit(0)
 if arguments[:3] == ["auth", "token", "--user"]:
+    requested = arguments[3]
+    if requested in settings.get("token_failure", []):
+        fail("credential store unavailable: fake-token-" + requested, 401)
     save()
-    print("fake-token-" + arguments[3])
+    print(settings.get("token_response", {}).get(
+        requested, "fake-token-" + requested,
+    ))
     raise SystemExit(0)
 if not arguments or arguments[0] != "api":
     fail("unsupported command", 400)
@@ -138,6 +143,10 @@ method = (
     else "GET"
 )
 if endpoint == "/user":
+    if account in settings.get("user_failure", []):
+        fail("user unavailable: " + token, 401)
+    if account in settings.get("user_response", {}):
+        output(settings["user_response"][account])
     output({"login": settings.get("login_mismatch", account)})
 if endpoint == "graphql":
     variables = payload["variables"]
@@ -187,6 +196,8 @@ parsed = urlsplit(endpoint)
 query = parse_qs(parsed.query)
 parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
 if len(parts) == 3 and parts[0] == "repos":
+    if account in settings.get("repository_denied", []):
+        fail("repository unreadable: " + token, 403)
     output(
         {
             "id": 1,
@@ -199,6 +210,14 @@ if len(parts) < 4 or parts[0] != "repos":
 kind = parts[3]
 number = parts[4] if len(parts) > 4 else None
 prs = model.setdefault("prs", {})
+if kind == "collaborators" and parts[5:] == ["permission"]:
+    if settings.get("permission_failure"):
+        fail("permission lookup denied: " + token, 403)
+    output(settings.get("permission_response", {
+        "permission": settings.get("permission", "write"),
+        "role_name": settings.get("role_name", "write"),
+        "user": {"login": number},
+    }))
 if kind in ("branches", "rules"):
     if settings.get("rules_status"):
         fail(settings.get("rules_message", "rules unavailable"),

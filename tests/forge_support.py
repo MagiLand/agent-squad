@@ -111,6 +111,7 @@ class ForgeFixture:
         }
         self.env.update(
             PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
+            HOME=str(self.root / "home"),
             PYTHONPATH=str(SRC_ROOT),
             FAKE_FORGE_MODEL=str(self.model_path),
             FAKE_HERDR_MODEL=str(self.root / "herdr.json"),
@@ -143,6 +144,23 @@ class ForgeFixture:
         self.task = self.write("task.md", TASK)
         self.report = self.write("report.md", REPORT)
         self.review_body = self.write("review.md", REVIEW)
+        self.prepare_skills()
+
+    def prepare_skills(self) -> None:
+        """Provide local prerequisites without reading the user's HOME."""
+        from agent_squad.skills import SKILL_NAMES, packaged_skill
+
+        self.home = Path(self.env["HOME"])
+        for name in SKILL_NAMES:
+            path = self.home / ".agents/skills" / name / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(packaged_skill(name))
+            link = self.home / ".claude/skills" / name
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(f"../../.agents/skills/{name}")
+        path = self.home / ".agents/skills/code-review/SKILL.md"
+        path.parent.mkdir()
+        path.write_text("---\nname: code-review\n---\nScripted skill.\n")
 
     def close(self) -> None:
         self.temporary.cleanup()
@@ -227,7 +245,7 @@ class ForgeFixture:
                 f"{args}: exit {result.returncode}, expected"
                 f" {expected}\n{result.stdout}\n{result.stderr}"
             )
-        if result.returncode:
+        if result.returncode and args[0] != "doctor":
             return {"error": result.stderr.strip()}
         return json.loads(result.stdout)
 
