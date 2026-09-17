@@ -208,6 +208,16 @@ class DoctorTests(unittest.TestCase):
         self.configuration(base_branch="ma*")
         self.diagnostic(f.cli("doctor", expected=1), "remote base branch")
 
+    def test_trial_issue42_remote_transport_failure_is_reported(self) -> None:
+        f = self.f
+        remote = str(f.root / "unreachable.git")
+        f.git("remote", "set-url", "origin", remote)
+        result = f.cli("doctor", expected=1)
+        item = self.diagnostic(result, "remote base branch")
+        self.assertIn("Could not read from remote repository", item["detail"])
+        self.diagnostic(result, "reviewer forge identity", "pass")
+        self.assertEqual(f.git("remote", "get-url", "origin"), remote)
+
     def test_exclusions_are_checked_in_common_directory_from_linked_worktree(
             self) -> None:
         f = self.f
@@ -442,6 +452,40 @@ class DoctorTests(unittest.TestCase):
         item = self.diagnostic(result, "orphan scratch directory")
         self.assertIn(str(scratch), item["detail"])
         self.assertTrue(scratch.exists())
+
+    def test_orphans_without_any_forge_identity_fail_without_a_traceback(
+            self) -> None:
+        f = self.f
+        f.settings(token_failure=["developer", "reviewer"])
+        scratch = f.repo / ".agent-squad/review-scratch/pr1"
+        scratch.mkdir()
+        evidence = scratch / "evidence.txt"
+        evidence.write_text("preserve")
+        result = f.cli("doctor", expected=1)
+        for role in ("implementer", "reviewer"):
+            self.diagnostic(result, f"{role} forge identity")
+        item = self.diagnostic(result, "orphan scratch directory")
+        self.assertIn("forge identity unavailable", item["detail"])
+        self.assertIn(str(scratch), item["detail"])
+        self.assertEqual(evidence.read_text(), "preserve")
+        self.assertNotIn("fake-token-", json.dumps(result))
+
+    def test_non_repository_agent_is_ignored_without_a_forge_lookup(
+            self) -> None:
+        f = self.f
+        plain = f.root / "plain"
+        plain.mkdir()
+        model = f.herdr_model()
+        agents = [{"name": "reviewer-pr999-aaaaaaa", "cwd": str(plain)}]
+        model["agents"] = agents
+        f.save_herdr(model)
+        self.diagnostic(f.cli("doctor"), "orphan resources", "pass")
+        self.assertEqual(f.herdr_model()["agents"], agents)
+        self.assertTrue(plain.is_dir())
+        self.assertFalse(any(
+            "/pulls/999" in c["arguments"]
+            for c in f.read_model()["calls"]
+        ))
 
     def test_other_repository_agents_and_nonconforming_resources_are_ignored(
             self) -> None:
