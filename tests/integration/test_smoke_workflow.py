@@ -1,6 +1,7 @@
 """The complete forge smoke also runs from exports without Git metadata."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -65,9 +66,13 @@ class SmokeTests(unittest.TestCase):
                     "--json",
                 ],
                 cwd=root.parent,
+                # Keep the runner's fixtures inside this owned directory,
+                # including when a timeout prevents its normal cleanup.
+                env={**os.environ, "TMPDIR": str(root)},
                 text=True,
                 capture_output=True,
-                timeout=180,
+                # The twelve-step run exceeded three minutes on a busy host.
+                timeout=300,
                 shell=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
