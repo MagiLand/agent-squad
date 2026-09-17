@@ -27,7 +27,7 @@ Use `unittest`; name files `test_*.py` and test methods `test_<behavior>`. Every
 
 ## Commit & Pull Request Guidelines
 
-Current history uses short, imperative, typed subjects such as `docs: establish Agent Squad specification baseline`. Continue with `feat:`, `fix:`, `docs:`, `test:`, or `refactor:` as appropriate. Keep pull requests focused on one implementation increment or independently reviewable slice. Link the governing issue or specification section, describe protocol or artifact changes, list exact verification commands and results, and identify any deliberate deviation from the approved specification.
+Current history uses short, imperative, typed subjects such as `docs: record issue 42 forge verification`. Continue with `feat:`, `fix:`, `docs:`, `test:`, or `refactor:` as appropriate. Keep pull requests focused on one implementation increment or independently reviewable slice. Link the governing issue or specification section, describe protocol or artifact changes, list exact verification commands and results, and identify any deliberate deviation from the approved specification.
 
 ## Security & Local State
 

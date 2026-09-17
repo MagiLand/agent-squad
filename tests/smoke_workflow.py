@@ -65,7 +65,8 @@ def run_smoke() -> dict:
             gated["gates"]["needs_decision"]
             and gated["next_action"] == "needs_decision"
         )
-        f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        assert "needs_decision" in refused["error"]
         f.cli(
             "thread",
             "resolve",
@@ -175,7 +176,9 @@ def run_smoke() -> dict:
             "--reason",
             "budget",
         )
-        f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        assert "stopped" in refused["error"]
+        assert "budget_exhausted" in refused["error"]
         f.cli("reviewer", "close", "--pr", "1")
         assert f.status()["budget"]["used"] == 3
         steps.append({"step": 7, "result": "budget stop and refused launch"})

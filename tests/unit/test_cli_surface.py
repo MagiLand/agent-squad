@@ -1,4 +1,4 @@
-"""The release exposes exactly the command table in the approved delta."""
+"""The release exposes the command names in the approved delta's table."""
 
 import argparse
 import re

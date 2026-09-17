@@ -24,17 +24,19 @@ class SmokeTests(unittest.TestCase):
                          list(range(1, 13)))
 
     def test_failed_command_removes_the_owned_temporary_root(self) -> None:
-        roots = []
+        fixtures = []
 
         def fail_command(fixture, *args, **kwargs):
-            roots.append(fixture.root)
+            # Keep the fixture alive so only explicit cleanup removes it.
+            fixtures.append(fixture)
+            self.addCleanup(fixture.temporary.cleanup)
             raise RuntimeError("injected CLI failure")
 
         with patch.object(ForgeFixture, "cli", fail_command):
             with self.assertRaisesRegex(RuntimeError, "injected CLI failure"):
                 run_smoke()
-        self.assertEqual(len(roots), 1)
-        self.assertFalse(roots[0].exists())
+        self.assertEqual(len(fixtures), 1)
+        self.assertFalse(fixtures[0].root.exists())
 
     def test_failed_cleanup_reports_the_retained_root(self) -> None:
         fixture = ForgeFixture()
