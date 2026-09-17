@@ -494,3 +494,33 @@ class DoctorTests(unittest.TestCase):
         item = self.diagnostic(result, "orphan agent", "warn")
         self.assertIn(name, item["detail"])
         self.assertFalse(path.exists())
+
+    def test_circular_skill_links_are_failed_json_diagnostics(self) -> None:
+        f = self.f
+        for name in ("squad-implementer", "squad-reviewer"):
+            link = f.home / ".claude/skills" / name
+            link.unlink()
+            link.symlink_to(name)
+            result = f.cli("doctor", expected=1)
+            self.diagnostic(result, f"Claude symlink {name}")
+            self.assertEqual(link.readlink(), Path(name))
+
+    def test_circular_root_is_a_failed_json_diagnostic(self) -> None:
+        cycle = self.f.root / "cycle"
+        cycle.symlink_to("cycle")
+        self.configuration(scratch_root=str(cycle))
+        result = self.f.cli("doctor", expected=1)
+        self.diagnostic(result, "repository and configuration")
+        self.assertEqual(cycle.readlink(), Path("cycle"))
+
+    def test_circular_orphan_agent_cwd_is_a_failed_diagnostic(self) -> None:
+        f = self.f
+        cycle = f.root / "cycle"
+        cycle.symlink_to("cycle")
+        model = f.herdr_model()
+        model["agents"] = [{
+            "name": "reviewer-pr1-aaaaaaa", "cwd": str(cycle),
+        }]
+        f.save_herdr(model)
+        self.diagnostic(f.cli("doctor", expected=1), "orphan resources")
+        self.assertEqual(cycle.readlink(), Path("cycle"))

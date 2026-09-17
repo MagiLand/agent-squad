@@ -224,9 +224,10 @@ def diagnose(
         ))
 
     def check(name: str, action: Callable[[], object]) -> bool:
+        # Path.resolve uses RuntimeError for symlink cycles on Python 3.11/12.
         try:
             value = action()
-        except (AgentSquadError, OSError, ValueError) as error:
+        except (AgentSquadError, OSError, ValueError, RuntimeError) as error:
             add(name, "fail", error)
             return False
         add(name, "pass", value or "verified")
@@ -243,7 +244,7 @@ def diagnose(
 
     try:
         repository = load_initialized_repository(start)
-    except (AgentSquadError, OSError, ValueError) as error:
+    except (AgentSquadError, OSError, ValueError, RuntimeError) as error:
         add("repository and configuration", "fail", error)
         return result()
     add("repository and configuration", "pass", repository.configuration_path)
@@ -368,7 +369,7 @@ def diagnose(
         for diagnostic in orphan_diagnostics(repository, forges.get(
                 "implementer") or forges.get("reviewer"), snapshot):
             add(diagnostic.check, diagnostic.severity, diagnostic.detail)
-    except (AgentSquadError, OSError, ValueError) as error:
+    except (AgentSquadError, OSError, ValueError, RuntimeError) as error:
         add("orphan resources", "fail", error)
 
     live = None
