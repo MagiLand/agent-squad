@@ -163,7 +163,12 @@ class ForgeFixture:
         path.write_text("---\nname: code-review\n---\nScripted skill.\n")
 
     def close(self) -> None:
-        self.temporary.cleanup()
+        try:
+            self.temporary.cleanup()
+        except OSError as error:
+            raise RuntimeError(
+                f"temporary resources retained at {self.root}: {error}"
+            ) from error
 
     def __enter__(self) -> ForgeFixture:
         return self
