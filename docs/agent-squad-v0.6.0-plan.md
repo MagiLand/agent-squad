@@ -2,7 +2,9 @@
 
 Status: draft, decided with the Developer on 2026-09-21. This plan is the input to the v0.6.0 specification delta (Increment 0b below) in the same way that `docs/agent-squad-v0.5.0-plan.md` was the input to `docs/agent-squad-v0.5.0-spec.md`. Where this plan and the delta disagree once the delta is approved, the delta governs.
 
-Inputs: `docs/agent-squad-v0.5.0-spec.md` §19 (the two deferred items), the v0.5.0 release record `docs/verification/2026-09-16-issue-46.md`, a survey of the v0.5.0 code at `795be79`, and a read-only verification of the Forgejo REST API against the Forgejo source and public Codeberg data (kept locally at `.local/research/v0.6.0/forgejo-api-facts.md`; Increment 0a turns its unverified items into recorded evidence).
+Inputs: `docs/agent-squad-v0.5.0-spec.md` §19 (the two deferred items), the v0.5.0 release record `docs/verification/2026-09-16-issue-46.md`, and a survey of the v0.5.0 code at `795be79`.
+
+Background research: a read-only survey of the Forgejo source and public Codeberg data, kept locally at `.local/research/v0.6.0/forgejo-api-facts.md`, supplied the hypotheses below. The ignored file is not a project input. Increment 0a (#54) records the write experiments; the specification delta (#55) cites recorded evidence or versioned Forgejo source references for each behaviour.
 
 ## 1. Purpose and scope
 
@@ -73,9 +75,9 @@ Behaviour unchanged. The adapter keeps calling `gh` as a subprocess with `gh aut
 
 The adapter speaks the Gitea-compatible REST API (`<base_url>/api/v1`) directly through the standard library's `urllib.request`; the package keeps zero runtime dependencies. `fj` 0.6.0 cannot create reviews, inline comments, or replies, stores one credential per host, and has no authenticated passthrough, so it cannot play the part `gh api` plays.
 
-Verified facts (Forgejo source, public Codeberg data, 2026-09-21) and how the adapter handles each; Increment 0a confirms the ones marked *experiment* by a real write:
+Forgejo hypotheses from the read-only survey of 2026-09-21 and the proposed adapter handling. Increment 0a (#54) tests the items marked *experiment* through real writes; the specification delta (#55) cites recorded evidence or versioned Forgejo source references for each behaviour.
 
-| Fact | Handling |
+| Hypothesis | Proposed handling |
 | --- | --- |
 | The approve event is spelled `APPROVED`; an unknown event silently creates a hidden `PENDING` review with HTTP 200 | Send `APPROVED`, `REQUEST_CHANGES`, or `COMMENT`; read the review back and fail unless the returned state is the one requested |
 | An inline comment whose line is outside the diff, or whose path does not exist, is accepted and stored with an empty `diff_hunk` (*experiment*: how it renders) | Local anchor validation of §11.2 before any write, unchanged; after posting, read the review's comments back and treat a root with an empty `diff_hunk` as unanchored, which routes it through the §7.4 `## Unanchored findings` fallback and `thread open`; the v0.5.0 batch-rejection path stays for GitHub |
