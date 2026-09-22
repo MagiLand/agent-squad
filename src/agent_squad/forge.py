@@ -431,6 +431,8 @@ class GitHub:
         return {
             "number": positive(data.get("number"), "issue.number"),
             "title": text_value(data.get("title"), "issue.title"),
+            "state": text_value(data.get("state"), "issue.state"),
+            "is_pull_request": "pull_request" in data,
             "body": evidence.body,
             "labels": labels,
             "comments": comments,

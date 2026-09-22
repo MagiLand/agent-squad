@@ -682,9 +682,8 @@ def derive(
         (w for w in worktrees if w.branch == f"refs/heads/{pr.head_branch}"),
         None,
     )
-    blocking = [
-        f for f in findings if f["severity"] == "blocking" and not f["settled"]
-    ]
+    unsettled = [f for f in findings if not f["settled"]]
+    blocking = [f for f in unsettled if f["severity"] == "blocking"]
     needs_decision = bool(
         latest
         and latest["verdict"] == "needs_human"
@@ -694,13 +693,13 @@ def derive(
         f["latest_disposition"]
         and f["latest_disposition"]["value"] == "needs-human"
         and not newer(f["latest_decision"], f["latest_disposition"])
-        for f in blocking
+        for f in unsettled
     )
-    unaddressed = any(
-        not f["unanchored"]
+    unaddressed = [
+        f["finding"] for f in unsettled
+        if not f["unanchored"]
         and not newer(f["latest_disposition"], f["latest_verification"])
-        for f in blocking
-    )
+    ]
     same_head = bool(
         latest
         and latest["head"] == pr.head
@@ -715,7 +714,7 @@ def derive(
         "stopped": newer(latest_stop, latest_decision),
         "needs_decision": bool(needs_decision),
         "unanchored_findings": any(f["unanchored"] for f in blocking),
-        "unaddressed_findings": unaddressed,
+        "unaddressed_findings": bool(unaddressed),
         "same_head_requires_rejections": same_head,
         "task_amended": newer(amendment, latest),
         "budget_exhausted": used >= effective,
@@ -755,6 +754,7 @@ def derive(
     action_conditions = [
         ("merged", pr.merged),
         ("closed", pr.state == "closed"),
+        ("address_findings", approved and gates["unaddressed_findings"]),
         ("approved", approved),
         ("stopped", gates["stopped"]),
         (
@@ -783,7 +783,9 @@ def derive(
             "a Developer decision or budget extension is required"
         ],
         "open_threads": ["a blocking finding has no root comment"],
-        "address_findings": ["a blocking finding needs a new disposition"],
+        "address_findings": [
+            f"{fid} needs a new disposition" for fid in unaddressed
+        ],
         "push": [
             "push a clean changed revision matching the PR branch and head"
         ],
@@ -820,6 +822,12 @@ def derive(
             latest if latest and latest["current"] and not acted else None
         ),
         "findings": findings,
+        "optional_findings": [
+            {"finding": f["finding"], "title": f["title"],
+             "disposition": f["latest_disposition"]}
+            for f in findings if f["severity"] == "optional"
+        ],
+        "unaddressed_findings": unaddressed,
         "decisions": decisions,
         "general_decisions": [d for d in decisions if d["finding"] == "none"],
         "stops": stops,

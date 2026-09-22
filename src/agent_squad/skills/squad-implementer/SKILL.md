@@ -23,10 +23,11 @@ integration commit. Record run IDs, results, and per-job durations when relevant
 Distinguish checks that ran from checks configured as required. Report missing
 access or required-check configuration instead of inferring it from green CI.
 
-This allowance does not permit `gh` mutations or using it for review, decision,
-stop, or budget authority. Never retrieve credentials, read a token, switch forge
-identities, or reconstruct authority from local files. Use existing authenticated
-access; if it is insufficient, report the limitation.
+This allowance does not permit `gh` mutations, other `gh` reads, or using
+`gh` for Task, PR, review, decision, stop, or budget authority. Never retrieve
+credentials, read a token, switch forge identities, or reconstruct authority
+from local files. Use existing authenticated access; if it is insufficient,
+report the limitation.
 Git commands and local code inspection remain part of implementation.
 Every forge mutation below uses `--as implementer`; the CLI handles identity.
 
@@ -112,17 +113,29 @@ resolved, or no longer applicable. Apply all general decisions together and
 the latest decision on each finding. Settled threads stay closed unless new
 evidence appears.
 
-Reply on every unsettled blocking thread with
+Reply on every unsettled thread, blocking or optional, with
 `agent-squad thread reply --as implementer --pr <PR> --finding REV-<n>
 --body <file>`. The file's first line must be one of:
 
 - `DISPOSITION fixed <full-sha>`: explain the fix and give the exact verification
   command. The commit must be reachable from the new head and not from the head
   where the finding was raised.
-- `DISPOSITION rejected`: cite concrete existing code, tests, or evidence that
-  demonstrates the finding is wrong.
+- `DISPOSITION rejected`: for a blocking thread, cite concrete existing code,
+  tests, or evidence that demonstrates the finding is wrong. On an optional
+  thread, the second non-empty line must start with `Not pursued:` and the
+  reason, or `Deferred to #<issue>:` naming an open issue of the same repository.
+  `thread reply` refuses any other rejection body and reads the referenced
+  issue to reject a missing or closed issue or a pull request.
 - `DISPOSITION needs-human`: name the decision requiring Developer authority;
   follow section 7 before seeking another review.
+
+On an optional thread, `thread reply` refuses an Implementer reply whose
+first line is not a `DISPOSITION`.
+
+An optional thread never blocks approval, but it blocks `reviewer launch`
+and `pr merge` until it carries a disposition newer than its latest
+verification, unless it is settled. The existing rules for `fixed <full-sha>`
+and `needs-human` apply to every thread.
 
 After `NOT FIXED`, supply a new disposition. After fixes, run relevant tests,
 commit, push, and update `pr report`. Use `reviewer close --pr <PR> --head
@@ -138,7 +151,7 @@ Task amendment; it is not a substitute for committing and pushing fixes.
    >
    > Address an optional finding in the current PR only when the change is clearly beneficial, local, low-risk, directly relevant, and does not materially expand scope or create unnecessary review churn.
    >
-   > Otherwise, leave the implementation unchanged and record an appropriate disposition on the GitHub review thread when useful.
+   > Otherwise, leave the implementation unchanged and record the disposition on the review thread: `rejected` with the reason it is not pursued, or with the open follow-up issue it is deferred to.
    >
    > Do not automatically create a follow-up issue for an optional finding. Follow-up work should exist only when the finding has independently worthwhile engineering value, such as meaningful technical debt, a concrete future risk, an important test gap, or another improvement worth tracking separately.
    >
@@ -169,9 +182,11 @@ the CLI's reported resource state rather than attempting to remove it twice.
 ## 8. Approval and human-gated merge
 
 Verify approval through `status`, never from the Herdr notification alone.
-Report "approved at `<full-sha>`, ready to merge" and wait for the Developer's
-merge instruction. Then run `agent-squad pr merge --as implementer --pr <PR>`
-from the primary checkout. If the approved SHA is no longer the PR head, do
+Before reporting "approved at `<full-sha>`, ready to merge", reply on every
+unsettled thread, blocking or optional. The report lists every optional finding
+of the PR with its ID, title, and disposition (the reason or the issue). Then
+wait for the Developer's merge instruction. On that instruction, run
+`agent-squad pr merge --as implementer --pr <PR>` from the primary checkout. If the approved SHA is no longer the PR head, do
 not merge on that approval; the newer head must be reviewed. If the base moved,
 report it and ask the Developer to choose a fresh review or explicitly accept
 the moved base; use `--accept-moved-base` only for that explicit choice.

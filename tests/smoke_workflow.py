@@ -91,6 +91,11 @@ def run_smoke() -> dict:
             "DISPOSITION rejected\n\nThe scripted example already meets the"
             " requirement.",
         )
+        f.reply(
+            "REV-3",
+            "DISPOSITION rejected\n\nNot pursued: the advisory improvement"
+            " is unnecessary for this fixture.",
+        )
         before_push = f.status()
         # The earlier needs-human disposition still has its Developer
         # decision; the new fixed disposition takes effect after the push.
@@ -124,7 +129,12 @@ def run_smoke() -> dict:
             "VERIFIED rejection accepted\n\nScripted execution evidence.",
             "reviewer",
         )
-        for fid in ("REV-1", "REV-2"):
+        f.reply(
+            "REV-3",
+            "VERIFIED rejection accepted\n\nScripted advisory checked.",
+            "reviewer",
+        )
+        for fid in ("REV-1", "REV-2", "REV-3"):
             f.cli(
                 "thread",
                 "resolve",
@@ -202,6 +212,10 @@ def run_smoke() -> dict:
             "used": 4,
             "remaining": 0,
         }
+        assert approved["optional_findings"][0]["disposition"]["value"] == (
+            "rejected"
+        )
+        assert not approved["gates"]["unaddressed_findings"]
         steps.append({"step": 8, "result": "budget extended; fourth approved"})
         f.cli("reviewer", "close", "--pr", "1")
         # Step 9: the Developer scripts acceptance of a moved base for merge.
