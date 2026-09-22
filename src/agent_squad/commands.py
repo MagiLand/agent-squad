@@ -504,7 +504,8 @@ def reply_thread(
                 pass
             elif deferred:
                 issue = int(deferred[1])
-                if forge.issue(issue)["state"] != "open":
+                record = forge.issue(issue)
+                if record["is_pull_request"] or record["state"] != "open":
                     raise AgentSquadError(
                         f"Deferred to #{issue} requires an open issue"
                     )

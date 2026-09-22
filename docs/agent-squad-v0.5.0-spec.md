@@ -462,7 +462,7 @@ followed by what it ran. After `NOT FIXED`, the Implementer MUST post a new disp
 
 **Same-head reconsideration.** When every open blocking thread's latest disposition is `rejected` and no code changed, the next review targets the same head. `reviewer launch` accepts a head equal to the latest tagged review's head only in that case, or when a Task amendment (§7.6) is newer than that review, because the amended Task must be reviewed even if the code did not change; a `fixed` disposition requires a changed revision (v0.4.4 §26.5 and §26.13, retained in PR form).
 
-**Optional threads.** An optional thread never blocks approval, but it blocks `reviewer launch` and `pr merge` until it carries a disposition newer than its latest verification, unless it is settled. On an optional thread, `DISPOSITION rejected` MUST be followed by a second non-empty line starting with `Not pursued:` and the reason, or `Deferred to #<issue>:` naming an open issue of the same repository. `thread reply` refuses any other rejection body, reads the referenced issue through `issue view`, and refuses a missing or closed issue. The existing rules for `fixed <full-sha>` and `needs-human` apply to every thread. `thread resolve` MAY resolve an optional thread; forge resolution does not replace its disposition.
+**Optional threads.** An optional thread never blocks approval, but it blocks `reviewer launch` and `pr merge` until it carries a disposition newer than its latest verification, unless it is settled. On an optional thread, `DISPOSITION rejected` MUST be followed by a second non-empty line starting with `Not pursued:` and the reason, or `Deferred to #<issue>:` naming an open issue of the same repository. On an optional thread, `thread reply` refuses an Implementer reply whose first line is not a `DISPOSITION`. It refuses any other rejection body, reads the referenced issue through `issue view`, and refuses a missing or closed issue or a pull request. The existing rules for `fixed <full-sha>` and `needs-human` apply to every thread. `thread resolve` MAY resolve an optional thread; forge resolution does not replace its disposition.
 
 ### 7.6 Decisions
 
@@ -1065,7 +1065,7 @@ With the fake forge and the fake Herdr, in temporary repositories:
 - `reviewer launch`, `adopt`, and `close`, including blocked at startup, `agent_not_ready`, prompt failure, `agent_not_found`, a workspace with an extra pane, and an already-exited Reviewer;
 - token selection by role for every mutating command, asserted from the fake forge's call log;
 - `review post` with the batch rejection fallback, a stranded pending draft, and the unanchored-findings append;
-- optional-thread rejection bodies: accept `Not pursued:` with a reason and `Deferred to #<open issue>:`; refuse a bare `DISPOSITION rejected`, invalid bodies, and closed or missing issue references, with the fake forge call log proving the issue read;
+- optional-thread rejection bodies: accept `Not pursued:` with a reason and `Deferred to #<open issue>:`; refuse a bare `DISPOSITION rejected`, invalid bodies, and closed, missing, or pull-request references, with the fake forge call log proving the issue read;
 - `reviewer launch` refuses an undispositioned optional thread and succeeds after its disposition; the scripted workflow dispositions its optional finding before the next launch and before reaching a verified merge;
 - reply enumeration per review when the flat listing omits replies;
 - `thread resolve` through the fake GraphQL endpoint;

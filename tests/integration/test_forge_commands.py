@@ -28,6 +28,12 @@ class ForgeCommandTests(unittest.TestCase):
         model["issues"]["2"] = dict(
             model["issues"]["1"], id=2, number=2, state="closed"
         )
+        model["issues"]["3"] = dict(
+            model["issues"]["1"], id=3, number=3,
+            pull_request={
+                "url": "https://api.github.com/repos/MagiLand/trial/pulls/3"
+            },
+        )
         f.save_model(model)
         for body, expected, message, issue in (
             ("DISPOSITION rejected", 1, "second non-empty line", None),
@@ -42,6 +48,8 @@ class ForgeCommandTests(unittest.TestCase):
             ("Unstructured reply", 1, "requires a DISPOSITION", None),
             ("DISPOSITION rejected\n\nDeferred to #2: follow-up.", 1,
              "requires an open issue", 2),
+            ("DISPOSITION rejected\nDeferred to #3: a pull request.", 1,
+             "requires an open issue", 3),
             ("DISPOSITION rejected\nDeferred to #999:", 1,
              "issue not found", 999),
             ("DISPOSITION rejected\n\nNot pursued: unnecessary here.",
@@ -66,7 +74,7 @@ class ForgeCommandTests(unittest.TestCase):
                     c for c in calls
                     if len(c["arguments"]) > 1 and c["arguments"][1] in {
                         f"/repos/MagiLand/trial/issues/{n}"
-                        for n in (1, 2, 999)
+                        for n in (1, 2, 3, 999)
                     }
                 ]
                 self.assertEqual(len(issue_reads), int(issue is not None))
@@ -88,7 +96,9 @@ class ForgeCommandTests(unittest.TestCase):
         refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
                         expected=4, cwd=f.repo)
         self.assertIn("unaddressed_findings: REV-1", refused["error"])
-        f.reply("REV-1", "DISPOSITION rejected\nNot pursued: unnecessary here.")
+        f.reply(
+            "REV-1", "DISPOSITION rejected\nNot pursued: unnecessary here."
+        )
         self.assertEqual(f.status()["next_action"], "approved")
         launched = f.cli("reviewer", "launch", "--pr", "1")
         self.assertEqual(launched["observed_state"], "working")
@@ -100,7 +110,9 @@ class ForgeCommandTests(unittest.TestCase):
     def test_optional_fixed_and_needs_human_keep_existing_rules(self) -> None:
         f = self.f
         f.review("approved", [finding("optional")])
-        refused = f.reply("REV-1", f"DISPOSITION fixed {self.head}", expected=1)
+        refused = f.reply(
+            "REV-1", f"DISPOSITION fixed {self.head}", expected=1
+        )
         self.assertIn("absent from", refused["error"])
         f.reply("REV-1", "DISPOSITION needs-human\nA Developer choice.")
         refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)

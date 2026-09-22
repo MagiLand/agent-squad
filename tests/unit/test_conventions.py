@@ -320,7 +320,9 @@ class GrammarTests(unittest.TestCase):
 
 
 class DerivedStateTests(unittest.TestCase):
-    def test_optional_disposition_gates_readiness_but_not_approval(self) -> None:
+    def test_optional_disposition_gates_readiness_but_not_approval(
+        self,
+    ) -> None:
         for budget in (1, 3):
             with self.subTest(budget=budget):
                 configuration = replace(config(), max_review_passes=budget)

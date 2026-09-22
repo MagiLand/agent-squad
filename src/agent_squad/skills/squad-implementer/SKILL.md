@@ -125,9 +125,12 @@ Reply on every unsettled thread, blocking or optional, with
   thread, the second non-empty line must start with `Not pursued:` and the
   reason, or `Deferred to #<issue>:` naming an open issue of the same repository.
   `thread reply` refuses any other rejection body and reads the referenced
-  issue to reject a missing or closed issue.
+  issue to reject a missing or closed issue or a pull request.
 - `DISPOSITION needs-human`: name the decision requiring Developer authority;
   follow section 7 before seeking another review.
+
+On an optional thread, `thread reply` refuses an Implementer reply whose
+first line is not a `DISPOSITION`.
 
 An optional thread never blocks approval, but it blocks `reviewer launch`
 and `pr merge` until it carries a disposition newer than its latest
