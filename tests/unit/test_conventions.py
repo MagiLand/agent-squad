@@ -320,6 +320,57 @@ class GrammarTests(unittest.TestCase):
 
 
 class DerivedStateTests(unittest.TestCase):
+    def test_optional_disposition_gates_readiness_but_not_approval(self) -> None:
+        for budget in (1, 3):
+            with self.subTest(budget=budget):
+                configuration = replace(config(), max_review_passes=budget)
+                s = snapshot(
+                    reviews=(review(10, findings="REV-1 [optional] Finding"),),
+                    comments=(root(severity="optional"),),
+                )
+                state = derive_state(s, configuration=configuration)
+                self.assertTrue(state["approval"]["approved"])
+                self.assertEqual(state["next_action"], "address_findings")
+                self.assertEqual(state["unaddressed_findings"], ["REV-1"])
+                self.assertIn("REV-1", " ".join(state["reasons"]))
+                # Forge resolution is not a disposition.
+                self.assertTrue(state["findings"][0]["resolved"])
+                self.assertIsNone(
+                    state["optional_findings"][0]["disposition"]
+                )
+                body = "DISPOSITION rejected\n\nNot pursued: outside scope."
+                s = replace(s, comments=(*s.comments, reply(12, body)))
+                state = derive_state(s, configuration=configuration)
+                self.assertEqual(state["next_action"], "approved")
+                self.assertFalse(state["gates"]["unaddressed_findings"])
+                optional = state["optional_findings"][0]
+                self.assertEqual(optional["title"], "Finding")
+                self.assertEqual(optional["disposition"]["body"], body)
+                for verification, action, settled in (
+                    ("VERIFIED rejection accepted", "approved", True),
+                    ("NOT FIXED", "address_findings", False),
+                ):
+                    verified = replace(s, comments=(
+                        *s.comments, reply(13, verification, author="reviewer")
+                    ))
+                    state = derive_state(verified, configuration=configuration)
+                    self.assertEqual(state["next_action"], action)
+                    self.assertEqual(state["findings"][0]["settled"], settled)
+                    self.assertTrue(state["approval"]["approved"])
+
+    def test_optional_needs_human_requires_a_finding_decision(self) -> None:
+        s = snapshot(
+            reviews=(review(10, "needs_human",
+                            findings="REV-1 [optional] Finding"),),
+            comments=(root(severity="optional"),
+                      reply(12, "DISPOSITION needs-human")),
+            conversation=(decision(13),),
+        )
+        self.assertTrue(derive_state(s)["gates"]["needs_decision"])
+        s = replace(s, conversation=(*s.conversation,
+                                     decision(14, finding="REV-1")))
+        self.assertFalse(derive_state(s)["gates"]["needs_decision"])
+
     def test_review_verdict_gates_are_rederived_from_untrusted_forge(
         self,
     ) -> None:

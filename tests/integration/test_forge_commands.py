@@ -19,6 +19,100 @@ class ForgeCommandTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
 
+    def test_optional_rejection_validates_reason_and_open_followup_issue(
+        self,
+    ) -> None:
+        f = self.f
+        f.review("approved", [finding("optional")])
+        model = f.read_model()
+        model["issues"]["2"] = dict(
+            model["issues"]["1"], id=2, number=2, state="closed"
+        )
+        f.save_model(model)
+        for body, expected, message, issue in (
+            ("DISPOSITION rejected", 1, "second non-empty line", None),
+            ("DISPOSITION rejected\nNot pursued:   ", 1,
+             "second non-empty line", None),
+            ("DISPOSITION rejected\nUnqualified reason.", 1,
+             "second non-empty line", None),
+            ("DISPOSITION rejected\nDeferred to #01:", 1,
+             "second non-empty line", None),
+            ("DISPOSITION rejected\nDeferred to other/repo#1:", 1,
+             "second non-empty line", None),
+            ("Unstructured reply", 1, "requires a DISPOSITION", None),
+            ("DISPOSITION rejected\n\nDeferred to #2: follow-up.", 1,
+             "requires an open issue", 2),
+            ("DISPOSITION rejected\nDeferred to #999:", 1,
+             "issue not found", 999),
+            ("DISPOSITION rejected\n\nNot pursued: unnecessary here.",
+             0, None, None),
+            ("DISPOSITION rejected\n\nDeferred to #1: follow-up.",
+             0, None, 1),
+        ):
+            with self.subTest(body=body):
+                before = f.read_model()
+                result = f.reply("REV-1", body, expected=expected)
+                after = f.read_model()
+                if expected:
+                    self.assertIn(message, result["error"])
+                    self.assertEqual(after["prs"], before["prs"])
+                else:
+                    self.assertEqual(
+                        f.status()["optional_findings"][0]
+                        ["disposition"]["body"], body
+                    )
+                calls = after["calls"][len(before["calls"]):]
+                issue_reads = [
+                    c for c in calls
+                    if len(c["arguments"]) > 1 and c["arguments"][1] in {
+                        f"/repos/MagiLand/trial/issues/{n}"
+                        for n in (1, 2, 999)
+                    }
+                ]
+                self.assertEqual(len(issue_reads), int(issue is not None))
+                if issue is not None:
+                    self.assertEqual(issue_reads[0]["arguments"][1],
+                                     f"/repos/MagiLand/trial/issues/{issue}")
+                    self.assertEqual(issue_reads[0]["account"], "developer")
+
+    def test_optional_disposition_gates_launch_and_merge_after_approval(
+        self,
+    ) -> None:
+        f = self.f
+        f.review("approved", [finding("optional")])
+        state = f.status()
+        self.assertTrue(state["approval"]["approved"])
+        self.assertEqual(state["next_action"], "address_findings")
+        refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        self.assertIn("unaddressed_findings", refused["error"])
+        refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                        expected=4, cwd=f.repo)
+        self.assertIn("unaddressed_findings: REV-1", refused["error"])
+        f.reply("REV-1", "DISPOSITION rejected\nNot pursued: unnecessary here.")
+        self.assertEqual(f.status()["next_action"], "approved")
+        launched = f.cli("reviewer", "launch", "--pr", "1")
+        self.assertEqual(launched["observed_state"], "working")
+        f.cli("reviewer", "close", "--pr", "1")
+        merged = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                       cwd=f.repo)
+        self.assertEqual(merged["integration"], "verified by ancestry")
+
+    def test_optional_fixed_and_needs_human_keep_existing_rules(self) -> None:
+        f = self.f
+        f.review("approved", [finding("optional")])
+        refused = f.reply("REV-1", f"DISPOSITION fixed {self.head}", expected=1)
+        self.assertIn("absent from", refused["error"])
+        f.reply("REV-1", "DISPOSITION needs-human\nA Developer choice.")
+        refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
+        self.assertIn("needs_decision", refused["error"])
+        f.decision(fid="REV-1")
+        self.assertFalse(f.status()["gates"]["needs_decision"])
+        head = f.push("value = 1\nsecond = 20\nthird = 3\n")
+        f.reply("REV-1", f"DISPOSITION fixed {head}\nRun the fixture probe.")
+        self.assertFalse(f.status()["gates"]["unaddressed_findings"])
+        f.reply("REV-1", "VERIFIED fixed\nFixture checked.", "reviewer")
+        self.assertTrue(f.status()["findings"][0]["settled"])
+
     def test_moved_base_uses_fetched_tip_with_frozen_pr_base(self) -> None:
         f = self.f
         f.git("switch", "main")

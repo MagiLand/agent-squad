@@ -227,6 +227,8 @@ if kind in ("branches", "rules"):
     output(paged(settings.get("rules", []), query))
 if kind == "issues":
     if len(parts) == 5:
+        if number not in model["issues"]:
+            fail("issue not found", 404)
         output(model["issues"][number])
     if parts[5:] == ["comments"]:
         target = prs.get(number) or model["issues"].get(number)

@@ -493,6 +493,27 @@ def reply_thread(
     finding = find_finding(state, fid)
     if finding["root"] is None:
         raise GateError("finding has no root; use thread open first")
+    if forge.role == "implementer" and finding["severity"] == "optional":
+        if parsed is None:
+            raise AgentSquadError("optional thread requires a DISPOSITION")
+        if "rejected" in parsed.fields:
+            lines = [line for line in body.splitlines() if line.strip()]
+            reason = lines[1] if len(lines) > 1 else ""
+            deferred = re.match(r"Deferred to #([1-9][0-9]*):", reason)
+            if reason.startswith("Not pursued:") and reason[12:].strip():
+                pass
+            elif deferred:
+                issue = int(deferred[1])
+                if forge.issue(issue)["state"] != "open":
+                    raise AgentSquadError(
+                        f"Deferred to #{issue} requires an open issue"
+                    )
+            else:
+                raise AgentSquadError(
+                    "optional rejection requires a second non-empty line"
+                    " starting with 'Not pursued: <reason>' or"
+                    " 'Deferred to #<issue>:'"
+                )
     if parsed and "sha" in parsed.fields:
         sha = parsed.fields["sha"]
         if run_git(

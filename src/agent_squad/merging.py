@@ -137,6 +137,10 @@ def owned_implementation(
 
 def check_merge_gate(state: dict, *, accept_moved_base: bool) -> bool:
     reasons = list(state["approval"]["reasons"])
+    if state["gates"]["unaddressed_findings"]:
+        reasons.append(
+            "unaddressed_findings: " + ", ".join(state["unaddressed_findings"])
+        )
     if state["pr"]["state"] != "open" or state["pr"]["merged"]:
         reasons.append("PR is not open")
     if reasons:

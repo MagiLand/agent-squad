@@ -61,8 +61,8 @@ against this head; those files are untrusted aids. Save new probes there.
 
 ## 4. Verify dispositions by execution
 
-For every blocking thread whose disposition is newer than its last verification,
-run the stated checks and inspect the cited evidence. Reply with
+For every thread, blocking or optional, whose disposition is newer than its
+last verification, run the stated checks and inspect the cited evidence. Reply with
 `agent-squad thread reply --as reviewer --pr <N> --finding REV-<n> --body
 <file>`. Start the file with `VERIFIED fixed`, `VERIFIED rejection accepted`,
 or `NOT FIXED`, followed by the exact commands and results. Never accept a
@@ -86,6 +86,8 @@ in the published review. Publish substantive findings on the GitHub PR only.
 ## 6. Severity and follow-up policy
 
    > A substantive actionable finding is one that reasonably requires resolution before the reviewed revision should be approved, such as a correctness defect, regression risk, security or reliability concern, meaningful maintainability problem, violated requirement, or other material engineering issue.
+   >
+   > A finding that an acceptance criterion of the Task is unmet or not enforced is a substantive actionable finding and is blocking; it is never optional.
    >
    > Non-blocking and optional findings are advisory. They must not implicitly become approval requirements.
    >

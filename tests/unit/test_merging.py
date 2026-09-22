@@ -19,6 +19,8 @@ class MergeRulesTests(unittest.TestCase):
             "pr": {"state": "open", "merged": False},
             "target": {"base_tip": A},
             "reviews": [{"base": A}],
+            "gates": {"unaddressed_findings": False},
+            "unaddressed_findings": [],
         }
 
     def test_moved_base_is_the_approving_base_not_the_recomputed_merge_base(
@@ -29,6 +31,18 @@ class MergeRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "base branch moved"):
             check_merge_gate(self.state, accept_moved_base=False)
         self.assertTrue(check_merge_gate(self.state, accept_moved_base=True))
+
+    def test_unaddressed_optional_threads_refuse_merge_and_name_each_id(
+        self,
+    ) -> None:
+        self.state["gates"]["unaddressed_findings"] = True
+        self.state["unaddressed_findings"] = ["REV-1", "REV-3"]
+        for accept in (False, True):
+            with self.subTest(accept_moved_base=accept):
+                with self.assertRaisesRegex(
+                    GateError, "unaddressed_findings: REV-1, REV-3"
+                ):
+                    check_merge_gate(self.state, accept_moved_base=accept)
 
     def test_approval_reasons_and_closed_pr_are_refused_even_with_flag(
         self,

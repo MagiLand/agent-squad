@@ -92,6 +92,7 @@ class ForgeFixture:
                             "id": 1,
                             "number": 1,
                             "title": "Exercise forge protocol",
+                            "state": "open",
                             "body": "Scripted fixture issue",
                             "user": {"login": "developer"},
                             "created_at": "2026-01-01T00:00:00Z",
