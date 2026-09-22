@@ -1,0 +1,34 @@
+{
+  "doctor": [
+    "tests/integration/test_doctor.py"
+  ],
+  "reviewer": [
+    "tests/integration/test_reviewer.py"
+  ],
+  "forge-commands": [
+    "tests/integration/test_forge_commands.py"
+  ],
+  "smoke": [
+    "tests/integration/test_smoke_workflow.py"
+  ],
+  "rest": [
+    "tests/unit/test_anchors.py",
+    "tests/unit/test_ci_groups.py",
+    "tests/unit/test_cli_surface.py",
+    "tests/unit/test_command_validation.py",
+    "tests/unit/test_configuration.py",
+    "tests/unit/test_conventions.py",
+    "tests/unit/test_doctor.py",
+    "tests/unit/test_forge.py",
+    "tests/unit/test_herdr.py",
+    "tests/unit/test_merging.py",
+    "tests/unit/test_skills.py",
+    "tests/unit/test_validation.py",
+    "tests/integration/test_merge.py",
+    "tests/integration/test_init_doctor.py"
+  ],
+  "main-only": [
+    "tests/integration/test_source_export.py",
+    "tests/unit/test_packaging.py"
+  ]
+}
