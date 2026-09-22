@@ -3,25 +3,80 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 5 * * *'
 permissions:
   contents: read
 jobs:
-  deterministic:
-    name: Deterministic tests (${{ matrix.os }}, Python ${{ matrix.python }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python: '3.11'
-          - os: macos-latest
-            python: '3.12'
-    runs-on: ${{ matrix.os }}
+  doctor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group doctor
+  reviewer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group reviewer
+  forge-commands:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group forge-commands
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group smoke
+  rest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group rest
+  main-only:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'setuptools>=77' .
+      - run: python scripts/run-test-group main-only
+  macos:
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: '3.12'
       - run: python -m pip install 'setuptools>=77' .
       - run: make test PYTHON=python
