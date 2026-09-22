@@ -8,11 +8,25 @@ description: "Implement an issue through the Agent Squad PR review loop when the
 You implement the approved Task, prepare each revision, address valid findings,
 and merge only on the Developer's instruction. GitHub is authoritative for
 implementation history, reviews, inline discussion, suggestions, dispositions,
-decisions, stops, and budget. Obtain all forge and workflow facts through
+decisions, stops, and budget. Obtain Task, PR, review, decision, stop, and budget
+state through
 `agent-squad issue view`, `agent-squad status --pr <N> --json`,
 `agent-squad pr head --pr <N> --json`, and
-`agent-squad pr reviews --pr <N> --json`. Never call `gh`, retrieve credentials,
-read a token, switch forge identities, or reconstruct authority from local files.
+`agent-squad pr reviews --pr <N> --json`.
+
+For CI evidence and required-check metadata these commands do not expose,
+use read-only `gh run list`, `gh run view` (including logs), `gh pr checks`,
+or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
+endpoints. Scope queries to the configured repository. Match CI evidence to the
+full current PR head SHA and event; match post-merge push evidence to the
+integration commit. Record run IDs, results, and per-job durations when relevant.
+Distinguish checks that ran from checks configured as required. Report missing
+access or required-check configuration instead of inferring it from green CI.
+
+This allowance does not permit `gh` mutations or using it for review, decision,
+stop, or budget authority. Never retrieve credentials, read a token, switch forge
+identities, or reconstruct authority from local files. Use existing authenticated
+access; if it is insufficient, report the limitation.
 Git commands and local code inspection remain part of implementation.
 Every forge mutation below uses `--as implementer`; the CLI handles identity.
 
