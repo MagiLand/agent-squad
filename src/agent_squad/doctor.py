@@ -25,6 +25,7 @@ from .skills import SKILL_NAMES, packaged_skill
 
 REVIEW_NAME = re.compile(r"reviewer-pr([1-9][0-9]*)-[0-9a-f]{7}")
 SCRATCH_NAME = re.compile(r"pr([1-9][0-9]*)")
+ISSUE_SCRATCH_NAME = re.compile(r"issue-([1-9][0-9]*)")
 
 
 @dataclass(frozen=True)
@@ -129,11 +130,12 @@ def orphan_diagnostics(
     forge: GitHub | None,
     snapshot: dict | None,
 ) -> list[Diagnostic]:
-    """Scope resources to this repository; GitHub alone supplies PR state."""
+    """Read forge state for resources scoped to this repository."""
     config = repository.configuration
     worktree_root = repository.resolve_root(config.worktree_root)
     scratch_root = repository.resolve_root(config.scratch_root)
     resources: list[tuple[str, str, int]] = []
+    issue_scratch: list[tuple[Path, int]] = []
     diagnostics = []
     for worktree in list_worktrees(repository.root):
         match = REVIEW_NAME.fullmatch(worktree.root.name)
@@ -145,6 +147,9 @@ def orphan_diagnostics(
             if match and path.is_dir():
                 resources.append(
                     ("scratch directory", str(path), int(match[1])))
+            issue_match = ISSUE_SCRATCH_NAME.fullmatch(path.name)
+            if issue_match and path.is_dir():
+                issue_scratch.append((path, int(issue_match[1])))
     if snapshot is not None:
         agents = snapshot.get("agents")
         if not isinstance(agents, list):
@@ -203,6 +208,26 @@ def orphan_diagnostics(
                 f"orphan {kind}", "warn",
                 f"PR #{number} is {state}; retained {resource}",
             ))
+    for path, number in issue_scratch:
+        try:
+            if forge is None:
+                raise AgentSquadError("forge identity unavailable")
+            issue = forge.issue(number)
+            if issue["number"] != number or issue["is_pull_request"]:
+                raise AgentSquadError("forge returned a different issue")
+            if issue["state"] not in ("open", "closed"):
+                raise AgentSquadError("forge returned an invalid issue state")
+        except AgentSquadError as error:
+            diagnostics.append(Diagnostic(
+                "orphan issue scratch directory", "fail",
+                f"cannot determine issue #{number} state for {path}: {error}",
+            ))
+        else:
+            if issue["state"] == "closed":
+                diagnostics.append(Diagnostic(
+                    "orphan issue scratch directory", "warn",
+                    f"issue #{number} is closed; retained {path}",
+                ))
     if not diagnostics:
         diagnostics.append(Diagnostic(
             "orphan resources", "pass", "no orphaned resources found",

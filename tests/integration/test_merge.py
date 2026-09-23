@@ -60,6 +60,43 @@ class MergeTests(unittest.TestCase):
             state["paths"]["scratch"],
             str(self.f.repo / ".agent-squad/review-scratch/pr1"),
         )
+        self.assertEqual(
+            issue["paths"]["issue_scratch"],
+            str(self.f.repo / ".agent-squad/review-scratch/issue-1"),
+        )
+        self.assertIsNone(state["paths"]["issue_scratch"])
+
+    def test_issue_scratch_uses_owned_issue_number_not_pr_number(self) -> None:
+        f = ForgeFixture()
+        self.addCleanup(f.close)
+        f.initialize()
+        f.candidate()
+        moved = f.worktree.parent / "issue-42"
+        f.git("worktree", "move", str(f.worktree), str(moved))
+        f.worktree = moved
+        model = f.read_model()
+        model["issues"]["42"] = dict(model["issues"]["1"], id=42, number=42)
+        f.save_model(model)
+        f.cli(
+            "pr", "create", "--as", "implementer", "--issue", "42",
+            "--task", f.task, "--report", f.report,
+        )
+        f.review("approved")
+        root = f.repo / ".agent-squad/review-scratch"
+        scratch = root / "issue-42"
+        scratch.mkdir()
+        (scratch / "report.md").write_text("draft")
+        unrelated = root / "issue-1"
+        unrelated.mkdir()
+        (unrelated / "keep").write_text("keep")
+        result = f.cli(
+            "pr", "merge", "--as", "implementer", "--pr", "1", cwd=f.repo)
+        self.assertFalse(scratch.exists())
+        self.assertEqual((unrelated / "keep").read_text(), "keep")
+        self.assertEqual(result["cleanup"][-1], {
+            "step": "issue scratch directory", "ok": True,
+            "detail": str(scratch),
+        })
 
     def test_implementation_record_mismatches_retain_resources(self) -> None:
         f = self.f
@@ -198,6 +235,38 @@ class MergeTests(unittest.TestCase):
         f.git("push", "origin", "main", cwd=advance)
         return f.git("rev-parse", "HEAD", cwd=advance)
 
+    def test_issue_scratch_symlink_is_retained_with_its_target(self) -> None:
+        f = self.f
+        scratch = f.repo / ".agent-squad/review-scratch/issue-1"
+        target = f.root / "foreign-scratch"
+        target.mkdir()
+        (target / "keep").write_text("retained")
+        scratch.symlink_to(target, target_is_directory=True)
+        result = self.merge(expected=3)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["cleanup"][-1]["step"],
+                         "issue scratch directory")
+        self.assertFalse(result["cleanup"][-1]["ok"])
+        self.assertIn("symlink", result["cleanup"][-1]["detail"])
+        self.assertTrue(scratch.is_symlink())
+        self.assertEqual((target / "keep").read_text(), "retained")
+
+    def test_issue_scratch_containing_worktree_is_retained(self) -> None:
+        f = self.f
+        scratch = f.repo / ".agent-squad/review-scratch/issue-1"
+        nested = scratch / "foreign-worktree"
+        f.git("worktree", "add", "--detach", str(nested), self.head)
+        (scratch / "keep").write_text("retained")
+        result = self.merge(expected=3)
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["cleanup"][-1]["step"],
+                         "issue scratch directory")
+        self.assertFalse(result["cleanup"][-1]["ok"])
+        self.assertIn("contains a worktree", result["cleanup"][-1]["detail"])
+        self.assertEqual((scratch / "keep").read_text(), "retained")
+        self.assertEqual(f.git("rev-parse", "HEAD", cwd=nested), self.head)
+        self.assertIn(str(nested), f.git("worktree", "list", "--porcelain"))
+
     def assert_removed(self) -> None:
         f = self.f
         self.assertFalse(f.worktree.exists())
@@ -207,6 +276,8 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(
             f.git("ls-remote", "--heads", "origin", "issue-1"), "")
         self.assertFalse((f.repo / ".agent-squad/review-scratch/pr1").exists())
+        self.assertFalse(
+            (f.repo / ".agent-squad/review-scratch/issue-1").exists())
         self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
         self.assertEqual(f.git("status", "--porcelain"), "")
 
@@ -219,6 +290,9 @@ class MergeTests(unittest.TestCase):
         scratch = f.repo / ".agent-squad/review-scratch/pr1"
         scratch.mkdir(parents=True)
         (scratch / "probe.py").write_text("saved probe")
+        issue_scratch = scratch.parent / "issue-1"
+        issue_scratch.mkdir()
+        (issue_scratch / "report.md").write_text("draft report")
         unrelated = f.repo / ".agent-squad/review-scratch/pr10"
         unrelated.mkdir()
         (unrelated / "keep").write_text("keep")
@@ -277,9 +351,12 @@ class MergeTests(unittest.TestCase):
         self.f.settings(wrong_merge_tree=True)
         scratch = self.f.repo / ".agent-squad/review-scratch/pr1"
         scratch.mkdir(parents=True)
+        issue_scratch = scratch.parent / "issue-1"
+        issue_scratch.mkdir()
         result = self.merge(expected=1)
         self.assertIn("tree differs", result["integration"])
         self.assertTrue(scratch.exists())
+        self.assertTrue(issue_scratch.exists())
         self.assertTrue(self.f.worktree.exists())
         self.assertNotEqual(self.f.git("branch", "--list", "issue-1"), "")
 

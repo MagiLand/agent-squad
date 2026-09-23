@@ -140,7 +140,9 @@ def state_for(
     return {**state, "paths": workflow_paths(repository, pr=pr.number)}
 
 
-def workflow_paths(repository: Repository, *, pr: int | None = None) -> dict:
+def workflow_paths(
+    repository: Repository, *, pr: int | None = None, issue: int | None = None
+) -> dict:
     config = repository.configuration
     scratch = repository.resolve_root(config.scratch_root)
     return {
@@ -148,6 +150,7 @@ def workflow_paths(repository: Repository, *, pr: int | None = None) -> dict:
         "worktree_root": str(repository.resolve_root(config.worktree_root)),
         "scratch_root": str(scratch),
         "scratch": str(scratch / f"pr{pr}") if pr else None,
+        "issue_scratch": str(scratch / f"issue-{issue}") if issue else None,
         "base_branch": config.base_branch,
     }
 

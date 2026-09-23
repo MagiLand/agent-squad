@@ -14,6 +14,9 @@ state through
 `agent-squad pr head --pr <N> --json`, and
 `agent-squad pr reviews --pr <N> --json`.
 
+Filter `--json` output to read what is needed instead of saving whole responses
+to disk. A saved response is never authority.
+
 For CI evidence and required-check metadata these commands do not expose,
 use read-only `gh run list`, `gh run view` (including logs), `gh pr checks`,
 or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
@@ -34,7 +37,8 @@ Every forge mutation below uses `--as implementer`; the CLI handles identity.
 ## 1. Agree the Task once
 
 Run `agent-squad issue view --issue <N> --json`; read its title, body, labels,
-and comments. Draft a file starting with `## Task` containing the objective,
+and comments. Create `paths.issue_scratch` (`<scratch_root>/issue-<N>`) if absent.
+Draft a file there starting with `## Task` containing the objective,
 acceptance criteria, constraints, and non-goals. Present it to the Developer
 once and wait for approval before coding. Then work autonomously until the
 first handback. Do not silently change the Task.
@@ -49,6 +53,11 @@ checkout. Understand the issue, repository instructions, and relevant existing
 code; implement the requested scope; run relevant tests, checks, and validation;
 commit and push the branch. Keep the interactive session in the primary
 checkout and execute implementation commands with the issue worktree as cwd.
+
+Put report files, probe scripts, and validation output in
+`<scratch_root>/issue-<N>`. Keep tool installations and virtual environments
+outside the repository (for example in the harness scratchpad), never under
+`.agent-squad/` or `scratch_root`.
 
 Write a report file beginning with `## Implementation report`, with these
 level-3 headings: `Summary`, `Scope`, `Files changed`, `Design decisions`,
@@ -113,6 +122,7 @@ resolved, or no longer applicable. Apply all general decisions together and
 the latest decision on each finding. Settled threads stay closed unless new
 evidence appears.
 
+Write reply bodies in `<scratch_root>/issue-<N>`.
 Reply on every unsettled thread, blocking or optional, with
 `agent-squad thread reply --as implementer --pr <PR> --finding REV-<n>
 --body <file>`. The file's first line must be one of:
@@ -161,6 +171,8 @@ Task amendment; it is not a substitute for committing and pushing fixes.
 
 ## 7. Human decisions and Task amendments
 
+Write decision bodies and amended Task files in `<scratch_root>/issue-<N>`.
+
 On `needs_human`, or before a `needs-human` disposition, relay the required
 decision to the Developer and wait for the answer. Record the actual answer,
 quoting the Developer, using `agent-squad decision post --as implementer
@@ -192,8 +204,12 @@ report it and ask the Developer to choose a fresh review or explicitly accept
 the moved base; use `--accept-moved-base` only for that explicit choice.
 
 Report visible human-approval or check requirements and any forge refusal.
-After successful merge report the merge commit, method, integration check,
-and each cleanup result. Print the CLI's suggested fast-forward command for
+After successful merge, the PR description is frozen: `pr report` refuses a
+PR that is not open. Report the merge commit, method, integration check, CI run
+at the merge commit, and each cleanup result to the Developer only.
+`pr merge` removes `<scratch_root>/issue-<N>` after a verified merge, subject
+to its cleanup safeguards; do not recreate it for a post-merge report.
+Print the CLI's suggested fast-forward command for
 the Developer; do not change the base checkout. A failed integration check
 retains resources; exit 3 means cleanup is incomplete and must be reported.
 Squash after accepting a moved base is not verifiable by tree identity.
