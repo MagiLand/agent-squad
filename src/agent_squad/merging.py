@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-from typing import Callable
+from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
 from .forge import ForgeError, GitHub
@@ -25,6 +25,14 @@ from .initialization import (
 from .reviewer import ReviewWorktree, close_reviewer
 
 IMPLEMENTATION_OWNER = "agent-squad-implementation.json"
+
+FastForwardResult = TypedDict("FastForwardResult", {
+    "result": Literal["fast-forwarded", "up to date", "skipped", "refused"],
+    "from": str | None,
+    "to": str | None,
+    "reason": str | None,
+    "command": str | None,
+})
 
 
 def implementation_metadata(
@@ -297,6 +305,52 @@ def cleanup_merge(
     return steps
 
 
+def fast_forward_primary(
+    primary: Path, base_branch: str, verified_tip: str,
+) -> FastForwardResult:
+    """Advance only a clean, checked-out base to the verified commit."""
+    result: FastForwardResult = {
+        "result": "skipped", "from": None, "to": verified_tip,
+        "reason": None, "command": None,
+    }
+    try:
+        result["from"] = git_output(primary, "rev-parse", "HEAD")
+        branch = run_git(primary, "symbolic-ref", "--quiet", "HEAD")
+        if branch.returncode == 1:
+            result["reason"] = "primary checkout has a detached HEAD"
+            return result
+        if branch.returncode:
+            raise AgentSquadError(branch.stderr.strip())
+        if branch.stdout.strip() != f"refs/heads/{base_branch}":
+            result["reason"] = (
+                f"primary checkout is on {branch.stdout.strip()}, "
+                f"not refs/heads/{base_branch}"
+            )
+            return result
+        result["command"] = shlex.join([
+            "git", "-C", str(primary), "merge", "--ff-only", verified_tip,
+        ])
+        if git_output(
+            primary, "status", "--porcelain", "--untracked-files=no"
+        ):
+            result["reason"] = "primary checkout has changes to tracked files"
+            return result
+        merged = run_git(primary, "merge", "--ff-only", verified_tip)
+        if merged.returncode:
+            result["result"] = "refused"
+            result["reason"] = merged.stderr.strip() or merged.stdout.strip()
+            return result
+        result["result"] = (
+            "up to date" if git_output(primary, "rev-parse", "HEAD")
+            == result["from"] else "fast-forwarded"
+        )
+        result["command"] = None
+    except (AgentSquadError, OSError, ValueError) as error:
+        # This best-effort step never changes the merge/cleanup exit status.
+        result["reason"] = str(error)
+    return result
+
+
 def merge_pr(
     repository: Repository, forge: GitHub, pr: int,
     *, accept_moved_base: bool = False,
@@ -313,10 +367,11 @@ def merge_pr(
         "pr": pr, "head": target["head"], "merge_method": method,
         "moved_base": moved, "mergeable_state": snapshot.pr.mergeable_state,
         "branch_rules": rules,
-        "fast_forward_command": shlex.join([
-            "git", "-C", str(repository.primary), "merge", "--ff-only",
-            f"origin/{target['base_branch']}",
-        ]),
+        "fast_forward": {
+            "result": "skipped", "from": None, "to": None,
+            "reason": "merge integration has not been verified",
+            "command": None,
+        },
     }
     try:
         merged = forge.merge(pr, target["head"], method)
@@ -360,5 +415,8 @@ def merge_pr(
         }]
     result["exit_code"] = (
         0 if all(s["ok"] for s in result["cleanup"]) else 3
+    )
+    result["fast_forward"] = fast_forward_primary(
+        repository.primary, target["base_branch"], tip,
     )
     return result

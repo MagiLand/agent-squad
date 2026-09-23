@@ -391,7 +391,7 @@ def assert_merge_cleanup(
     assert not (f.repo / f".agent-squad/review-scratch/pr{pr}").exists()
     assert not (f.repo / f".agent-squad/review-scratch/issue-{issue}").exists()
     assert f.git("worktree", "list", "--porcelain").count("worktree ") == 1
-    assert f.git("rev-parse", "HEAD") == f.base
+    assert f.git("rev-parse", "HEAD") == f.git("rev-parse", "origin/main")
     assert f.git("status", "--porcelain") == ""
     assert_no_tracked_runtime(f)
     assert not f.herdr_model()["workspaces"]
