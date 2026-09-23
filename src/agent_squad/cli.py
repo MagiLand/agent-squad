@@ -189,7 +189,7 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("issue", "view"):
         return {
             **forge.issue(args.issue),
-            "paths": commands.workflow_paths(repository),
+            "paths": commands.workflow_paths(repository, issue=args.issue),
         }
     if key == ("pr", "create"):
         return commands.create_pr(

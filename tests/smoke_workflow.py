@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 
 from tests.forge_support import ForgeFixture, finding
@@ -25,6 +26,10 @@ def run_smoke() -> dict:
         } <= checks
         steps.append({"step": 1, "result": "init and full doctor passed"})
         head = f.candidate()
+        issue_scratch = Path(
+            f.cli("issue", "view", "--issue", "1")["paths"]["issue_scratch"])
+        issue_scratch.mkdir()
+        (issue_scratch / "report.md").write_text("saved report")
         f.create_pr()
         created = f.status()
         assert created["target"]["head"] == head
@@ -233,7 +238,7 @@ def run_smoke() -> dict:
             "--accept-moved-base", cwd=f.repo,
         )
         assert merged["integration"] == "verified by ancestry"
-        assert_merge_cleanup(f, 1, "issue-1")
+        assert_merge_cleanup(f, 1, "issue-1", issue=1)
 
         # A second PR in this same repository exercises unmoved-base squash.
         model = f.read_model()
@@ -249,6 +254,10 @@ def run_smoke() -> dict:
             "worktree", "add", "-b", "issue-2", str(f.worktree), "origin/main"
         )
         second_head = f.push("value = 100\nsecond = 20\nthird = 30\n")
+        issue_scratch = Path(
+            f.cli("issue", "view", "--issue", "2")["paths"]["issue_scratch"])
+        issue_scratch.mkdir()
+        (issue_scratch / "report.md").write_text("second saved report")
         f.cli(
             "pr", "create", "--as", "implementer", "--issue", "2",
             "--task", f.task, "--report", f.report,
@@ -264,7 +273,7 @@ def run_smoke() -> dict:
             "pr", "merge", "--as", "implementer", "--pr", "2", cwd=f.repo,
         )
         assert squashed["integration"] == "verified by tree identity"
-        assert_merge_cleanup(f, 2, "issue-2")
+        assert_merge_cleanup(f, 2, "issue-2", issue=2)
         steps.append({"step": 9,
                       "result": "merge and squash verified; cleaned"})
         commands = list(f.history)
@@ -373,11 +382,14 @@ def run_smoke() -> dict:
     }
 
 
-def assert_merge_cleanup(f: ForgeFixture, pr: int, branch: str) -> None:
+def assert_merge_cleanup(
+    f: ForgeFixture, pr: int, branch: str, *, issue: int
+) -> None:
     assert not f.worktree.exists()
     assert f.git("branch", "--list", branch) == ""
     assert f.git("ls-remote", "--heads", "origin", branch) == ""
     assert not (f.repo / f".agent-squad/review-scratch/pr{pr}").exists()
+    assert not (f.repo / f".agent-squad/review-scratch/issue-{issue}").exists()
     assert f.git("worktree", "list", "--porcelain").count("worktree ") == 1
     assert f.git("rev-parse", "HEAD") == f.base
     assert f.git("status", "--porcelain") == ""

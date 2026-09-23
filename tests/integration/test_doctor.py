@@ -453,6 +453,62 @@ class DoctorTests(unittest.TestCase):
         self.assertIn(str(scratch), item["detail"])
         self.assertTrue(scratch.exists())
 
+    def test_issue_scratch_open_passes_closed_warns_and_preserves_files(
+        self,
+    ) -> None:
+        f = self.f
+        # PR #1 stays open while issue #1 changes state.
+        f.candidate()
+        f.create_pr()
+        root = f.repo / ".agent-squad/review-scratch"
+        (root / "pr1").mkdir()
+        scratch = root / "issue-1"
+        scratch.mkdir()
+        evidence = scratch / "report.md"
+        evidence.write_text("preserve")
+        self.diagnostic(f.cli("doctor"), "orphan resources", "pass")
+        model = f.read_model()
+        model["issues"]["1"]["state"] = "closed"
+        f.save_model(model)
+        result = f.cli("doctor")
+        item = self.diagnostic(
+            result, "orphan issue scratch directory", "warn")
+        self.assertIn("issue #1 is closed", item["detail"])
+        self.assertIn(str(scratch), item["detail"])
+        self.assertEqual(evidence.read_text(), "preserve")
+
+    def test_unreadable_issue_scratch_fails_and_preserves_files(self) -> None:
+        f = self.f
+        scratch = f.repo / ".agent-squad/review-scratch/issue-999"
+        scratch.mkdir()
+        (scratch / "keep").write_text("preserve")
+        result = f.cli("doctor", expected=1)
+        item = self.diagnostic(result, "orphan issue scratch directory")
+        self.assertIn("cannot determine issue #999 state", item["detail"])
+        self.assertIn("issue not found", item["detail"])
+        self.assertIn(str(scratch), item["detail"])
+        self.assertEqual((scratch / "keep").read_text(), "preserve")
+
+    def test_issue_scratch_rejects_mismatched_or_invalid_issue(self) -> None:
+        f = self.f
+        scratch = f.repo / ".agent-squad/review-scratch/issue-1"
+        scratch.mkdir()
+        for change in (
+            {"number": 2}, {"pull_request": {}}, {"state": "unknown"},
+        ):
+            with self.subTest(change=change):
+                model = f.read_model()
+                original = dict(model["issues"]["1"])
+                model["issues"]["1"].update(change)
+                f.save_model(model)
+                result = f.cli("doctor", expected=1)
+                item = self.diagnostic(
+                    result, "orphan issue scratch directory")
+                self.assertIn(str(scratch), item["detail"])
+                self.assertTrue(scratch.exists())
+                model["issues"]["1"] = original
+                f.save_model(model)
+
     def test_orphans_without_any_forge_identity_fail_without_a_traceback(
             self) -> None:
         f = self.f
@@ -461,6 +517,8 @@ class DoctorTests(unittest.TestCase):
         scratch.mkdir()
         evidence = scratch / "evidence.txt"
         evidence.write_text("preserve")
+        issue_scratch = scratch.parent / "issue-1"
+        issue_scratch.mkdir()
         result = f.cli("doctor", expected=1)
         for role in ("implementer", "reviewer"):
             self.diagnostic(result, f"{role} forge identity")
@@ -468,6 +526,10 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("forge identity unavailable", item["detail"])
         self.assertIn(str(scratch), item["detail"])
         self.assertEqual(evidence.read_text(), "preserve")
+        item = self.diagnostic(result, "orphan issue scratch directory")
+        self.assertIn("forge identity unavailable", item["detail"])
+        self.assertIn(str(issue_scratch), item["detail"])
+        self.assertTrue(issue_scratch.exists())
         self.assertNotIn("fake-token-", json.dumps(result))
 
     def test_non_repository_agent_is_ignored_without_a_forge_lookup(
@@ -497,6 +559,9 @@ class DoctorTests(unittest.TestCase):
                             "cwd": str(foreign)}, {"name": "unrelated"}]
         f.save_herdr(model)
         (f.repo / ".agent-squad/review-scratch/notes").mkdir()
+        for name in ("issue-0", "issue-01", "issue-52-old"):
+            (f.repo / ".agent-squad/review-scratch" / name).mkdir()
+        (f.repo / ".agent-squad/review-scratch/issue-999").write_text("file")
         self.diagnostic(f.cli("doctor"), "orphan resources", "pass")
         self.assertFalse(
             any("/pulls/999" in c["arguments"]

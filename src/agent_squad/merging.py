@@ -99,7 +99,7 @@ def record_implementation(metadata: Path, identity: dict, pr: int) -> None:
 
 def owned_implementation(
     repository: Repository, pr: int, branch: str, head: str
-) -> Path:
+) -> tuple[Path, int]:
     worktree = next((
         w for w in list_worktrees(repository.primary)
         if w.branch == f"refs/heads/{branch}"
@@ -132,7 +132,7 @@ def owned_implementation(
         raise RetainedError(
             f"cannot prove implementation ownership: {path}: {error}"
         ) from None
-    return path
+    return path, issue
 
 
 def check_merge_gate(state: dict, *, accept_moved_base: bool) -> bool:
@@ -192,7 +192,7 @@ def cleanup_merge(
 
     # Check ownership before any deletion, then recheck at removal time.
     if not step("implementation ownership", lambda: str(
-        owned_implementation(repository, pr, branch, head)
+        owned_implementation(repository, pr, branch, head)[0]
     )):
         return steps
 
@@ -219,8 +219,12 @@ def cleanup_merge(
     if not step("remote branch", remove_remote):
         return steps
 
+    issue: int
+
     def remove_implementation() -> str:
-        path = owned_implementation(repository, pr, branch, head)
+        nonlocal issue
+        # Keep the validated issue before removal deletes the ownership record.
+        path, issue = owned_implementation(repository, pr, branch, head)
         # Preserve uncommitted implementation work, including untracked data.
         git_output(repository.primary, "worktree", "remove", str(path))
         if path.exists() or any(
@@ -270,10 +274,7 @@ def cleanup_merge(
             )):
                 return steps
 
-    def remove_scratch() -> str:
-        scratch = repository.resolve_root(
-            repository.configuration.scratch_root
-        ) / f"pr{pr}"
+    def remove_scratch(scratch: Path) -> str:
         if scratch.is_symlink():
             raise RetainedError(f"scratch directory is a symlink: {scratch}")
         if scratch.exists():
@@ -284,7 +285,15 @@ def cleanup_merge(
             shutil.rmtree(scratch)
         return str(scratch)
 
-    step("scratch directory", remove_scratch)
+    scratch_root = repository.resolve_root(
+        repository.configuration.scratch_root)
+    if not step("scratch directory", lambda: remove_scratch(
+        scratch_root / f"pr{pr}"
+    )):
+        return steps
+    step("issue scratch directory", lambda: remove_scratch(
+        scratch_root / f"issue-{issue}"
+    ))
     return steps
 
 

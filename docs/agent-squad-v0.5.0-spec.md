@@ -12,6 +12,7 @@
 
 ## Amendments
 
+- **2026-09-23 — [Issue #66](https://github.com/MagiLand/agent-squad/issues/66):** Give Implementer drafts and validation output a per-issue scratch directory, expose its path, remove it after a verified merge, and report it when orphaned. Amend §§5.1, 5.3, 7.10, 10.2–10.4, 12.2, 15, and 16. The amended text is the baseline for the v0.6.0 delta (#55). The protocol tag remains `AGENT_SQUAD/0.5.0`.
 - **2026-09-22 — [Issue #64](https://github.com/MagiLand/agent-squad/issues/64):** Require dispositions on every unsettled review thread before another review or merge; amend §7.3, §7.5, §7.9, §7.10, §10.4, §12.2 rules 5/6/8, §12.3 rules 4/6, and §16. The amended text is the baseline for the v0.6.0 delta (#55). The protocol tag remains `AGENT_SQUAD/0.5.0`.
 
 ---
@@ -245,6 +246,7 @@ The suggested layout is:
 │   ├── issue-<N>/                      implementation worktree for issue N
 │   └── reviewer-pr<N>-<sha7>/          detached review worktree for one review pass
 └── review-scratch/
+    ├── issue-<N>/                     per-issue scratch directory for Implementer drafts and validation output
     └── pr<N>/                          per-PR scratch directory for Reviewer probes
 ```
 
@@ -262,6 +264,8 @@ Worktrees nested under the excluded control directory are ordinary linked Git wo
 ### 5.3 Scratch root
 
 `scratch_root` (default `.agent-squad/review-scratch`) holds one directory per PR, `<scratch_root>/pr<N>`. `reviewer launch` creates it. Reviewers write probe scripts, harnesses, and notes there so the next Reviewer can re-run them against the new head. It survives across review passes and is removed by `pr merge` after a successful merge (§15). Its contents are never authoritative; a later Reviewer treats them as an untrusted aid, exactly like the implementation report.
+
+It also holds `<scratch_root>/issue-<N>` for the Implementer's Task draft, report, reply and decision bodies, probe scripts, and validation output for issue N. The Implementer creates this directory if absent; `pr merge` removes it after a verified merge (§15). Its contents are never authoritative. Tool installations and virtual environments MUST NOT be placed under `scratch_root`.
 
 ### 5.4 Git exclusion
 
@@ -565,7 +569,7 @@ Before reporting "approved at `<full-sha>`, ready to merge", the Implementer MUS
 1. verifies the agent-approved condition, refuses any `unaddressed_findings` with exit 4 and their thread IDs, and checks the moved-base rule at that moment;
 2. merges through the forge with the configured `merge_method`, passing the approved head SHA as the SHA the PR head must still match, so the forge refuses a head that moved in between;
 3. fetches and verifies integration: with `merge` (the default) the approved head MUST be an ancestor of the merge commit, so the approved SHA stays an ancestor of the base branch; with `squash` the tree of the merge commit MUST equal the tree of the approved head, which holds exactly when the base had not moved, so a squash merge accepted under `--accept-moved-base` is reported as "integration not verifiable by tree identity" rather than verified;
-4. deletes the remote branch if the forge did not already, removes the implementation worktree, deletes the local branch, removes any remaining review worktrees for the PR, and removes the per-PR scratch directory;
+4. deletes the remote branch if the forge did not already, removes the implementation worktree, deletes the local branch, removes any remaining review worktrees for the PR, and removes the per-PR and per-issue scratch directories (§15);
 5. reports each step and never modifies the base-branch checkout; it prints the fast-forward command for the Developer.
 
 The `rebase` merge method is not supported in v0.5.0.
@@ -767,7 +771,7 @@ This section supersedes v0.4.4 §32. `agent-squad` remains a standard-library Py
 | Setup | `init --implementer-account <login> --reviewer-account <login> [--owner] [--repo] [--base-branch]` | implementer (one verification read) | forge owner and repo from the remote; base branch from the remote default | not a Git worktree; remote not parseable; repository not readable; the two accounts are equal; an existing configuration is invalid |
 | Setup | `doctor [--live-reviewer]` | both (reads) | the checks of §10.3 | any check fails; `--live-reviewer` leaves a Reviewer running (exit 3) |
 | Setup | `skill install [--claude] [--codex] [--force]` | none | packaged skill contents | a differing skill file or symlink exists and `--force` is absent (§12.1) |
-| Forge | `issue view --issue <N>` | read | issue title, body, labels, comments | issue not readable |
+| Forge | `issue view --issue <N>` | read | issue title, body, labels, comments; with `--json`, `paths.issue_scratch` is `<scratch_root>/issue-<N>` | issue not readable |
 | Forge | `pr create --as implementer --issue <N> --task <file> --report <file> [--title <text>]` | implementer | head branch from the implementation worktree; base branch from configuration; body per §7.2 | sections invalid; branch not pushed; a PR for the branch already exists |
 | Forge | `pr report --as implementer --pr <N> --report <file>` | implementer | the replaced `## Implementation report` section | sections invalid; PR not open |
 | Forge | `pr head --pr <N>` | read | head SHA and branch, base branch, merge-base, open and merged state | PR not readable |
@@ -800,12 +804,14 @@ Deterministic checks (v0.4.4 §20.1 amended):
 - Herdr on `PATH`; schema and live protocol consistent; the required methods and result types of §8.2 present; the Herdr socket reachable from the current process; integration current for both configured kinds; a live agent named `implementer.agent_name` of kind `implementer.kind` exists (a warning when absent, because the Developer's session may be started later);
 - both roots creatable and writable; a disposable detached worktree can be created under `worktree_root` and removed;
 - the two skill files installed and byte-identical to the packaged versions; the `~/.claude/skills` symlinks present; the installed `code-review` skill present (§12.4);
-- orphaned resources: worktrees under `worktree_root` whose name matches the review convention but whose PR is merged or closed, live agents whose name matches the convention for a merged or closed PR, and scratch directories for merged PRs; reported with paths and never removed automatically (v0.4.4 §20.4 and §34.4 retained);
+- orphaned resources: worktrees under `worktree_root` whose name matches the review convention but whose PR is merged or closed, live agents whose name matches the convention for a merged or closed PR, scratch directories for merged PRs, and `issue-<N>` scratch directories whose issue is closed; reported with paths and never removed automatically (v0.4.4 §20.4 and §34.4 retained). An open issue is not an orphan; an unreadable issue is a failure, as for a PR;
 - `.gitmodules` present: warning (v0.4.4 §22.9).
 
 `doctor --live-reviewer` creates a disposable detached worktree at the current `HEAD`, opens it in Herdr, starts the configured Reviewer kind with `reviewer.start_args`, waits for it to be interactive, records whether a trust or permission prompt appeared, closes the workspace, and removes the worktree. It proves start, readiness, trust inheritance, and close; it does not send a review request. Resources that cannot be closed safely are reported and retained (exit 3).
 
 ### 10.4 Reads used by the skills
+
+`issue view --issue <N> --json` reports `paths.issue_scratch` as `<scratch_root>/issue-<N>`. Workflow paths include `issue_scratch: null` when no issue number is known. This path names a location for drafts and validation output, not protocol authority.
 
 The skills obtain Task, PR, review, decision, stop, and budget state through `status --pr <N> --json`, `pr head`, `pr reviews`, and `issue view`; they never retrieve or read a token or switch forge identities. The Implementer alone MAY use read-only `gh run list`, `gh run view` (including logs), `gh pr checks`, and `gh api --method GET` against Actions, check, branch-protection, or branch-rule endpoints for CI evidence and required-check metadata these commands do not expose, scoped to the configured repository. Match CI evidence to the full current PR head and event, and post-merge push evidence to the integration commit; record run IDs, results, and per-job durations when relevant. Distinguish checks that ran from configured required checks, and report missing access or configuration. This allowance, granted by decision 5775326494 on PR #62, does not permit `gh` mutations, other `gh` reads, or using `gh` for Task, PR, review, decision, stop, or budget authority. Use existing authenticated access and report its limitations. `status --json` is the complete evidence interface: it carries the PR body, so the Reviewer takes its spec from the effective Task (§7.6) there rather than from the issue, and it carries every review, thread, reply, decision, and stop body with author and timestamp (§7.9), so a fresh Reviewer can verify every disposition, read every decision, and inspect every finding's evidence without any other read.
 
@@ -854,13 +860,13 @@ This section supersedes v0.4.4 §35. Two skills, each a directory with one `SKIL
 
 ### 12.2 `squad-implementer`: mandatory rules
 
-An outline; each rule is mandatory content of the skill text. Markers refer to the current Implementer prompt.
+An outline; each rule is mandatory content of the skill text. Markers refer to the current Implementer prompt. The preamble directs the Implementer to filter `--json` output to read what is needed rather than save whole responses to disk; a saved response is never authority.
 
-1. **Task statement [new].** Read the issue with `issue view`; draft `## Task` (objective, acceptance criteria, constraints, non-goals); present it to the Developer once and wait for approval; then work autonomously until the first handback.
-2. **Implementation workflow [adapted].** Use the dedicated worktree `<worktree_root>/issue-<N>` on a branch following the consuming repository's naming policy (use `<type>/issue-<N>-<slug>` when no policy is specified); understand the issue and relevant existing code before making changes; implement the requested change without unnecessary scope expansion; run the relevant tests, checks, and validation; commit and push; open the PR with `pr create` including both sections; update the report with `pr report` on every later push; list changes to agent instruction or control-plane files under "Areas worth extra review".
+1. **Task statement [new].** Read the issue with `issue view`; create `paths.issue_scratch` (`<scratch_root>/issue-<N>`) if absent and draft `## Task` there (objective, acceptance criteria, constraints, non-goals); present it to the Developer once and wait for approval; then work autonomously until the first handback.
+2. **Implementation workflow [adapted].** Use the dedicated worktree `<worktree_root>/issue-<N>` on a branch following the consuming repository's naming policy (use `<type>/issue-<N>-<slug>` when no policy is specified); understand the issue and relevant existing code before making changes; implement the requested change without unnecessary scope expansion; run the relevant tests, checks, and validation; commit and push; open the PR with `pr create` including both sections; update the report with `pr report` on every later push; list changes to agent instruction or control-plane files under "Areas worth extra review". Put the report file, probe scripts, and validation output in `<scratch_root>/issue-<N>`. Tool installations and virtual environments go outside the repository (for example in the harness scratchpad), never under `.agent-squad/` or `scratch_root`.
 3. **Request a review [adapted].** Run `reviewer launch --pr <N>`; on exit 4 report the gate to the Developer; on exit 3 tell the Developer which pane needs an answer and later run `reviewer adopt`; never send keys.
 4. **Asynchronous handoff [verbatim]** as quoted in §8.8, after a successful `reviewer launch` or `reviewer adopt`.
-5. **Handling review feedback [adapted].** On a `REVIEW_RESULT` prompt or a "check the PR" instruction, run `status --pr <N>` first and act on the derived next action; read the review directly from the GitHub PR, including inline threads and suggestions, and treat the PR as the authoritative source; independently evaluate each substantive actionable finding; fix findings that are valid; do not change the code merely to satisfy findings that are incorrect, inappropriate, already resolved, or no longer applicable; if `status` reports `open_threads`, open a thread for each blocking unanchored finding with `thread open` before anything else, and for optional ones when convenient; record a `DISPOSITION` reply on every unsettled thread, blocking or optional, with `thread reply`; run the relevant tests and validation after making changes; commit and push; update the report; then `reviewer close` for the finished Reviewer and `reviewer launch` for the new head.
+5. **Handling review feedback [adapted].** On a `REVIEW_RESULT` prompt or a "check the PR" instruction, run `status --pr <N>` first and act on the derived next action; read the review directly from the GitHub PR, including inline threads and suggestions, and treat the PR as the authoritative source; independently evaluate each substantive actionable finding; fix findings that are valid; do not change the code merely to satisfy findings that are incorrect, inappropriate, already resolved, or no longer applicable; if `status` reports `open_threads`, open a thread for each blocking unanchored finding with `thread open` before anything else, and for optional ones when convenient; write reply bodies in `<scratch_root>/issue-<N>` and record a `DISPOSITION` reply on every unsettled thread, blocking or optional, with `thread reply`; run the relevant tests and validation after making changes; commit and push; update the report; then `reviewer close` for the finished Reviewer and `reviewer launch` for the new head.
 6. **Non-blocking and optional findings [verbatim]:**
 
    > Treat non-blocking and optional findings as advisory, not mandatory.
@@ -877,8 +883,8 @@ An outline; each rule is mandatory content of the skill text. Markers refer to t
    >
    > Unimplemented optional findings that have been reasonably dispositioned do not prevent the PR from being complete or approved.
 
-7. **Needs-human and decisions [adapted].** On a `needs_human` verdict, or before posting a `needs-human` disposition, relay the decision required to the Developer; record the Developer's answer with `decision post`, quoting the Developer; only then request another review. When the Developer amends the Task, record it with `decision post --finding none --task <file>`, which posts the complete amended section as a general decision and mirrors it into the PR body (§7.6); if `status` reports `task_body_stale`, re-run the same command; then request a review of the current head even if no code changed.
-8. **Approval and merge [adapted].** Verify approval on the PR through `status`, never from the Herdr message alone; reply on every unsettled thread before reporting "approved at `<full-sha>`, ready to merge"; the report lists every optional finding of the PR with its ID, title, and disposition (the reason or the issue); then wait; when the Developer instructs the merge, run `pr merge`; if the base moved, report it and ask; after a successful merge, report the merge commit and the cleanup performed. If the approved SHA is no longer the current PR head, do not merge based on that approval; the newer revision must be reviewed.
+7. **Needs-human and decisions [adapted].** Write decision bodies and amended Task files in `<scratch_root>/issue-<N>`. On a `needs_human` verdict, or before posting a `needs-human` disposition, relay the decision required to the Developer; record the Developer's answer with `decision post`, quoting the Developer; only then request another review. When the Developer amends the Task, record it with `decision post --finding none --task <file>`, which posts the complete amended section as a general decision and mirrors it into the PR body (§7.6); if `status` reports `task_body_stale`, re-run the same command; then request a review of the current head even if no code changed.
+8. **Approval and merge [adapted].** Verify approval on the PR through `status`, never from the Herdr message alone; reply on every unsettled thread before reporting "approved at `<full-sha>`, ready to merge"; the report lists every optional finding of the PR with its ID, title, and disposition (the reason or the issue); then wait; when the Developer instructs the merge, run `pr merge`; if the base moved, report it and ask. After a successful merge, the PR description is frozen (`pr report` refuses a PR that is not open); report the merge commit, method, integration check, CI run at the merge commit, and cleanup results to the Developer only. `pr merge` removes `<scratch_root>/issue-<N>` subject to §15 safeguards; do not recreate it for a post-merge report. If the approved SHA is no longer the current PR head, do not merge based on that approval; the newer revision must be reviewed.
 9. **Manual-intervention guard [adapted].** On a `STOPPED` prompt, or when `status` reports `stopped`: make no further review-driven changes; do not request another review automatically; preserve the PR, branch, commits, and worktree; report the reason and remaining problems to the Developer; wait for the Developer's decision about whether to continue, change approach, or terminate the work; record a continuation as a `DECISION` before launching again.
 10. **Handoff discipline [adapted].** Herdr messages are the fixed lines of §8; identify code states by PR number and full commit SHA, never by round number; GitHub remains the authoritative source for implementation history, review findings, inline discussion, suggestions, and finding disposition.
 11. **Sandbox [new].** If the harness sandbox blocks the Herdr socket or a write outside the worktree, request escalated permission for that exact command once and report the failure rather than retrying blindly (§13.2).
@@ -1023,6 +1029,7 @@ This section supersedes v0.4.4 §34.
 - After consuming a result or a stop, the Implementer runs `reviewer close`; a Reviewer never outlives its review pass by design.
 - Forced removal of a squad-created review worktree is acceptable because it holds nothing authoritative; the Reviewer's saved probes live in the scratch directory, not in the worktree.
 - The per-PR scratch directory survives across passes and is removed by `pr merge` after a verified merge.
+- `pr merge` also removes `<scratch_root>/issue-<N>` for the issue in the validated implementation-worktree ownership record (§7.10 step 4). Both scratch cleanup steps retain a symlink or a directory containing a registered worktree, report the retained path, and return exit 3. Unrelated issue scratch directories remain untouched.
 - After a verified merge the implementation worktree and branch are removed (§7.10).
 - The tool never runs `git clean`, never removes a worktree it did not create, and never closes a Herdr workspace that holds anything besides the Reviewer it started.
 - Residue is visible through `doctor`; automatic garbage collection of old Herdr or Git resources remains outside scope (v0.4.4 §34.4).
@@ -1055,12 +1062,15 @@ Required coverage:
 - anchor validation (§11.2);
 - the request, result, and stop templates for both harness prefixes;
 - configuration schema 2 validation, defaults, remote-URL derivation for SSH, SSH-alias, and HTTPS remotes, and schema 1 refusal;
+- workflow paths: `issue_scratch` resolves to `<scratch_root>/issue-<N>` when the issue is known, and is `null` otherwise;
 - identity resolution: the right account per `--as`, no token in any output, no `gh auth switch`.
 
 ### 16.2 Integration tests
 
 With the fake forge and the fake Herdr, in temporary repositories:
 
+- per-issue scratch cleanup after a verified merge, using the owned issue number even when it differs from the PR number; symlinks and contained worktrees retained with exit 3; unrelated issue directories preserved;
+- `doctor` passes on an open issue's scratch directory, warns with the path for a closed issue, fails on an unreadable issue, and never removes the directory;
 - nested worktree creation and removal under `.agent-squad/worktrees`, including forced removal and the outer status staying clean;
 - `reviewer launch`, `adopt`, and `close`, including blocked at startup, `agent_not_ready`, prompt failure, `agent_not_found`, a workspace with an extra pane, and an already-exited Reviewer;
 - token selection by role for every mutating command, asserted from the fake forge's call log;
@@ -1086,7 +1096,7 @@ With the fake forge and the fake Herdr, in temporary repositories:
 6. A later push invalidates the approval: `status` shows `launch_review`, not `approved`.
 7. The third review, at the new head, posts `changes_requested`; with `max_review_passes` 3 the scripted Reviewer posts `STOPPED` with `reason=budget` and `handoff stopped`; `reviewer launch` is refused (exit 4).
 8. `decision post` with `budget=4`; `reviewer launch` succeeds; the fourth review approves.
-9. `pr merge` is refused while the base branch has been advanced on the fake remote, then succeeds with `--accept-moved-base`; integration is verified by ancestry with `merge`; a second PR on the same fake repository is then merged with `squash` on a base that has not moved, verifying tree identity; after each merge the issue worktree, branch, review worktrees, and scratch directory are gone.
+9. `pr merge` is refused while the base branch has been advanced on the fake remote, then succeeds with `--accept-moved-base`; integration is verified by ancestry with `merge`; a second PR on the same fake repository is then merged with `squash` on a base that has not moved, verifying tree identity; after each merge the issue worktree, branch, review worktrees, and both per-PR and per-issue scratch directories are gone.
 10. Lost notification: with the fake Herdr set to fail `agent prompt`, a scripted review is posted and `handoff review-result` fails; `status` still reports the current review and the correct next action.
 11. Fallback: with the fake forge set to reject the batch, a review is posted with every finding's full text and then its roots individually; with one blocking root also failing, `status` shows `open_threads`, `thread open` recovers the finding from PR data alone, and the loop continues with one logical review counted; an interrupted `review post` is completed with `--resume` or, when nothing reached the PR, repeated, and is counted once.
 12. Cleanup verification: no tracked runtime files, no registered review worktrees, the temporary root removed, retained resources reported on failure.
