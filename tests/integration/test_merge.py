@@ -420,7 +420,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(forward["to"], result["merge_commit"])
         self.assertEqual(shlex.split(forward["command"]), [
             "git", "-C", str(self.f.repo), "merge", "--ff-only",
-            result["merge_commit"],
+            "--no-overwrite-ignore", result["merge_commit"],
         ])
         self.assertEqual(self.f.git("rev-parse", "HEAD"), before)
 
@@ -490,12 +490,23 @@ class MergeTests(unittest.TestCase):
     def test_untracked_collision_reports_git_refusal_and_preserves_file(
         self,
     ) -> None:
+        self.assert_collision_preserved()
+
+    def test_ignored_collision_reports_git_refusal_and_preserves_file(
+        self,
+    ) -> None:
+        self.assert_collision_preserved(ignored=True)
+
+    def assert_collision_preserved(self, *, ignored: bool = False) -> None:
         f = self.f
         (f.worktree / "new.txt").write_text("incoming\n")
         f.git("add", "new.txt", cwd=f.worktree)
         f.git("commit", "-m", "test: add incoming file", cwd=f.worktree)
         f.git("push", "origin", "issue-1", cwd=f.worktree)
         f.review("approved")
+        if ignored:
+            exclude = f.repo / ".git/info/exclude"
+            exclude.write_text(exclude.read_text() + "\nnew.txt\n")
         (f.repo / "new.txt").write_text("local untracked\n")
         result = self.merge()
         self.assertEqual(result["fast_forward"]["result"], "refused")

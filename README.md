@@ -167,7 +167,8 @@ and tracked files have no staged or unstaged changes. It reports the starting
 and target commits and whether the checkout was fast-forwarded, was already up
 to date, was skipped, or Git refused. Another branch, detached `HEAD`, or tracked
 changes cause a skip; Git protects divergent history and obstructing untracked
-files. A skip or refusal leaves the merge/cleanup exit status unchanged and
+files, including ignored files, through `--no-overwrite-ignore`. A skip or
+refusal leaves the merge/cleanup exit status unchanged and
 includes the reason, with a suggested command only on the base branch. The
 Implementer reports this result and never runs the fallback command itself.
 The command never switches branches, creates a local merge commit, runs

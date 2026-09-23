@@ -328,14 +328,17 @@ def fast_forward_primary(
             )
             return result
         result["command"] = shlex.join([
-            "git", "-C", str(primary), "merge", "--ff-only", verified_tip,
+            "git", "-C", str(primary), "merge", "--ff-only",
+            "--no-overwrite-ignore", verified_tip,
         ])
         if git_output(
             primary, "status", "--porcelain", "--untracked-files=no"
         ):
             result["reason"] = "primary checkout has changes to tracked files"
             return result
-        merged = run_git(primary, "merge", "--ff-only", verified_tip)
+        merged = run_git(
+            primary, "merge", "--ff-only", "--no-overwrite-ignore", verified_tip
+        )
         if merged.returncode:
             result["result"] = "refused"
             result["reason"] = merged.stderr.strip() or merged.stdout.strip()
