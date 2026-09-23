@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,9 +16,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("group", choices=groups)
     args = parser.parse_args()
+    src = str(root / "src")
+    existing = os.environ.get("PYTHONPATH")
     return subprocess.run(
         [sys.executable, "-m", "unittest", *groups[args.group]],
         cwd=root,
+        env={**os.environ, "PYTHONPATH": (
+            src if not existing else src + os.pathsep + existing)},
         shell=False,
     ).returncode
 

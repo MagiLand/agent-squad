@@ -2,6 +2,7 @@
 
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -84,6 +85,12 @@ class CIGroupingTests(unittest.TestCase):
                 )
                 self.assertRegex(block, r"(?m)^    timeout-minutes: [1-9]\d*$")
                 self.assertIn(
+                    "          python-version: '" + (
+                        "3.12" if name == "macos" else "3.11"
+                    ) + "'\n",
+                    block,
+                )
+                self.assertIn(
                     "      - run: python -m pip install 'setuptools>=77' .\n",
                     block,
                 )
@@ -117,11 +124,14 @@ class GroupRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-    def run_group(self, group: str) -> subprocess.CompletedProcess[str]:
+    def run_group(
+        self, group: str, env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(self.root / "scripts/run-test-group"), group],
             # The script must locate its checkout even from another cwd.
             cwd=self.root.parent,
+            env=env,
             text=True, capture_output=True, timeout=15, shell=False,
         )
 
@@ -129,6 +139,41 @@ class GroupRunnerTests(unittest.TestCase):
         result = self.run_group("passing")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Ran 1 test", result.stderr)
+
+    def test_prepends_checkout_src_to_pythonpath(self) -> None:
+        src = self.root / "src"
+        external = self.root / "external"
+        for directory, value in ((src, "checkout"), (external, "external")):
+            directory.mkdir()
+            (directory / "runner_fixture.py").write_text(
+                f"VALUE = {value!r}\n", encoding="utf-8")
+        inherited = os.pathsep.join((str(external), str(self.root / "other")))
+        for existing in (None, "", inherited):
+            with self.subTest(pythonpath=existing):
+                env = dict(os.environ, RUNNER_SENTINEL="preserved")
+                env.pop("PYTHONPATH", None)
+                if existing is not None:
+                    env["PYTHONPATH"] = existing
+                expected = str(src.resolve())
+                if existing:
+                    expected += os.pathsep + existing
+                (self.root / "tests/test_passing.py").write_text(
+                    "import os\n"
+                    "import unittest\n"
+                    "import runner_fixture\n\n"
+                    "class Fixture(unittest.TestCase):\n"
+                    "    def test_source_and_environment(self):\n"
+                    "        self.assertEqual(runner_fixture.VALUE, "
+                    "'checkout')\n"
+                    "        self.assertEqual(os.environ['PYTHONPATH'], "
+                    f"{expected!r})\n"
+                    "        self.assertEqual(os.environ['RUNNER_SENTINEL'], "
+                    "'preserved')\n",
+                    encoding="utf-8",
+                )
+                result = self.run_group("passing", env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Ran 1 test", result.stderr)
 
     def test_propagates_test_failure(self) -> None:
         result = self.run_group("failing")
