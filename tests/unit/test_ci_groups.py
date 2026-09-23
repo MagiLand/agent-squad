@@ -79,7 +79,7 @@ class CIGroupingTests(unittest.TestCase):
                 self.assertEqual(groups, [] if name == "macos" else [name])
                 self.assertIn(
                     "    runs-on: " + (
-                        "macos-latest" if name == "macos" else "ubuntu-latest"
+                        "macos-latest" if name == "macos" else "ubuntu-26.04"
                     ) + "\n",
                     block,
                 )
