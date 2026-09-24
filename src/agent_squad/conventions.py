@@ -11,6 +11,8 @@ from .forge import Comment, Evidence, Snapshot
 from .initialization import AgentSquadError, Configuration, Worktree
 
 TAG = "AGENT_SQUAD/0.5.0"
+MERGE_INSTRUCTION = "Standing merge instruction: merge when approved."
+MERGE_WITHDRAWAL = "Standing merge instruction withdrawn."
 SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 NUMBER = r"[1-9][0-9]*"
 FINDING_ID = rf"REV-{NUMBER}"
@@ -117,11 +119,15 @@ def headings(body: str) -> list[tuple[str, int, int]]:
     fence = None
     for line in body.splitlines(keepends=True):
         text = line.rstrip("\r\n")
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", text)
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", text)
         if marker:
-            if fence is None:
+            if fence is None and not (
+                marker[1][0] == "`" and "`" in marker[2]
+            ):
                 fence = marker[1]
-            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+            elif (fence is not None and marker[1][0] == fence[0]
+                  and len(marker[1]) >= len(fence)
+                  and not marker[2].strip()):
                 fence = None
         elif fence is None and re.fullmatch(r"## [^\r\n]+", text):
             result.append((text[3:], offset, offset + len(line)))
@@ -203,6 +209,64 @@ def replace_section(body: str, name: str, replacement: str) -> str:
     return body[:start] + replacement + "\n\n" + body[end:]
 
 
+def task_from_issue(issue: dict) -> str:
+    """Copy issue wording into one Task section, nesting only ATX headings."""
+    if issue["is_pull_request"]:
+        raise AgentSquadError("Task requires an issue, not a pull request")
+    if issue["state"] != "open":
+        raise AgentSquadError("Task requires an open issue")
+    body = issue["body"].replace("\r\n", "\n").replace("\r", "\n")
+    if not body.strip():
+        raise AgentSquadError("issue body must not be empty")
+    lines = []
+    fence = None
+    for line in body.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})([^\n]*)", line)
+        if fence is not None:
+            if (marker and marker[1][0] == fence[0]
+                    and len(marker[1]) >= len(fence)
+                    and not marker[2].strip()):
+                fence = None
+        elif marker and not (marker[1][0] == "`" and "`" in marker[2]):
+            fence = marker[1]
+        else:
+            heading = re.match(r"^( {0,3})(#{1,6})(?=[ \t\n]|$)", line)
+            if heading:
+                level = min(max(len(heading[2]) + 1, 3), 6)
+                line = heading[1] + "#" * level + line[heading.end():]
+        lines.append(line)
+    title = issue["title"].replace("\r\n", "\n").replace("\r", "\n")
+    task = (
+        f'## Task\n\nThis Task is issue #{issue["number"]}, "{title}", '
+        'copied without rewording.\n\n' + "".join(lines)
+    )
+    validate_section(task, "Task")
+    return task
+
+
+def merge_directive(body: str) -> str | None:
+    """Recognize the exact opening line of decision prose, not its tag."""
+    return {
+        MERGE_INSTRUCTION: "record",
+        MERGE_WITHDRAWAL: "withdraw",
+    }.get(first_line(body))
+
+
+def validate_merge_directive(
+    body: str, finding: str, budget: int | None, task: str | None,
+) -> str | None:
+    directive = merge_directive(body)
+    if directive and (
+        finding != "none" or budget is not None or task is not None
+        or re.search(r"\bbudget=", body)
+    ):
+        raise AgentSquadError(
+            "standing merge decisions must be general decisions without"
+            " a Task amendment or budget="
+        )
+    return directive
+
+
 def review_findings(body: str) -> list[dict[str, str]]:
     content = section_content(body, "Findings")
     if content == "none":
@@ -226,6 +290,7 @@ def validate_review_body(body: str) -> list[dict[str, str]]:
         "Summary",
         "Verified dispositions",
         "Findings",
+        "Merge hold",
         "Standards",
         "Spec",
         "Evidence",
@@ -242,6 +307,8 @@ def validate_review_body(body: str) -> list[dict[str, str]]:
     for name in allowed[:2]:
         if not section_content(body, name):
             raise AgentSquadError(f"## {name} must not be empty")
+    if "Merge hold" in names and not section_content(body, "Merge hold"):
+        raise AgentSquadError("## Merge hold must not be empty")
     return review_findings(body)
 
 
@@ -391,6 +458,10 @@ def derive(
                             )
                         validate_section(task + "\n", "Task")
                     entry["task"] = task
+                    entry["merge_directive"] = validate_merge_directive(
+                        comment.body.partition("\n")[2].lstrip("\r\n"),
+                        entry["finding"], entry.get("budget"), task,
+                    )
                 except AgentSquadError as error:
                     diagnostic("malformed", comment, str(error))
                     continue
@@ -652,10 +723,25 @@ def derive(
         finding.update(thread_state(finding))
 
     latest = reviews[-1] if reviews else None
-    latest_decision = decisions[-1] if decisions else None
+    ordinary_decisions = [d for d in decisions if not d["merge_directive"]]
+    latest_decision = ordinary_decisions[-1] if ordinary_decisions else None
     latest_stop = stops[-1] if stops else None
     amendments = [d for d in decisions if d.get("task")]
     amendment = amendments[-1] if amendments else None
+    directives = [d for d in decisions if d["merge_directive"]]
+    instruction = directives[-1] if directives else None
+    merge_instruction = (
+        {k: instruction[k] for k in ("id", "author", "created_at")}
+        if instruction and instruction["merge_directive"] == "record"
+        and newer(instruction, latest_stop) and newer(instruction, amendment)
+        else None
+    )
+    hold_text = section_content(latest["body"], "Merge hold") if (
+        latest and section(latest["body"], "Merge hold") is not None
+    ) else None
+    merge_hold = (
+        {"review_id": latest["id"], "text": hold_text} if hold_text else None
+    )
     try:
         validate_pr_body(pr.evidence.body)
         task = section(pr.evidence.body, "Task")
@@ -755,6 +841,9 @@ def derive(
         ("merged", pr.merged),
         ("closed", pr.state == "closed"),
         ("address_findings", approved and gates["unaddressed_findings"]),
+        ("merge", approved and merge_instruction is not None
+         and merge_hold is None and not gates["stopped"]
+         and not gates["needs_decision"]),
         ("approved", approved),
         ("stopped", gates["stopped"]),
         (
@@ -778,7 +867,8 @@ def derive(
         "merged": ["PR is merged"],
         "closed": ["PR is closed without a merge"],
         "approved": ["all six approval conditions hold"],
-        "stopped": ["STOPPED is newer than the latest DECISION"],
+        "merge": ["approved with a standing merge instruction and no hold"],
+        "stopped": ["STOPPED is newer than the latest ordinary DECISION"],
         "needs_decision": [
             "a Developer decision or budget extension is required"
         ],
@@ -816,6 +906,8 @@ def derive(
         "task": task,
         "implementation_report": report,
         "effective_task": effective_task,
+        "merge_instruction": merge_instruction,
+        "merge_hold": merge_hold,
         "task_body_stale": task_stale,
         "reviews": reviews,
         "current_review_unacted": (
@@ -829,7 +921,9 @@ def derive(
         ],
         "unaddressed_findings": unaddressed,
         "decisions": decisions,
-        "general_decisions": [d for d in decisions if d["finding"] == "none"],
+        "general_decisions": [
+            d for d in ordinary_decisions if d["finding"] == "none"
+        ],
         "stops": stops,
         "budget": {
             "effective": effective,

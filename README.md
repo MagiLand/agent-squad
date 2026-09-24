@@ -3,7 +3,8 @@
 Agent Squad coordinates an Implementer and an independent Reviewer through
 Herdr. The GitHub pull request carries the Task, reviews, findings, dispositions,
 Developer decisions, and approval. Each review identifies an exact commit and
-runs in a fresh detached worktree. The Developer decides when to merge.
+runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
+for the Developer's review before merging.
 
 The implementation follows the [v0.5.0 specification delta](docs/agent-squad-v0.5.0-spec.md).
 See [workflow verification](docs/workflow-verification.md) for deterministic
@@ -66,20 +67,38 @@ resource information. Never have an agent answer a trust or permission dialog.
 Invoke `$squad-implementer` in Codex or `/squad-implementer` in Claude Code and
 say “Let's start on issue #42” (use your issue number).
 
-1. The Implementer reads the issue and presents the Task for your approval.
-2. After approval, it creates the issue worktree, implements, validates,
-   commits, pushes, and opens a PR with the Task and implementation report.
-3. It launches a fresh Reviewer at the full PR HEAD SHA. The Reviewer uses
-   `code-review` to check repository standards and the approved Task, then
-   publishes its review and inline findings on GitHub.
-4. The Implementer reads the PR, evaluates findings, records dispositions,
-   fixes valid problems, validates, and requests a fresh review. Reviewers
-   verify the dispositions before settling blocking threads.
-5. Decisions and stops come back to you. The Implementer records your answer
-   on the PR before continuing. Optional suggestions do not require changes
-   merely because they were raised.
-6. When the current revision is approved, the Implementer reports its full
-   SHA and waits for your merge instruction.
+1. The Implementer reads the issue, including comments. An open, specified
+   issue with acceptance criteria and no blocking triage labels becomes the
+   Task unchanged, unless your start instruction changes scope or requests a
+   Task. Otherwise it drafts a Task and asks for approval once. It asks about
+   unresolved questions only when the answer would change the result.
+2. It creates the issue worktree, implements, validates, commits, pushes, and
+   opens a PR with the copied issue (or approved drafted Task) and report.
+   Unless you said “don't merge”, kept the merge, or a hold applies, it records
+   your start instruction as a standing instruction to merge when approved.
+3. A fresh Reviewer checks the full PR HEAD SHA against repository standards
+   and the effective Task, then publishes its review and inline findings.
+4. The Implementer evaluates findings, records dispositions, fixes valid
+   problems, validates, and requests a fresh review. Optional suggestions
+   remain advisory; each receives a disposition.
+5. Decisions and stops come back to you and your answer is recorded on the PR.
+   The Implementer and Reviewer apply the
+   [review-before-merge rule](docs/agent-squad-v0.5.0-spec.md#122-squad-implementer-mandatory-rules)
+   to the whole PR: security, irreversible changes, authority changes, new
+   dependencies or CI authority, publication or incompatible interfaces, and
+   unresolved scope or design choices require your review before merging.
+   The Reviewer records a `## Merge hold` with the applicable item and reason.
+6. With approval and a standing instruction, the Implementer checks CI for
+   that exact head, merges, waits for configured base-push CI, and reports the
+   result, cleanup, and optional dispositions. You review routine work after
+   merge. A hold or absence of an instruction makes it report approval and
+   wait for you. Only your merge instruction after seeing a hold releases it.
+
+You can withdraw a standing instruction by telling the Implementer not to
+merge. A stop or Task amendment cancels it; after your continuation or
+amendment is recorded, it is recorded again unless you said otherwise or a
+hold applies. Neither standing instruction nor withdrawal lifts a stop or
+answers a pending human decision.
 
 A successful Herdr handoff ends the sending agent's step. It becomes idle;
 there is no polling of the receiving agent. The Reviewer posts on GitHub
@@ -97,7 +116,8 @@ agent-squad status --pr 43 --json
 ```
 
 `status` reports the next action, reasons, full review target, effective Task,
-reviews, findings and replies, decisions, stops, budget, approval, paths, and
+reviews, findings and replies, decisions, stops, budget, approval,
+`merge_instruction`, `merge_hold`, paths, and
 diagnostics. Without `--json`, it prints the next action and reasons first,
 followed by the same detailed state.
 
@@ -114,8 +134,9 @@ define the exact grammar. In summary:
   `DISPOSITION rejected`, or `DISPOSITION needs-human`; the Reviewer records
   verification. Resolving a GitHub thread alone does not settle its finding.
 - `DECISION` records human choices, Task amendments, or review-budget
-  extensions. `STOPPED` halts automatic review until a later authorized
-  decision. A new commit or Task amendment invalidates the earlier approval.
+  extensions, plus standing merge instructions and withdrawals. `STOPPED`
+  halts automatic review until a later authorized continuation; standing merge
+  instructions and withdrawals cannot provide that continuation. A new commit or Task amendment invalidates the earlier approval.
 
 Forge writes require `--as implementer` or `--as reviewer`, subject to the
 command's role. Tokens are selected only for the child process; the CLI does
@@ -144,8 +165,8 @@ for the required arguments; repeating plain `review post` creates a new review.
 
 ## Merge and cleanup
 
-After your explicit instruction, the Implementer runs this from the primary
-checkout, using the actual approved PR number:
+Under your standing instruction or a later merge instruction, the Implementer
+checks CI at the approved head and runs this from the primary checkout:
 
 ```bash
 agent-squad pr merge --as implementer --pr 43
@@ -153,8 +174,12 @@ agent-squad pr merge --as implementer --pr 43
 
 The command verifies current approval, guards the merge with the full head,
 and uses the configured `merge` or `squash` method. If the base branch moved,
-it refuses until you choose a fresh review or explicitly accept the moved
-base. Only for the latter choice does the Implementer add `--accept-moved-base`.
+it refuses. Under a standing instruction, the Implementer merges the base
+into the PR branch, validates, pushes, and has the new head reviewed. It asks
+you when budget is exhausted or resolving a conflict needs a choice outside
+the Task. Only your explicit acceptance permits `--accept-moved-base`.
+A latest-review hold also refuses merge; only your instruction after seeing
+that hold permits `--accept-merge-hold`. Neither flag relaxes other checks.
 Merge commits are checked by ancestry; a squash on an unmoved base is checked
 by tree identity. Squash after accepting a moved base cannot use that tree
 check and retains resources when integration cannot be verified.

@@ -155,6 +155,21 @@ class SkillTests(unittest.TestCase):
                         break
                 self.assertTrue(block)
                 self.assertIn(b"".join(block), packaged_skill(name))
+        hold_sections = spec.split(b"   **Review before merge [verbatim]:**")
+        self.assertEqual(len(hold_sections), 3)
+        blocks = []
+        for part, name in zip(hold_sections[1:], SKILL_NAMES):
+            lines = part.splitlines(keepends=True)
+            block = []
+            for line in lines:
+                if line.lstrip().startswith(b">"):
+                    block.append(line)
+                elif block:
+                    break
+            self.assertTrue(block)
+            blocks.append(b"".join(block))
+            self.assertIn(blocks[-1], packaged_skill(name))
+        self.assertEqual(blocks[0], blocks[1])
         for name in SKILL_NAMES:
             self.assertTrue(packaged_skill(name).startswith(
                 f"---\nname: {name}\ndescription: ".encode()

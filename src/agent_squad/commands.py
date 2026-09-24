@@ -20,6 +20,8 @@ from .conventions import (
     replace_section,
     review_findings,
     section,
+    task_from_issue,
+    validate_merge_directive,
     validate_pr_body,
     validate_review_body,
     validate_section,
@@ -166,11 +168,14 @@ def create_pr(
     repository: Repository,
     forge: GitHub,
     issue: int,
-    task: str,
+    task: str | None,
     report: str,
     title: str | None,
 ) -> dict:
-    task = validate_section(task, "Task")
+    issue_record = forge.issue(issue)
+    task = validate_section(
+        task if task is not None else task_from_issue(issue_record), "Task"
+    )
     report = validate_section(report, "Implementation report")
     body = f"{task}\n\n{report}\n\nCloses #{issue}\n"
     validate_pr_body(body)
@@ -189,7 +194,6 @@ def create_pr(
         raise GateError("branch HEAD has not been pushed to origin")
     if forge.branch_prs(branch):
         raise AgentSquadError("a PR already exists for this branch")
-    issue_record = forge.issue(issue)
     from .merging import implementation_identity, record_implementation
 
     metadata, identity = implementation_identity(repository, issue, branch)
@@ -598,6 +602,7 @@ def post_decision(
             raise AgentSquadError("Task amendment requires --finding none")
     if section(body, "Task") is not None:
         raise AgentSquadError("supply a Task amendment through --task")
+    validate_merge_directive(body.strip(), finding, budget, task)
     snapshot = forge.snapshot(number)
     state = state_for(repository, snapshot)
     if finding != "none":

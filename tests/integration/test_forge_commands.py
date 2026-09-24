@@ -9,6 +9,7 @@ from unittest.mock import patch
 from tests.forge_support import ForgeFixture, TASK, REPORT, finding
 from agent_squad.forge import ForgeError, GitHub, PullRequest, Review
 from agent_squad.initialization import load_initialized_repository
+from agent_squad.conventions import MERGE_INSTRUCTION, MERGE_WITHDRAWAL
 
 
 class ForgeCommandTests(unittest.TestCase):
@@ -18,6 +19,62 @@ class ForgeCommandTests(unittest.TestCase):
         self.f.initialize()
         self.head = self.f.candidate()
         self.f.create_pr()
+
+    def test_automatic_task_and_issue_refusals(self) -> None:
+        f = ForgeFixture()
+        self.addCleanup(f.close)
+        f.initialize()
+        f.candidate()
+        model = f.read_model()
+        original = dict(model["issues"]["1"])
+        for fields, message in (
+            ({"state": "closed"}, "open issue"),
+            ({"pull_request": {"url": "https://example.org/pr/1"}},
+             "not a pull request"),
+            ({"body": " \n"}, "must not be empty"),
+        ):
+            with self.subTest(fields=fields):
+                model["issues"]["1"] = original | fields
+                f.save_model(model)
+                refused = f.cli(
+                    "pr", "create", "--as", "implementer", "--issue", "1",
+                    "--report", f.report, expected=1)
+                self.assertIn(message, refused["error"])
+                self.assertEqual(f.read_model()["prs"], {})
+        model["issues"]["1"] = original | {
+            "body": "# Objective\r\nBuild exactly this.\r\n"
+                    "## Acceptance\r\nKeep wording.\r\n"
+        }
+        f.save_model(model)
+        f.create_pr(issue_task=True)
+        state = f.status()
+        self.assertEqual(state["task"], (
+            '## Task\n\nThis Task is issue #1, "' + original["title"] +
+            '", copied without rewording.\n\n### Objective\n'
+            'Build exactly this.\n### Acceptance\nKeep wording.'
+        ))
+        self.assertIsNone(state["merge_instruction"])
+        self.assertIsNone(state["merge_hold"])
+
+    def test_standing_decision_round_trip_and_combination_refusals(
+        self,
+    ) -> None:
+        f = self.f
+        f.review("approved")
+        recorded = f.decision(body=MERGE_INSTRUCTION + '\n\n> Start #1.')
+        state = f.status()
+        self.assertEqual(state["next_action"], "merge")
+        self.assertEqual(state["merge_instruction"]["id"],
+                         recorded["decision"]["id"])
+        f.decision(body=MERGE_WITHDRAWAL)
+        self.assertEqual(f.status()["next_action"], "approved")
+        for directive in (MERGE_INSTRUCTION, MERGE_WITHDRAWAL):
+            for kwargs in ({"budget": 4}, {"task": TASK}, {"fid": "REV-1"}):
+                with self.subTest(directive=directive, kwargs=kwargs):
+                    before = f.read_model()["prs"]
+                    refused = f.decision(body=directive, expected=1, **kwargs)
+                    self.assertIn("standing merge decisions", refused["error"])
+                    self.assertEqual(f.read_model()["prs"], before)
 
     def test_optional_rejection_validates_reason_and_open_followup_issue(
         self,

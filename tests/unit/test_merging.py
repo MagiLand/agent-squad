@@ -23,6 +23,23 @@ class MergeRulesTests(unittest.TestCase):
             "unaddressed_findings": [],
         }
 
+    def test_hold_acceptance_preserves_approval_and_moved_base_gates(
+        self,
+    ) -> None:
+        self.state["merge_hold"] = {"review_id": 42, "text": "Item 3: rules"}
+        with self.assertRaisesRegex(GateError, "review 42"):
+            check_merge_gate(self.state, accept_moved_base=False)
+        self.assertFalse(check_merge_gate(
+            self.state, accept_moved_base=False, accept_merge_hold=True))
+        self.state["target"]["base_tip"] = H
+        with self.assertRaisesRegex(GateError, "base branch moved"):
+            check_merge_gate(self.state, accept_moved_base=False,
+                             accept_merge_hold=True)
+        self.state["approval"]["reasons"] = ["approval is stale"]
+        with self.assertRaisesRegex(GateError, "approval is stale"):
+            check_merge_gate(self.state, accept_moved_base=True,
+                             accept_merge_hold=True)
+
     def test_moved_base_is_the_approving_base_not_the_recomputed_merge_base(
         self,
     ) -> None:

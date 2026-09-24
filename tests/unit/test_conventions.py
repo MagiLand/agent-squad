@@ -9,6 +9,8 @@ from tests._support import add_src_to_path
 add_src_to_path()
 
 from agent_squad.conventions import (
+    MERGE_INSTRUCTION,
+    MERGE_WITHDRAWAL,
     allocate_id,
     derive,
     parse_line,
@@ -16,7 +18,9 @@ from agent_squad.conventions import (
     replace_section,
     review_findings,
     section,
+    task_from_issue,
     validate_pr_body,
+    validate_review_body,
     validate_section,
 )
 from agent_squad.forge import (
@@ -197,6 +201,183 @@ def derive_state(
         lambda a, b: a == b or a == A or (a == H and b == J),
         base_tip=A,
     )
+
+
+class IssueTaskTests(unittest.TestCase):
+    def issue(self, body: str, **overrides) -> dict:
+        return dict(number=74, title="Keep exact wording", body=body,
+                    state="open", is_pull_request=False) | overrides
+
+    def test_heading_levels_and_line_endings_preserve_other_wording(
+        self,
+    ) -> None:
+        body = "\r\n".join("#" * n + f" Heading {n}" for n in range(1, 7))
+        task = task_from_issue(self.issue(body + "\r\nPlain text.\r\n"))
+        expected = (
+            '## Task\n\nThis Task is issue #74, "Keep exact wording", '
+            'copied without rewording.\n\n'
+            '### Heading 1\n### Heading 2\n#### Heading 3\n'
+            '##### Heading 4\n###### Heading 5\n###### Heading 6\n'
+            'Plain text.\n'
+        )
+        self.assertEqual(task, expected)
+        self.assertEqual(validate_section(task, "Task"), task.strip())
+
+    def test_fenced_headings_and_non_headings_are_copied_exactly(self) -> None:
+        for marker in ("```", "~~~", "````", "~~~~"):
+            with self.subTest(marker=marker):
+                body = (
+                    f"{marker}markdown\n# Literal\n## Literal\n"
+                    f"{marker} not a closing fence\n## Still literal\n"
+                    f"{marker}\n  ## Nested\n#\n#not-heading\n"
+                    "####### not-heading\n    ## indented code\n"
+                )
+                task = task_from_issue(self.issue(body))
+                self.assertTrue(task.endswith(body.replace(
+                    "  ## Nested\n#\n", "  ### Nested\n###\n"
+                )))
+                validate_section(task, "Task")
+
+    def test_closed_pull_request_and_empty_body_are_refused(self) -> None:
+        for overrides, message in (
+            ({"state": "closed"}, "open issue"),
+            ({"is_pull_request": True}, "not a pull request"),
+            ({"body": " \r\n"}, "must not be empty"),
+        ):
+            with self.subTest(overrides=overrides):
+                issue = self.issue("Requirements") | overrides
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    task_from_issue(issue)
+
+
+class StandingMergeTests(unittest.TestCase):
+    def test_record_withdraw_and_record_again(self) -> None:
+        recorded = decision(2, body=MERGE_INSTRUCTION + '\n\n> Start #1.')
+        withdrawn = decision(11, body=MERGE_WITHDRAWAL)
+        for conversation, expected in (
+            ((), "approved"),
+            ((recorded,), "merge"),
+            ((recorded, withdrawn), "approved"),
+            ((recorded, withdrawn, decision(12, body=MERGE_INSTRUCTION)),
+             "merge"),
+        ):
+            with self.subTest(expected=expected, count=len(conversation)):
+                state = derive_state(snapshot(
+                    reviews=(review(10),), conversation=conversation))
+                self.assertEqual(state["next_action"], expected)
+                self.assertEqual(state["general_decisions"], [])
+                if expected == "merge":
+                    self.assertEqual(state["merge_instruction"], {
+                        "id": conversation[-1].id, "author": "dev",
+                        "created_at": conversation[-1].created_at,
+                    })
+                else:
+                    self.assertIsNone(state["merge_instruction"])
+
+    def test_stop_and_amendment_cancel_until_recorded_again(self) -> None:
+        stop = evidence(12, render_line("stop", head=H, reason="design"))
+        amendment = decision(12, body="Amend.\n\n## Task\n\nNew task.")
+        for event in (stop, amendment):
+            with self.subTest(event=event.body):
+                conversation = (decision(2, body=MERGE_INSTRUCTION), event,
+                                decision(13, body="Continue as decided."))
+                state = derive_state(snapshot(
+                    reviews=(review(10), review(14)),
+                    conversation=conversation))
+                self.assertIsNone(state["merge_instruction"])
+                self.assertEqual(state["next_action"], "approved")
+                state = derive_state(snapshot(
+                    reviews=(review(10), review(14)),
+                    conversation=(*conversation,
+                                  decision(15, body=MERGE_INSTRUCTION))))
+                self.assertEqual(state["next_action"], "merge")
+
+    def test_neither_directive_lifts_stop_or_resolves_human_decision(
+        self,
+    ) -> None:
+        for directive in (MERGE_INSTRUCTION, MERGE_WITHDRAWAL):
+            with self.subTest(directive=directive):
+                stopped = derive_state(snapshot(
+                    reviews=(review(10),), conversation=(
+                        evidence(11, render_line(
+                            "stop", head=H, reason="judgement")),
+                        decision(12, body=directive))))
+                self.assertTrue(stopped["gates"]["stopped"])
+                self.assertEqual(stopped["next_action"], "stopped")
+                needs = derive_state(snapshot(
+                    reviews=(review(10, "needs_human"),),
+                    conversation=(decision(12, body=directive),)))
+                self.assertTrue(needs["gates"]["needs_decision"])
+                self.assertEqual(needs["next_action"], "needs_decision")
+                thread = derive_state(snapshot(
+                    reviews=(review(10, findings="REV-1 [optional] Finding"),),
+                    comments=(root(severity="optional"), reply(
+                        12, "DISPOSITION needs-human\nChoose.")),
+                    conversation=(decision(13, body=directive),)))
+                self.assertTrue(thread["gates"]["needs_decision"])
+                self.assertNotEqual(thread["next_action"], "merge")
+
+    def test_unauthorized_and_combined_decisions_have_no_effect(self) -> None:
+        for directive in (MERGE_INSTRUCTION, MERGE_WITHDRAWAL):
+            for kwargs in (
+                {"author": "stranger"}, {"budget": 9},
+                {"body": directive + "\n\n## Task\n\nSneaky task."},
+                {"body": directive + "\nbudget=9"},
+                {"finding": "REV-1"},
+            ):
+                with self.subTest(directive=directive, kwargs=kwargs):
+                    invalid = decision(11, **({"body": directive} | kwargs))
+                    state = derive_state(snapshot(
+                        reviews=(review(10),), conversation=(invalid,)))
+                    self.assertEqual(state["next_action"], "approved")
+                    self.assertIsNone(state["merge_instruction"])
+                    self.assertEqual(state["decisions"], [])
+                    self.assertEqual(state["budget"]["effective"], 3)
+                    self.assertEqual(state["effective_task"], TASK.strip())
+                    self.assertIn(state["diagnostics"][0]["kind"],
+                                  ("malformed", "unauthorized"))
+
+    def test_developer_can_record_and_only_latest_review_hold_applies(
+        self,
+    ) -> None:
+        held = review(10)
+        held = replace(held, evidence=replace(
+            held.evidence, body=held.evidence.body +
+            "\n## Merge hold\n\nItem 3: changes merge authority.\n"))
+        instruction = decision(2, body=MERGE_INSTRUCTION, author="human")
+        state = derive_state(snapshot(
+            reviews=(held,), conversation=(instruction,)))
+        self.assertEqual(state["next_action"], "approved")
+        self.assertTrue(state["approval"]["approved"])
+        self.assertEqual(state["merge_hold"], {
+            "review_id": 10, "text": "Item 3: changes merge authority."})
+        state = derive_state(snapshot(
+            reviews=(held, review(11)), conversation=(instruction,)))
+        self.assertEqual(state["next_action"], "merge")
+        self.assertIsNone(state["merge_hold"])
+
+    def test_optional_dispositions_come_before_merge(self) -> None:
+        state = derive_state(snapshot(
+            reviews=(review(10, findings="REV-1 [optional] Finding"),),
+            comments=(root(severity="optional"),),
+            conversation=(decision(2, body=MERGE_INSTRUCTION),)))
+        self.assertEqual(state["next_action"], "address_findings")
+        self.assertTrue(state["approval"]["approved"])
+
+    def test_merge_hold_section_requires_content_and_correct_position(
+        self,
+    ) -> None:
+        hold = "## Merge hold\n\nTask: Developer review required.\n\n"
+        self.assertEqual(validate_review_body(REVIEW + "\n" + hold), [])
+        for body in (
+            hold + REVIEW,
+            REVIEW.replace("## Findings", hold + "## Findings"),
+            REVIEW + "\n## Merge hold\n\n",
+            REVIEW + "\n## Evidence\n\nProof.\n\n" + hold,
+        ):
+            with self.subTest(body=body):
+                with self.assertRaises(AgentSquadError):
+                    validate_review_body(body)
 
 
 class GrammarTests(unittest.TestCase):

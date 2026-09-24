@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
+from agent_squad.conventions import MERGE_INSTRUCTION
 from agent_squad.forge import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
@@ -29,6 +30,27 @@ class MergeTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
         self.f.review("approved")
+
+    def test_hold_names_review_and_requires_explicit_acceptance(self) -> None:
+        f = self.f
+        body = Path(f.review_body)
+        body.write_text(body.read_text() +
+                        "\n## Merge hold\n\nItem 3: merge rules.\n")
+        f.review("approved")
+        f.decision(body=MERGE_INSTRUCTION)
+        state = f.status()
+        hold = state["merge_hold"]
+        self.assertEqual(hold["text"], "Item 3: merge rules.")
+        self.assertEqual(state["next_action"], "approved")
+        for options in ((), ("--accept-moved-base",)):
+            refused = self.merge(*options, expected=4)
+            self.assertIn(f'merge hold in review {hold["review_id"]}',
+                          refused["error"])
+            self.assertTrue(f.worktree.exists())
+            self.assertFalse(f.read_model()["prs"]["1"]["merged"])
+        merged = self.merge("--accept-merge-hold")
+        self.assertTrue(merged["merged"])
+        self.assertEqual(merged["integration"], "verified by ancestry")
 
     def merge(
         self, *options: str, expected: int = 0, cwd: Path | None = None

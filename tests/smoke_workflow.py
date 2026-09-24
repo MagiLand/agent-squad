@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 from tests.forge_support import ForgeFixture, finding
+from agent_squad.conventions import MERGE_INSTRUCTION
 
 
 def run_smoke() -> dict:
@@ -363,6 +364,34 @@ def run_smoke() -> dict:
         commands.extend(f.history)
         steps.append({"step": 11,
                       "result": "fallback and resume preserved reviews"})
+    for held in (False, True):
+        with ForgeFixture() as f:
+            roots.append(f.root)
+            f.initialize()
+            f.candidate()
+            f.create_pr(issue_task=True)
+            f.decision(body=MERGE_INSTRUCTION + '\n\n> Start issue #1.')
+            if held:
+                body = Path(f.review_body)
+                body.write_text(body.read_text() +
+                                "\n## Merge hold\n\nItem 3: merge rules.\n")
+            f.review("approved")
+            state = f.status()
+            assert state["next_action"] == ("approved" if held else "merge")
+            assert state["merge_instruction"] is not None
+            options = []
+            if held:
+                refused = f.cli(
+                    "pr", "merge", "--as", "implementer", "--pr", "1",
+                    cwd=f.repo, expected=4)
+                review_id = state["merge_hold"]["review_id"]
+                assert f"merge hold in review {review_id}" in refused["error"]
+                options = ["--accept-merge-hold"]
+            result = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                           *options, cwd=f.repo)
+            assert result["integration"] == "verified by ancestry"
+            assert_merge_cleanup(f, 1, "issue-1", issue=1)
+            commands.extend(f.history)
     assert all(not root.exists() for root in roots)
     steps.append({"step": 12, "result": "all temporary roots removed"})
     return {

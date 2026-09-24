@@ -82,13 +82,14 @@ def parser() -> argparse.ArgumentParser:
     for name in ("head", "reviews"):
         common(pr[name])
     common(pr["create"], role="implementer", number="issue", mutation=True)
-    for name in ("task", "report"):
-        pr["create"].add_argument("--" + name, required=True)
+    pr["create"].add_argument("--task")
+    pr["create"].add_argument("--report", required=True)
     pr["create"].add_argument("--title")
     common(pr["report"], role="implementer", mutation=True)
     pr["report"].add_argument("--report", required=True)
     common(pr["merge"], role="implementer", mutation=True)
     pr["merge"].add_argument("--accept-moved-base", action="store_true")
+    pr["merge"].add_argument("--accept-merge-hold", action="store_true")
     review = command("review", ("post",))["post"]
     common(review, role="reviewer", mutation=True)
     for name in ("head", "base", "verdict", "body", "threads"):
@@ -196,7 +197,7 @@ def execute(args: argparse.Namespace) -> dict:
             repository,
             forge,
             args.issue,
-            commands.read_file(args.task),
+            commands.read_file(args.task) if args.task else None,
             commands.read_file(args.report),
             args.title,
         )
@@ -210,6 +211,7 @@ def execute(args: argparse.Namespace) -> dict:
         return merge_pr(
             repository, forge, args.pr,
             accept_moved_base=args.accept_moved_base,
+            accept_merge_hold=args.accept_merge_hold,
         )
     if key == ("review", "post"):
         return commands.post_review(
