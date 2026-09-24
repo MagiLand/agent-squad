@@ -160,9 +160,22 @@ by tree identity. Squash after accepting a moved base cannot use that tree
 check and retains resources when integration cannot be verified.
 
 After verified integration, the command removes only its owned implementation
-branch/worktree, Reviewer resources, and per-PR scratch directory. It reports
-any retained resources and a suggested fast-forward command for the primary
-checkout. It never runs `git clean` or removes an unrelated worktree.
+branch/worktree, Reviewer resources, and per-PR and per-issue scratch
+directories. After cleanup, even if some resources were retained, it
+fast-forwards the primary checkout to the exact verified base commit when the
+PR targets the configured base branch, that branch is checked out, and tracked
+files have no staged or unstaged changes. It reports the starting and target
+commits and whether the checkout was fast-forwarded, was already up to date,
+was skipped, or Git refused. Another PR base branch, another checked-out
+branch, detached `HEAD`, or tracked changes cause a skip. Git refuses
+divergent history (`--ff-only`) and untracked files the update would
+overwrite; `--no-overwrite-ignore` extends that protection to ignored files.
+A skip or refusal leaves the merge/cleanup exit status unchanged and includes
+the reason. A fallback command is supplied only when both the PR and checkout
+use the configured base branch. The Implementer reports the result and never
+runs the fallback command itself.
+The command never switches branches, creates a local merge commit, runs
+`git clean`, or removes an unrelated worktree.
 
 ## Verify this project
 

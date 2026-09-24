@@ -206,11 +206,13 @@ the moved base; use `--accept-moved-base` only for that explicit choice.
 Report visible human-approval or check requirements and any forge refusal.
 After successful merge, the PR description is frozen: `pr report` refuses a
 PR that is not open. Report the merge commit, method, integration check, CI run
-at the merge commit, and each cleanup result to the Developer only.
+at the merge commit, each cleanup result, and the fast-forward result to the
+Developer only.
 `pr merge` removes `<scratch_root>/issue-<N>` after a verified merge, subject
 to its cleanup safeguards; do not recreate it for a post-merge report.
-Print the CLI's suggested fast-forward command for
-the Developer; do not change the base checkout. A failed integration check
+When the CLI did not fast-forward, give the Developer its reason and any
+command it printed. Never run the fast-forward, or any other command that
+changes the base checkout, yourself. A failed integration check
 retains resources; exit 3 means cleanup is incomplete and must be reported.
 Squash after accepting a moved base is not verifiable by tree identity.
 
