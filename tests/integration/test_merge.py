@@ -13,7 +13,7 @@ from tests.forge_support import ForgeFixture
 from agent_squad.forge import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
-    load_initialized_repository,
+    load_initialized_repository, run_git,
 )
 from agent_squad.merging import (
     cleanup_merge, fast_forward_primary, merge_pr,
@@ -557,6 +557,188 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(result["fast_forward"]["to"], result["merge_commit"])
         self.assertEqual(f.git("rev-parse", "HEAD"), result["merge_commit"])
         self.assertEqual(f.git("rev-parse", "origin/main"), f.base)
+
+    def test_fast_forward_follows_cleanup_to_the_verified_tip(self) -> None:
+        f = self.f
+        forge_merge = GitHub.merge
+        tips: list[str] = []
+        heads: list[str] = []
+
+        def merge_then_advance_base(forge, *args):
+            merged = forge_merge(forge, *args)
+            tips.append(self.advance_base())
+            return merged
+
+        def record_head(*args):
+            heads.append(f.git("rev-parse", "HEAD"))
+            return cleanup_merge(*args)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch.object(GitHub, "merge", merge_then_advance_base):
+                with patch("agent_squad.merging.cleanup_merge",
+                           side_effect=record_head):
+                    result = merge_pr(
+                        repository, GitHub(repository, "implementer"), 1
+                    )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(heads, [f.base])
+        self.assertNotEqual(tips[0], result["merge_commit"])
+        self.assertEqual(result["fast_forward"]["to"], tips[0])
+        self.assertEqual(f.git("rev-parse", "HEAD"), tips[0])
+
+    def test_retargeted_pr_does_not_update_its_checked_out_base(self) -> None:
+        self.assert_retargeted_base_skips("release")
+
+    def test_retargeted_pr_does_not_update_the_configured_base(self) -> None:
+        self.assert_retargeted_base_skips("main")
+
+    def assert_retargeted_base_skips(self, checkout: str) -> None:
+        f = self.f
+        f.git("branch", "release", f.base)
+        f.git("push", "origin", "release")
+        f.git("checkout", checkout)
+        model = f.read_model()
+        model["prs"]["1"]["base"] = {"ref": "release", "sha": f.base}
+        f.save_model(model)
+        result = self.merge()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["fast_forward"], {
+            "result": "skipped", "from": f.base,
+            "to": result["merge_commit"],
+            "reason": "PR base branch release differs from "
+                      "configured base branch main",
+            "command": None,
+        })
+        self.assertEqual(f.git("symbolic-ref", "HEAD"),
+                         f"refs/heads/{checkout}")
+        self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+        self.assertEqual(f.git("rev-parse", "main"), f.base)
+        self.assertEqual(f.git("rev-parse", "release"), f.base)
+        self.assertEqual(f.git("status", "--porcelain"), "")
+
+    def test_merge_timeout_after_update_reports_fast_forwarded(self) -> None:
+        f = self.f
+
+        def timeout_after_merge(root, *arguments):
+            completed = run_git(root, *arguments)
+            if arguments[:1] == ("merge",):
+                raise AgentSquadError("git merge timed out after update")
+            return completed
+
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch("agent_squad.merging.run_git",
+                       side_effect=timeout_after_merge):
+                result = merge_pr(
+                    repository, GitHub(repository, "implementer"), 1
+                )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["fast_forward"], {
+            "result": "fast-forwarded", "from": f.base,
+            "to": result["merge_commit"], "command": None,
+            "reason": "git merge timed out after update",
+        })
+        self.assert_removed()
+
+    def test_merge_timeout_before_update_reports_refused(self) -> None:
+        f = self.f
+
+        def timeout_before_merge(root, *arguments):
+            if arguments[:1] == ("merge",):
+                raise AgentSquadError("git merge timed out before update")
+            return run_git(root, *arguments)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch("agent_squad.merging.run_git",
+                       side_effect=timeout_before_merge):
+                result = merge_pr(
+                    repository, GitHub(repository, "implementer"), 1
+                )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["fast_forward"]["result"], "refused")
+        self.assertEqual(result["fast_forward"]["reason"],
+                         "git merge timed out before update")
+        self.assert_fallback(result, f.base)
+
+    def test_post_merge_head_failure_recovers_completed_fast_forward(
+        self,
+    ) -> None:
+        f = self.f
+        head_reads = 0
+
+        def fail_head_once(root, *arguments):
+            nonlocal head_reads
+            if arguments == ("rev-parse", "HEAD"):
+                head_reads += 1
+                if head_reads == 2:
+                    raise AgentSquadError("cannot read HEAD after merge")
+            return git_output(root, *arguments)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch("agent_squad.merging.git_output",
+                       side_effect=fail_head_once):
+                result = merge_pr(
+                    repository, GitHub(repository, "implementer"), 1
+                )
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(head_reads, 3)
+        self.assertEqual(result["fast_forward"], {
+            "result": "fast-forwarded", "from": f.base,
+            "to": result["merge_commit"], "command": None,
+            "reason": "cannot read HEAD after merge",
+        })
+        self.assert_removed()
+
+    def test_interrupted_merge_with_unreadable_head_reports_refused(
+        self,
+    ) -> None:
+        f = self.f
+        attempted = False
+
+        def interrupt(root, *arguments):
+            nonlocal attempted
+            if arguments[:1] == ("merge",):
+                attempted = True
+                raise AgentSquadError("git merge interrupted")
+            return run_git(root, *arguments)
+
+        def fail_recovery_read(root, *arguments):
+            if attempted and arguments == ("rev-parse", "HEAD"):
+                raise AgentSquadError("cannot read HEAD during recovery")
+            return git_output(root, *arguments)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            with patch("agent_squad.merging.run_git", side_effect=interrupt):
+                with patch("agent_squad.merging.git_output",
+                           side_effect=fail_recovery_read):
+                    result = fast_forward_primary(f.repo, "main", self.head)
+        self.assertEqual(result["result"], "refused")
+        self.assertEqual(result["reason"], "git merge interrupted")
+        self.assertEqual(result["from"], f.base)
+        self.assertEqual(result["to"], self.head)
+        self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+        self.assertEqual(shlex.split(result["command"])[-1], self.head)
+
+    def test_interrupted_already_current_merge_reports_up_to_date(
+        self,
+    ) -> None:
+        f = self.f
+
+        def interrupt(root, *arguments):
+            if arguments[:1] == ("merge",):
+                raise AgentSquadError("git merge interrupted")
+            return run_git(root, *arguments)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            with patch("agent_squad.merging.run_git", side_effect=interrupt):
+                result = fast_forward_primary(f.repo, "main", f.base)
+        self.assertEqual(result, {
+            "result": "up to date", "from": f.base, "to": f.base,
+            "reason": "git merge interrupted", "command": None,
+        })
 
     def test_cleanup_inventory_error_still_attempts_fast_forward(self) -> None:
         f = self.f

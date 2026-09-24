@@ -307,6 +307,7 @@ def cleanup_merge(
 
 def fast_forward_primary(
     primary: Path, base_branch: str, verified_tip: str,
+    *, verified_branch: str | None = None,
 ) -> FastForwardResult:
     """Advance only a clean, checked-out base to the verified commit."""
     result: FastForwardResult = {
@@ -315,6 +316,12 @@ def fast_forward_primary(
     }
     try:
         result["from"] = git_output(primary, "rev-parse", "HEAD")
+        if verified_branch is not None and verified_branch != base_branch:
+            result["reason"] = (
+                f"PR base branch {verified_branch} differs from "
+                f"configured base branch {base_branch}"
+            )
+            return result
         branch = run_git(primary, "symbolic-ref", "--quiet", "HEAD")
         if branch.returncode == 1:
             result["reason"] = "primary checkout has a detached HEAD"
@@ -327,20 +334,19 @@ def fast_forward_primary(
                 f"not refs/heads/{base_branch}"
             )
             return result
-        result["command"] = shlex.join([
-            "git", "-C", str(primary), "merge", "--ff-only",
-            "--no-overwrite-ignore", verified_tip,
-        ])
+        arguments = (
+            "merge", "--ff-only", "--no-overwrite-ignore", verified_tip,
+        )
+        result["command"] = shlex.join(["git", "-C", str(primary), *arguments])
         if git_output(
             primary, "status", "--porcelain", "--untracked-files=no"
         ):
             result["reason"] = "primary checkout has changes to tracked files"
             return result
-        merged = run_git(
-            primary, "merge", "--ff-only", "--no-overwrite-ignore", verified_tip
-        )
+        # Once attempted, an interrupted merge must never be called skipped.
+        result["result"] = "refused"
+        merged = run_git(primary, *arguments)
         if merged.returncode:
-            result["result"] = "refused"
             result["reason"] = merged.stderr.strip() or merged.stdout.strip()
             return result
         result["result"] = (
@@ -351,6 +357,17 @@ def fast_forward_primary(
     except (AgentSquadError, OSError, ValueError) as error:
         # This best-effort step never changes the merge/cleanup exit status.
         result["reason"] = str(error)
+        if result["result"] == "refused":
+            try:
+                if git_output(primary, "rev-parse", "HEAD") == verified_tip:
+                    result["result"] = (
+                        "up to date" if result["from"] == verified_tip
+                        else "fast-forwarded"
+                    )
+                    result["command"] = None
+            except (AgentSquadError, OSError, ValueError):
+                # Keep the attempted result and original failure message.
+                pass
     return result
 
 
@@ -420,6 +437,7 @@ def merge_pr(
         0 if all(s["ok"] for s in result["cleanup"]) else 3
     )
     result["fast_forward"] = fast_forward_primary(
-        repository.primary, target["base_branch"], tip,
+        repository.primary, repository.configuration.base_branch, tip,
+        verified_branch=target["base_branch"],
     )
     return result
