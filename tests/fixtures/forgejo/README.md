@@ -97,6 +97,11 @@ HTTP status lines are documented separately in the evidence record.
 No experiment imports or invokes Agent Squad product code, `fj`, or a real
 model. This script performs real writes and merges only when explicitly run.
 
+The scrubber removes token/email values, normalizes HTTP, HTTPS, SSH, and Git
+URL authorities, and replaces email-derived avatar hashes with `<redacted>`.
+The original recordings received that additional avatar redaction during PR
+review without rerunning the experiments or changing protocol fields.
+
 ## Offline checks and cleanup
 
 `python3 -m unittest tests.unit.test_forgejo_recordings` checks redaction,
