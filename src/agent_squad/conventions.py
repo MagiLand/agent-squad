@@ -235,6 +235,9 @@ def task_from_issue(issue: dict) -> str:
                 level = min(max(len(heading[2]) + 1, 3), 6)
                 line = heading[1] + "#" * level + line[heading.end():]
         lines.append(line)
+    if fence is not None:
+        # The issue ends the code block implicitly; the appended report cannot.
+        lines.append(("" if lines[-1].endswith("\n") else "\n") + fence + "\n")
     title = issue["title"].replace("\r\n", "\n").replace("\r", "\n")
     task = (
         f'## Task\n\nThis Task is issue #{issue["number"]}, "{title}", '

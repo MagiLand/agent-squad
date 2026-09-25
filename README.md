@@ -174,10 +174,11 @@ agent-squad pr merge --as implementer --pr 43
 
 The command verifies current approval, guards the merge with the full head,
 and uses the configured `merge` or `squash` method. If the base branch moved,
-it refuses. Under a standing instruction, the Implementer merges the base
-into the PR branch, validates, pushes, and has the new head reviewed. It asks
-you when budget is exhausted or resolving a conflict needs a choice outside
-the Task. Only your explicit acceptance permits `--accept-moved-base`.
+it refuses. Under a standing or explicit merge instruction, the Implementer
+merges the base into the PR branch, validates, pushes, and has the new head
+reviewed. It asks you when budget is exhausted or resolving a conflict needs
+a choice outside the Task. Only your explicit acceptance permits
+`--accept-moved-base`.
 A latest-review hold also refuses merge; only your instruction after seeing
 that hold permits `--accept-merge-hold`. Neither flag relaxes other checks.
 Merge commits are checked by ancestry; a squash on an unmoved base is checked

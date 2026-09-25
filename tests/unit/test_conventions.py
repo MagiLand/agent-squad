@@ -238,6 +238,37 @@ class IssueTaskTests(unittest.TestCase):
                 )))
                 validate_section(task, "Task")
 
+    def test_fences_close_only_on_their_own_marker(self) -> None:
+        for body, copied in (
+            ("```\n~~~\n# inside\n```\n# after\n",
+             "```\n~~~\n# inside\n```\n### after\n"),
+            ("````\n```\n# inside\n````\n",
+             "````\n```\n# inside\n````\n"),
+            ("```x``` prose\n## Real\n", "```x``` prose\n### Real\n"),
+        ):
+            with self.subTest(body=body):
+                task = task_from_issue(self.issue(body))
+                self.assertTrue(task.endswith(copied))
+                self.assertEqual(
+                    section("## A\n\n" + body + "\n## B\n\nb\n", "B"),
+                    "## B\n\nb",
+                )
+
+    def test_unclosed_fence_ends_with_the_copied_issue(self) -> None:
+        for body, copied in (
+            ("Logs:\n```\n## boom\n", "Logs:\n```\n## boom\n```\n"),
+            ("~~~~\n# boom", "~~~~\n# boom\n~~~~\n"),
+            ("```", "```\n```\n"),
+        ):
+            with self.subTest(body=body):
+                task = task_from_issue(self.issue(body))
+                self.assertTrue(task.endswith(copied))
+                validate_pr_body(task + "\n\n" + REPORT)
+                self.assertEqual(
+                    section(task + "\n\n" + REPORT, "Implementation report"),
+                    REPORT.strip(),
+                )
+
     def test_closed_pull_request_and_empty_body_are_refused(self) -> None:
         for overrides, message in (
             ({"state": "closed"}, "open issue"),
@@ -251,6 +282,23 @@ class IssueTaskTests(unittest.TestCase):
 
 
 class StandingMergeTests(unittest.TestCase):
+    def test_merge_requires_current_approval_and_no_active_stop(self) -> None:
+        instruction = decision(11, body=MERGE_INSTRUCTION)
+        stop = evidence(5, render_line("stop", head=H, reason="scope"))
+        for reviews, conversation, expected in (
+            ((), (instruction,), "launch_review"),
+            ((review(10, head=J),), (instruction,), "launch_review"),
+            ((review(10),), (stop, instruction), "approved"),
+        ):
+            with self.subTest(expected=expected, reviews=reviews):
+                state = derive_state(snapshot(
+                    reviews=reviews, conversation=conversation))
+                self.assertIsNotNone(state["merge_instruction"])
+                self.assertEqual(state["next_action"], expected)
+                if stop in conversation:
+                    self.assertTrue(state["gates"]["stopped"])
+                    self.assertTrue(state["approval"]["approved"])
+
     def test_record_withdraw_and_record_again(self) -> None:
         recorded = decision(2, body=MERGE_INSTRUCTION + '\n\n> Start #1.')
         withdrawn = decision(11, body=MERGE_WITHDRAWAL)
@@ -369,10 +417,13 @@ class StandingMergeTests(unittest.TestCase):
     ) -> None:
         hold = "## Merge hold\n\nTask: Developer review required.\n\n"
         self.assertEqual(validate_review_body(REVIEW + "\n" + hold), [])
+        self.assertEqual(validate_review_body(
+            REVIEW + "\n" + hold + "## Standards\n\nok\n"), [])
         for body in (
             hold + REVIEW,
             REVIEW.replace("## Findings", hold + "## Findings"),
             REVIEW + "\n## Merge hold\n\n",
+            REVIEW + "\n## Standards\n\nok\n\n" + hold,
             REVIEW + "\n## Evidence\n\nProof.\n\n" + hold,
         ):
             with self.subTest(body=body):

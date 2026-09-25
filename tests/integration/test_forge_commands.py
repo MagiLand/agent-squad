@@ -44,6 +44,7 @@ class ForgeCommandTests(unittest.TestCase):
         model["issues"]["1"] = original | {
             "body": "# Objective\r\nBuild exactly this.\r\n"
                     "## Acceptance\r\nKeep wording.\r\n"
+                    "```\r\n## Literal log\r\n"
         }
         f.save_model(model)
         f.create_pr(issue_task=True)
@@ -51,8 +52,10 @@ class ForgeCommandTests(unittest.TestCase):
         self.assertEqual(state["task"], (
             '## Task\n\nThis Task is issue #1, "' + original["title"] +
             '", copied without rewording.\n\n### Objective\n'
-            'Build exactly this.\n### Acceptance\nKeep wording.'
+            'Build exactly this.\n### Acceptance\nKeep wording.\n'
+            '```\n## Literal log\n```'
         ))
+        self.assertIn(REPORT.strip(), state["pr"]["evidence"]["body"])
         self.assertIsNone(state["merge_instruction"])
         self.assertIsNone(state["merge_hold"])
 

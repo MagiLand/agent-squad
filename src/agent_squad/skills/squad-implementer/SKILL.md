@@ -257,14 +257,15 @@ The tool itself does not read or interpret CI.
 Run `agent-squad pr merge --as implementer --pr <PR>` from the primary
 checkout under the standing instruction or the Developer's later instruction.
 If the approved SHA is no longer the head, the newer head must be reviewed.
-If the base moved under a standing instruction, merge the fetched base branch
-into the PR branch in the issue worktree (do not rebase), resolve conflicts
-within the Task, validate, push, update the report, close the finished Reviewer,
+If `pr merge` refuses because the base moved, under either a standing or an
+explicit merge instruction, merge the fetched base branch into the PR branch
+in the issue worktree (do not rebase), resolve conflicts within the Task,
+validate, push, update the report, close the finished Reviewer,
 and request review of the new head. Reapply the hold rule after the push.
 Report and wait if the review budget is exhausted or a conflict needs a choice
 outside the Task. A same-head review still carries the old merge-base and does
 not fix this refusal. `--accept-moved-base` remains the Developer's explicit
-choice; without a standing instruction, report the moved base and ask.
+choice.
 
 Report visible human-approval or required-check requirements and any forge
 refusal. After a successful merge the PR description is frozen: `pr report`
