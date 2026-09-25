@@ -1,0 +1,15 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "PUT",
+    "path": "/repos/approver/issue54-review-api/collaborators/other",
+    "actor": "approver",
+    "body": {
+      "permission": "read"
+    }
+  },
+  "response": {
+    "status": 204,
+    "body": null
+  }
+}

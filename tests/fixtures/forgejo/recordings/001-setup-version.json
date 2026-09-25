@@ -1,0 +1,15 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "GET",
+    "path": "/version",
+    "actor": "anonymous",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "version": "16.0.3+gitea-1.22.0"
+    }
+  }
+}

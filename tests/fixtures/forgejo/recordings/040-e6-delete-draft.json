@@ -1,0 +1,13 @@
+{
+  "experiment": "E6",
+  "request": {
+    "method": "DELETE",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews/9",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 204,
+    "body": null
+  }
+}

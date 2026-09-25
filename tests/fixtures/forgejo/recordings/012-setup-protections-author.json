@@ -1,0 +1,16 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "GET",
+    "path": "/repos/approver/issue54-review-api/branch_protections",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 403,
+    "body": {
+      "message": "user should be an owner or a collaborator with admin write of a repository",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

@@ -1,0 +1,223 @@
+[
+  {
+    "command": [
+      "clone",
+      "http://127.0.0.1/approver/issue54-review-api.git",
+      "."
+    ],
+    "stdout": "",
+    "stderr": "Cloning into '.'...\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "add",
+      "alpha.txt",
+      "beta.txt"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "commit",
+      "-m",
+      "Seed two files for the review experiments"
+    ],
+    "stdout": "[main 66fb89c] Seed two files for the review experiments\n 2 files changed, 80 insertions(+)\n create mode 100644 alpha.txt\n create mode 100644 beta.txt\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "push",
+      "origin",
+      "main"
+    ],
+    "stdout": "",
+    "stderr": "To http://127.0.0.1/approver/issue54-review-api.git\n   3f34be5..66fb89c  main -> main\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "checkout",
+      "-b",
+      "feature"
+    ],
+    "stdout": "",
+    "stderr": "Switched to a new branch 'feature'\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "add",
+      "."
+    ],
+    "stdout": "",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "commit",
+      "-m",
+      "Create separated hunks and a new file"
+    ],
+    "stdout": "[feature 18a91fd] Create separated hunks and a new file\n 3 files changed, 8 insertions(+), 4 deletions(-)\n create mode 100644 new.txt\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "push",
+      "-u",
+      "origin",
+      "feature"
+    ],
+    "stdout": "branch 'feature' set up to track 'origin/feature'.\n",
+    "stderr": "remote: \nremote: Create a new pull request for 'feature':        \nremote:   http://127.0.0.1/approver/issue54-review-api/compare/main...feature        \nremote: \nTo http://127.0.0.1/approver/issue54-review-api.git\n * [new branch]      feature -> feature\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "rev-parse",
+      "HEAD"
+    ],
+    "stdout": "18a91fd83009dda60a6bf231921dfb5a126faf78\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "diff",
+      "origin/main...HEAD"
+    ],
+    "stdout": "diff --git a/alpha.txt b/alpha.txt\nindex 4412ebc..2e88a07 100644\n--- a/alpha.txt\n+++ b/alpha.txt\n@@ -2,7 +2,7 @@ alpha.txt line 01\n alpha.txt line 02\n alpha.txt line 03\n alpha.txt line 04\n-alpha.txt line 05\n+alpha.txt line 05 changed\n alpha.txt line 06\n alpha.txt line 07\n alpha.txt line 08\n@@ -22,7 +22,7 @@ alpha.txt line 21\n alpha.txt line 22\n alpha.txt line 23\n alpha.txt line 24\n-alpha.txt line 25\n+alpha.txt line 25 changed\n alpha.txt line 26\n alpha.txt line 27\n alpha.txt line 28\ndiff --git a/beta.txt b/beta.txt\nindex 07dcb5e..6e1356d 100644\n--- a/beta.txt\n+++ b/beta.txt\n@@ -2,7 +2,7 @@ beta.txt line 01\n beta.txt line 02\n beta.txt line 03\n beta.txt line 04\n-beta.txt line 05\n+beta.txt line 05 changed\n beta.txt line 06\n beta.txt line 07\n beta.txt line 08\n@@ -22,7 +22,7 @@ beta.txt line 21\n beta.txt line 22\n beta.txt line 23\n beta.txt line 24\n-beta.txt line 25\n+beta.txt line 25 changed\n beta.txt line 26\n beta.txt line 27\n beta.txt line 28\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\nindex 0000000..3d2f8b3\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,4 @@\n+new line 1\n+new line 2\n+new line 3\n+new line 4\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "checkout",
+      "main"
+    ],
+    "stdout": "Your branch is up to date with 'origin/main'.\n",
+    "stderr": "Switched to branch 'main'\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "add",
+      "base-only.txt"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "commit",
+      "-m",
+      "Advance base without moving merge base"
+    ],
+    "stdout": "[main 7365f50] Advance base without moving merge base\n 1 file changed, 1 insertion(+)\n create mode 100644 base-only.txt\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "push",
+      "origin",
+      "main"
+    ],
+    "stdout": "",
+    "stderr": "To http://127.0.0.1/approver/issue54-review-api.git\n   66fb89c..7365f50  main -> main\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "checkout",
+      "feature"
+    ],
+    "stdout": "Your branch is up to date with 'origin/feature'.\n",
+    "stderr": "Switched to branch 'feature'\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "add",
+      "new.txt"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "commit",
+      "-m",
+      "Advance head before old-head review"
+    ],
+    "stdout": "[feature 8703389] Advance head before old-head review\n 1 file changed, 1 insertion(+)\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "push",
+      "origin",
+      "feature"
+    ],
+    "stdout": "",
+    "stderr": "remote: \nremote: Visit the existing pull request:        \nremote:   http://127.0.0.1/approver/issue54-review-api/pulls/1 merges into main        \nremote: \nTo http://127.0.0.1/approver/issue54-review-api.git\n   18a91fd..8703389  feature -> feature\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "rev-parse",
+      "HEAD"
+    ],
+    "stdout": "870338929ae9068af504358f390cada48a60be37\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "add",
+      "new.txt"
+    ],
+    "stdout": "",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "commit",
+      "-m",
+      "Advance head after approval and requested changes"
+    ],
+    "stdout": "[feature 718c702] Advance head after approval and requested changes\n 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+    "stderr": "",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "push",
+      "origin",
+      "feature"
+    ],
+    "stdout": "",
+    "stderr": "remote: \nremote: Visit the existing pull request:        \nremote:   http://127.0.0.1/approver/issue54-review-api/pulls/1 merges into main        \nremote: \nTo http://127.0.0.1/approver/issue54-review-api.git\n   8703389..718c702  feature -> feature\n",
+    "exit_code": 0
+  },
+  {
+    "command": [
+      "rev-parse",
+      "HEAD"
+    ],
+    "stdout": "718c702873ee5f6c6592c5d6ed29618c221743a0\n",
+    "stderr": "",
+    "exit_code": 0
+  }
+]

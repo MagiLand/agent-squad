@@ -1,0 +1,52 @@
+{
+  "experiment": "FINAL",
+  "request": {
+    "method": "GET",
+    "path": "/repos/approver/issue54-review-api/issues/1/comments",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "id": 27,
+        "html_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1#issuecomment-27",
+        "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1",
+        "issue_url": "",
+        "user": {
+          "id": 2,
+          "login": "author",
+          "login_name": "",
+          "source_id": 0,
+          "full_name": "",
+          "email": "<redacted>",
+          "avatar_url": "http://127.0.0.1/avatars/edbb1cb3857ae9df1062bc3dd31b75e3",
+          "html_url": "http://127.0.0.1/author",
+          "language": "",
+          "is_admin": false,
+          "last_login": "0001-01-01T00:00:00Z",
+          "created": "2026-09-25T15:54:06Z",
+          "restricted": false,
+          "active": false,
+          "prohibit_login": false,
+          "location": "",
+          "pronouns": "",
+          "website": "",
+          "description": "",
+          "visibility": "public",
+          "followers_count": 0,
+          "following_count": 0,
+          "starred_repos_count": 0,
+          "username": "author"
+        },
+        "original_author": "",
+        "original_author_id": 0,
+        "body": "Issue 54 experiment complete.",
+        "assets": [],
+        "created_at": "2026-09-25T16:13:18Z",
+        "updated_at": "2026-09-25T16:13:18Z"
+      }
+    ]
+  }
+}

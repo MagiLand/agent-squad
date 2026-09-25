@@ -1,0 +1,20 @@
+{
+  "experiment": "E9",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/1/merge",
+    "actor": "author",
+    "body": {
+      "Do": "merge",
+      "head_commit_id": "718c702873ee5f6c6592c5d6ed29618c221743a0",
+      "delete_branch_after_merge": true
+    }
+  },
+  "response": {
+    "status": 405,
+    "body": {
+      "message": "not allowed to merge [reason: Does not have enough approvals]",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "GET",
+    "path": "/repos/approver/issue54-review-api/branches/feature",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": {
+      "message": "The target couldn't be found.",
+      "url": "http://127.0.0.1/api/swagger",
+      "errors": [
+        "branch does not exist [name: feature]"
+      ]
+    }
+  }
+}

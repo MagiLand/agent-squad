@@ -1,0 +1,20 @@
+{
+  "experiment": "E8",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews",
+    "actor": "author",
+    "body": {
+      "body": "E8 own review APPROVED",
+      "event": "APPROVED",
+      "commit_id": "870338929ae9068af504358f390cada48a60be37"
+    }
+  },
+  "response": {
+    "status": 422,
+    "body": {
+      "message": "approve your own pull is not allowed",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

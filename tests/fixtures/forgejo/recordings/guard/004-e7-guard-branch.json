@@ -1,0 +1,77 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/contents/guard.txt",
+    "actor": "author",
+    "body": {
+      "branch": "main",
+      "new_branch": "guard-probe",
+      "message": "Isolate head guard",
+      "content": "RGlzcG9zYWJsZSBndWFyZCBwcm9iZQo="
+    }
+  },
+  "response": {
+    "status": 201,
+    "body": {
+      "content": {
+        "name": "guard.txt",
+        "path": "guard.txt",
+        "sha": "7a853d9743ced2c1399b345f07e46d68acc0f339",
+        "last_commit_sha": "c5c9809372ed389e920613299b13a0ce54bcc6ed",
+        "last_commit_when": "2026-09-25T16:14:40Z",
+        "type": "file",
+        "size": 23,
+        "encoding": "base64",
+        "content": "RGlzcG9zYWJsZSBndWFyZCBwcm9iZQo=",
+        "target": null,
+        "url": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/contents/guard.txt?ref=guard-probe",
+        "html_url": "http://127.0.0.1/approver/issue54-review-api/src/branch/guard-probe/guard.txt",
+        "git_url": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/git/blobs/7a853d9743ced2c1399b345f07e46d68acc0f339",
+        "download_url": "http://127.0.0.1/approver/issue54-review-api/raw/branch/guard-probe/guard.txt",
+        "submodule_git_url": null,
+        "_links": {
+          "self": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/contents/guard.txt?ref=guard-probe",
+          "git": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/git/blobs/7a853d9743ced2c1399b345f07e46d68acc0f339",
+          "html": "http://127.0.0.1/approver/issue54-review-api/src/branch/guard-probe/guard.txt"
+        }
+      },
+      "commit": {
+        "url": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/git/commits/c5c9809372ed389e920613299b13a0ce54bcc6ed",
+        "sha": "c5c9809372ed389e920613299b13a0ce54bcc6ed",
+        "created": "0001-01-01T00:00:00Z",
+        "html_url": "http://127.0.0.1/approver/issue54-review-api/commit/c5c9809372ed389e920613299b13a0ce54bcc6ed",
+        "author": {
+          "name": "author",
+          "email": "<redacted>",
+          "date": "2026-09-25T16:14:40Z"
+        },
+        "committer": {
+          "name": "author",
+          "email": "<redacted>",
+          "date": "2026-09-25T16:14:40Z"
+        },
+        "parents": [
+          {
+            "url": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/git/commits/c7a2b67add2780280652a58a7ed24916d3d08b61",
+            "sha": "c7a2b67add2780280652a58a7ed24916d3d08b61",
+            "created": "0001-01-01T00:00:00Z"
+          }
+        ],
+        "message": "Isolate head guard\n",
+        "tree": {
+          "url": "http://127.0.0.1/api/v1/repos/approver/issue54-review-api/git/trees/0bc721f17500e0130ee9faa57d66b9cd35fafd87",
+          "sha": "0bc721f17500e0130ee9faa57d66b9cd35fafd87",
+          "created": "0001-01-01T00:00:00Z"
+        }
+      },
+      "verification": {
+        "verified": false,
+        "reason": "gpg.error.not_signed_commit",
+        "signature": "",
+        "signer": null,
+        "payload": ""
+      }
+    }
+  }
+}
