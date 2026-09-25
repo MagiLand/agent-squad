@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 from tests.forge_support import ForgeFixture, finding
+from agent_squad.conventions import MERGE_INSTRUCTION
 
 
 def run_smoke() -> dict:
@@ -263,14 +264,24 @@ def run_smoke() -> dict:
             "--task", f.task, "--report", f.report,
         )
         f.cli("reviewer", "launch", "--pr", "2")
+        body = Path(f.review_body)
+        body.write_text(body.read_text() +
+                        "\n## Merge hold\n\nItem 3: merge rules.\n")
         f.cli(
             "review", "post", "--as", "reviewer", "--pr", "2",
             "--head", second_head, "--base", review_base,
             "--verdict", "approved", "--body", f.review_body,
             "--threads", f.write("second-threads.json", "[]"),
         )
+        held = f.cli("status", "--pr", "2")
+        assert held["next_action"] == "approved"
+        refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "2",
+                        cwd=f.repo, expected=4)
+        review_id = held["merge_hold"]["review_id"]
+        assert f"merge hold in review {review_id}" in refused["error"]
         squashed = f.cli(
-            "pr", "merge", "--as", "implementer", "--pr", "2", cwd=f.repo,
+            "pr", "merge", "--as", "implementer", "--pr", "2",
+            "--accept-merge-hold", cwd=f.repo,
         )
         assert squashed["integration"] == "verified by tree identity"
         assert_merge_cleanup(f, 2, "issue-2", issue=2)
@@ -283,7 +294,8 @@ def run_smoke() -> dict:
         roots.append(f.root)
         f.initialize()
         head = f.candidate()
-        f.create_pr()
+        f.create_pr(issue_task=True)
+        f.decision(body=MERGE_INSTRUCTION + '\n\n> Start issue #1.')
         f.cli("reviewer", "launch", "--pr", "1")
         f.review("approved")
         f.herdr_settings(prompt_failure=True)
@@ -293,12 +305,16 @@ def run_smoke() -> dict:
         )
         lost = f.status()
         assert lost["current_review_unacted"]["head"] == head
-        assert lost["next_action"] == "approved"
+        assert lost["next_action"] == "merge"
+        assert lost["merge_instruction"] is not None
         assert lost["budget"]["used"] == 1
         f.herdr_settings(prompt_failure=False)
         f.cli("reviewer", "close", "--pr", "1")
         assert f.git("worktree", "list", "--porcelain").count("worktree ") == 2
-        assert_no_tracked_runtime(f)
+        merged = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                       cwd=f.repo)
+        assert merged["integration"] == "verified by ancestry"
+        assert_merge_cleanup(f, 1, "issue-1", issue=1)
         commands.extend(f.history)
         steps.append({"step": 10,
                       "result": "lost handoff recovered by status"})

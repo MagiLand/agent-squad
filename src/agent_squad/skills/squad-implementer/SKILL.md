@@ -6,8 +6,10 @@ description: "Implement an issue through the Agent Squad PR review loop when the
 # Squad implementer
 
 You implement the approved Task, prepare each revision, address valid findings,
-and merge only on the Developer's instruction. GitHub is authoritative for
-implementation history, reviews, inline discussion, suggestions, dispositions,
+and carry a started issue through to merge under the Developer's instruction.
+Routine work is reviewed by the Developer after it merges; section 8 names
+PRs that require the Developer's review before merging. GitHub is authoritative
+for implementation history, reviews, inline discussion, suggestions, dispositions,
 decisions, stops, and budget. Obtain Task, PR, review, decision, stop, and budget
 state through
 `agent-squad issue view`, `agent-squad status --pr <N> --json`,
@@ -18,7 +20,8 @@ Filter `--json` output to read what is needed instead of saving whole responses
 to disk. A saved response is never authority.
 
 For CI evidence and required-check metadata these commands do not expose,
-use read-only `gh run list`, `gh run view` (including logs), `gh pr checks`,
+use read-only `gh run list`, `gh run view` (including logs),
+`gh run watch <run-id> --exit-status`, `gh pr checks`,
 or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
 endpoints. Scope queries to the configured repository. Match CI evidence to the
 full current PR head SHA and event; match post-merge push evidence to the
@@ -34,14 +37,25 @@ report the limitation.
 Git commands and local code inspection remain part of implementation.
 Every forge mutation below uses `--as implementer`; the CLI handles identity.
 
-## 1. Agree the Task once
+## 1. Read the issue as the Task
 
 Run `agent-squad issue view --issue <N> --json`; read its title, body, labels,
-and comments. Create `paths.issue_scratch` (`<scratch_root>/issue-<N>`) if absent.
-Draft a file there starting with `## Task` containing the objective,
-acceptance criteria, constraints, and non-goals. Present it to the Developer
-once and wait for approval before coding. Then work autonomously until the
-first handback. Do not silently change the Task.
+and comments. The issue is the Task when it is open, states what to build and
+its acceptance criteria, carries none of `needs-triage`, `needs-info`,
+`ready-for-human`, or `wontfix`, no later Developer comment changes it, and the
+Developer's start instruction neither changes the scope nor asks to see the
+Task. In that case do not draft or present a Task; start the work and let
+`pr create` copy the issue without rewording.
+
+In every other case create `paths.issue_scratch` (`<scratch_root>/issue-<N>`)
+if absent and draft a file there starting with `## Task`: objective,
+acceptance criteria, constraints, and non-goals. Present it once and wait for
+approval before coding. Do not silently change the Task.
+
+Before coding ask only about a question the issue leaves open that would
+change the result. Record interpretations that do not change it under
+“Design decisions” in the report, where the Reviewer checks them. Create the
+issue scratch directory when needed for reports and other file inputs.
 
 ## 2. Implement and publish
 
@@ -65,11 +79,25 @@ level-3 headings: `Summary`, `Scope`, `Files changed`, `Design decisions`,
 Include exact commands and observed results; list every changed agent
 instruction or control-plane file under `Areas worth extra review`.
 
-Run `agent-squad pr create --as implementer --issue <N> --task <task-file>
---report <report-file>` from the issue worktree. The CLI records that worktree's
-identity for later cleanup. Read the returned PR number; issue and PR numbers
-need not match. On every later push update the report with
+Run `agent-squad pr create --as implementer --issue <N>
+--report <report-file>` from the issue worktree. Supply `--task <task-file>`
+only when the Developer approved a drafted Task. The CLI records that
+worktree's identity for later cleanup. Read the returned PR number; issue and
+PR numbers need not match. On every later push update the report with
 `agent-squad pr report --as implementer --pr <PR> --report <report-file>`.
+
+At `pr create` and after every push, apply section 8's review-before-merge rule
+to the whole PR. Name any applicable item and its reason under “Areas worth
+extra review”. Right after creation, unless the Developer kept the merge
+(for example “don't merge” or “I'll merge”) or a hold applies, record a general
+`decision post --as implementer --pr <PR> --finding none --body <file>` whose
+body opens with exactly `Standing merge instruction: merge when approved.`,
+followed by the Developer's start instruction quoted. A later general decision
+opening with `Standing merge instruction withdrawn.` withdraws it. Post that
+withdrawal when the Developer asks, or on your own when a hold arises after
+recording the instruction. These decisions carry no Task amendment or `budget=`;
+neither lifts a stop nor settles `needs_decision`. The latest such decision
+controls the instruction, and a newer stop or Task amendment cancels it.
 
 ## 3. Request review
 
@@ -108,8 +136,9 @@ After successful `reviewer launch` or `reviewer adopt`:
 
 On any `REVIEW_RESULT` prompt or "check the PR" instruction, first run
 `agent-squad status --pr <PR> --json`. Verify the PR and full reviewed SHA;
-act on the derived `next_action`. Read the full reviews, inline threads,
-suggestions, and decisions in that output. A notification is not evidence of
+act on the derived `next_action`; `merge` proceeds through section 8 without
+a routine confirmation, while `approved` waits. Read the full reviews, inline
+threads, suggestions, and decisions in that output. A notification is not evidence of
 approval or of a finding's validity. If the head changed, use the current PR
 state and do not apply an old approval.
 
@@ -148,8 +177,9 @@ verification, unless it is settled. The existing rules for `fixed <full-sha>`
 and `needs-human` apply to every thread.
 
 After `NOT FIXED`, supply a new disposition. After fixes, run relevant tests,
-commit, push, and update `pr report`. Use `reviewer close --pr <PR> --head
-<finished-review-head>` and then `reviewer launch --pr <PR>`. A same-head review
+commit, push, and update `pr report`. Reapply the hold rule to the whole PR
+and withdraw the standing instruction if a hold now applies. Use
+`reviewer close --pr <PR> --head <finished-review-head>` and then `reviewer launch --pr <PR>`. A same-head review
 is allowed when every unsettled blocking disposition is rejected, or after a
 Task amendment; it is not a substitute for committing and pushing fixes.
 
@@ -188,33 +218,72 @@ amendment before mirroring it to the PR body. If status reports
 `task_body_stale`, re-run the same command. Close the finished Reviewer with
 `reviewer close --pr <PR> --head <finished-review-head>` before launching a
 fresh Reviewer for the current head, even if no code changed; an earlier
-approval no longer covers the Task. If that Reviewer was already closed, use
-the CLI's reported resource state rather than attempting to remove it twice.
+approval no longer covers the Task. After recording the amendment, record
+the standing instruction again unless the Developer said otherwise or a hold
+applies. If that Reviewer was already closed, use the CLI's reported resource state rather than attempting to remove it twice.
 
-## 8. Approval and human-gated merge
+## 8. Approval, review before merge, and finishing
+
+Apply this rule to the whole PR at creation and after every push:
+
+   > A PR waits for the Developer's review before it merges when a defect in it could cause harm that reverting the PR would not undo, or would weaken the checks that later PRs rely on. That is the case when the PR:
+   >
+   > 1. changes authentication, authorization, or permission checks; the handling of credentials, tokens, secrets, keys, or forge identities; cryptography; or the validation of untrusted input before it reaches a shell, an interpreter, a query, a file path, or a web page;
+   > 2. adds or changes code that deletes or irreversibly changes stored data, files, branches, or history, or the guards against that, or adds a migration that reverting the PR cannot undo;
+   > 3. changes what permits a review, an approval, a decision, or a merge, or what an agent may do without asking (merge, post as an identity, run commands, or access credentials), including this rule;
+   > 4. adds a third-party dependency or CI action, or changes CI permissions, secrets, or triggers;
+   > 5. publishes, releases, deploys, or sends anything outside the repository, or changes a public interface, protocol, or file format incompatibly;
+   > 6. leaves a product, design, or scope question to the Developer, or goes beyond what the Task asks.
+   >
+   > The items describe what the PR's own changes do. The loop's routine steps, such as pushing the branch, posting reviews, and deleting the merged branch, do not count. The Task can also require the Developer's review. Size alone, tests, documentation that changes no rule, and ordinary features and fixes do not qualify. When unsure whether an item applies, treat it as applying and say why.
 
 Verify approval through `status`, never from the Herdr notification alone.
-Before reporting "approved at `<full-sha>`, ready to merge", reply on every
-unsettled thread, blocking or optional. The report lists every optional finding
-of the PR with its ID, title, and disposition (the reason or the issue). Then
-wait for the Developer's merge instruction. On that instruction, run
-`agent-squad pr merge --as implementer --pr <PR>` from the primary checkout. If the approved SHA is no longer the PR head, do
-not merge on that approval; the newer head must be reviewed. If the base moved,
-report it and ask the Developer to choose a fresh review or explicitly accept
-the moved base; use `--accept-moved-base` only for that explicit choice.
+Reply on every unsettled thread, blocking or optional, before merging or
+reporting approval. When `next_action` is `approved`, send “approved at
+`<full-sha>`, ready to merge”, listing every optional finding with its ID,
+title, and disposition and any hold's item and reason, then wait. Only the
+Developer releases a hold by instructing the merge after seeing it; only then
+pass `--accept-merge-hold`. A standing instruction never releases a hold.
 
-Report visible human-approval or check requirements and any forge refusal.
-After successful merge, the PR description is frozen: `pr report` refuses a
-PR that is not open. Report the merge commit, method, integration check, CI run
-at the merge commit, each cleanup result, and the fast-forward result to the
-Developer only.
+When `next_action` is `merge`, proceed without another confirmation. Before
+`pr merge`, confirm every check run for the approved head concluded `success`,
+`neutral`, or `skipped`. Wait for running checks with
+`gh run watch <run-id> --exit-status`. A failed check is a defect: fix it and
+have the new head reviewed, or report it if the fix is outside the Task. If
+no check exists at that head although the repository runs checks on pull
+requests, report that and wait. Apply the same checks to an explicit merge.
+The tool itself does not read or interpret CI.
+
+Run `agent-squad pr merge --as implementer --pr <PR>` from the primary
+checkout under the standing instruction or the Developer's later instruction.
+If the approved SHA is no longer the head, the newer head must be reviewed.
+If `pr merge` refuses because the base moved, under either a standing or an
+explicit merge instruction, merge the fetched base branch into the PR branch
+in the issue worktree (do not rebase), resolve conflicts within the Task,
+validate, push, update the report, close the finished Reviewer,
+and request review of the new head. Reapply the hold rule after the push.
+Report and wait if the review budget is exhausted or a conflict needs a choice
+outside the Task. A same-head review still carries the old merge-base and does
+not fix this refusal. `--accept-moved-base` remains the Developer's explicit
+choice.
+
+Report visible human-approval or required-check requirements and any forge
+refusal. After a successful merge the PR description is frozen: `pr report`
+refuses a PR that is not open. If the repository runs CI on base-branch pushes,
+wait for its run at the merge commit. Then send one report needing no answer:
+merge commit, method, integration check, CI at the approved head and the push
+run's result, every cleanup step, fast-forward result, and every optional
+finding with ID, title, and disposition. If the push run failed, say so and
+ask the Developer to choose a fix or a revert; change nothing else. If push
+CI evidence is missing or inaccessible, report that limitation explicitly.
+
 `pr merge` removes `<scratch_root>/issue-<N>` after a verified merge, subject
-to its cleanup safeguards; do not recreate it for a post-merge report.
-When the CLI did not fast-forward, give the Developer its reason and any
-command it printed. Never run the fast-forward, or any other command that
-changes the base checkout, yourself. A failed integration check
-retains resources; exit 3 means cleanup is incomplete and must be reported.
-Squash after accepting a moved base is not verifiable by tree identity.
+to cleanup safeguards; do not recreate it for a post-merge report. When the
+CLI did not fast-forward, report its reason and any command it printed. Never
+run the fast-forward or any other command changing the base checkout yourself.
+A failed integration check retains resources; exit 3 means cleanup is incomplete
+and must be reported. Squash after accepting a moved base is not verifiable
+by tree identity.
 
 ## 9. Manual intervention
 
@@ -222,8 +291,10 @@ On `STOPPED`, or when status reports `stopped`, make no further review-driven
 changes and do not request another review automatically. Preserve the PR,
 branch, commits, and worktree. Report the reason and remaining problems;
 wait for the Developer to continue, change approach, or terminate. Record any
-continuation with `decision post` before launching again. Optional findings
-alone do not justify stopping the loop.
+continuation with `decision post` before launching again. Then record the
+standing instruction again unless the Developer said otherwise or a hold
+applies. A standing instruction itself never authorizes continuation. Optional
+findings alone do not justify stopping the loop.
 
 ## 10. Handoff identity
 

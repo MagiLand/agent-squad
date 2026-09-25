@@ -143,7 +143,9 @@ def owned_implementation(
     return path, issue
 
 
-def check_merge_gate(state: dict, *, accept_moved_base: bool) -> bool:
+def check_merge_gate(
+    state: dict, *, accept_moved_base: bool, accept_merge_hold: bool = False,
+) -> bool:
     reasons = list(state["approval"]["reasons"])
     if state["gates"]["unaddressed_findings"]:
         reasons.append(
@@ -151,13 +153,20 @@ def check_merge_gate(state: dict, *, accept_moved_base: bool) -> bool:
         )
     if state["pr"]["state"] != "open" or state["pr"]["merged"]:
         reasons.append("PR is not open")
+    hold = state.get("merge_hold")
+    if hold and not accept_merge_hold:
+        reasons.append(
+            f'merge hold in review {hold["review_id"]}: {hold["text"]}; '
+            "Developer review and explicit --accept-merge-hold required"
+        )
     if reasons:
         raise GateError("pr merge refused: " + "; ".join(reasons))
     moved = state["target"]["base_tip"] != state["reviews"][-1]["base"]
     if moved and not accept_moved_base:
         raise GateError(
-            "base branch moved since the approving review; ask the Developer"
-            " for a new review or explicit --accept-moved-base"
+            "base branch moved since the approving review; merge the base"
+            " into the PR branch and review the new head, or ask the"
+            " Developer for explicit --accept-moved-base"
         )
     return moved
 
@@ -373,14 +382,17 @@ def fast_forward_primary(
 
 def merge_pr(
     repository: Repository, forge: GitHub, pr: int,
-    *, accept_moved_base: bool = False,
+    *, accept_moved_base: bool = False, accept_merge_hold: bool = False,
 ) -> dict:
     snapshot = forge.snapshot(pr)
     rules = forge.branch_rules(snapshot.pr.base_branch)
     # Re-read authority after the potentially slow rules lookup.
     snapshot = forge.snapshot(pr)
     state = state_for(repository, snapshot)
-    moved = check_merge_gate(state, accept_moved_base=accept_moved_base)
+    moved = check_merge_gate(
+        state, accept_moved_base=accept_moved_base,
+        accept_merge_hold=accept_merge_hold,
+    )
     target = state["target"]
     method = repository.configuration.merge_method
     result = {

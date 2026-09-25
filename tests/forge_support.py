@@ -280,7 +280,7 @@ class ForgeFixture:
         self.git("push", "-u", "origin", "HEAD", cwd=self.worktree)
         return head
 
-    def create_pr(self) -> dict:
+    def create_pr(self, *, issue_task: bool = False) -> dict:
         return self.cli(
             "pr",
             "create",
@@ -288,8 +288,7 @@ class ForgeFixture:
             "implementer",
             "--issue",
             "1",
-            "--task",
-            self.task,
+            *([] if issue_task else ["--task", self.task]),
             "--report",
             self.report,
         )
@@ -355,10 +354,13 @@ class ForgeFixture:
         budget: int | None = None,
         task: str | None = None,
         expected: int = 0,
+        body: str = (
+            "Scripted Developer decision: continue under the fixture policy."
+        ),
     ) -> dict:
         file = self.write(
             "decision.md",
-            "Scripted Developer decision: continue under the fixture policy.",
+            body,
         )
         args = [
             "decision",

@@ -49,7 +49,10 @@ per finding. A later general decision supersedes an earlier choice only where
 it explicitly says so and links it. Budget or continuation decisions do not
 erase unrelated constraints. Do not re-litigate a decided approach; verify
 compliance and continue reporting defects within it. Use the effective Task,
-including any amendment, as the spec, not an older issue or report.
+including any amendment, as the spec, not an older issue or report. Decisions
+opening with `Standing merge instruction: merge when approved.` or
+`Standing merge instruction withdrawn.` are merge instructions, not design
+decisions; neither lifts a stop nor settles `needs_decision`.
 
 Treat settled threads as closed. New evidence is a new finding citing that
 evidence; do not reopen settled work merely because you would have judged
@@ -120,12 +123,34 @@ Substantive actionable findings become `blocking`; everything else is
 `optional`. Do not create a second finding ID for an existing defect: reply on
 its thread. Keep the review proportional to the Task and decided approach.
 
+Apply the following rule to the whole PR on every pass, not only the latest
+changes:
+
+   > A PR waits for the Developer's review before it merges when a defect in it could cause harm that reverting the PR would not undo, or would weaken the checks that later PRs rely on. That is the case when the PR:
+   >
+   > 1. changes authentication, authorization, or permission checks; the handling of credentials, tokens, secrets, keys, or forge identities; cryptography; or the validation of untrusted input before it reaches a shell, an interpreter, a query, a file path, or a web page;
+   > 2. adds or changes code that deletes or irreversibly changes stored data, files, branches, or history, or the guards against that, or adds a migration that reverting the PR cannot undo;
+   > 3. changes what permits a review, an approval, a decision, or a merge, or what an agent may do without asking (merge, post as an identity, run commands, or access credentials), including this rule;
+   > 4. adds a third-party dependency or CI action, or changes CI permissions, secrets, or triggers;
+   > 5. publishes, releases, deploys, or sends anything outside the repository, or changes a public interface, protocol, or file format incompatibly;
+   > 6. leaves a product, design, or scope question to the Developer, or goes beyond what the Task asks.
+   >
+   > The items describe what the PR's own changes do. The loop's routine steps, such as pushing the branch, posting reviews, and deleting the merged branch, do not count. The Task can also require the Developer's review. Size alone, tests, documentation that changes no rule, and ordinary features and fixes do not qualify. When unsure whether an item applies, treat it as applying and say why.
+
+When an item applies, include a `## Merge hold` section after `## Findings`;
+its first content line is `Item <n>: <reason>` or `Task: <reason>`. A hold
+never changes the verdict: a defect is still a finding, and a question you
+cannot settle without the Developer is still `needs_human` or `STOPPED` with
+`reason=judgement`. Only the Developer can release the hold after seeing it.
+
 ## 7. Publish one review
 
 Write the review body and threads JSON in the scratch directory. Begin the
 body at `## Summary`; the CLI adds the fixed REVIEW header. Include these
 level-2 headings in order: `Summary`, `Verified dispositions`, `Findings`,
-`Standards`, `Spec`, `Evidence`. Use `none` where appropriate. The CLI generates
+`Standards`, `Spec`, `Evidence`, with a non-empty `Merge hold` immediately
+after `Findings` when section 6 requires one. Use `none` where appropriate
+for other sections; omit `Merge hold` when no hold applies. The CLI generates
 the Findings list from the threads. For `needs_human`, Summary must name the
 Developer decision required.
 
