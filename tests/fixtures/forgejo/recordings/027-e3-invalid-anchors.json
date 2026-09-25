@@ -1,0 +1,69 @@
+{
+  "experiment": "E3",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews",
+    "actor": "author",
+    "body": {
+      "body": "E3 invalid anchor rendering",
+      "event": "COMMENT",
+      "commit_id": "18a91fd83009dda60a6bf231921dfb5a126faf78",
+      "comments": [
+        {
+          "path": "alpha.txt",
+          "new_position": 15,
+          "body": "E3 outside diff line 15"
+        },
+        {
+          "path": "missing.txt",
+          "new_position": 1,
+          "body": "E3 missing path"
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": 4,
+      "user": {
+        "id": 2,
+        "login": "author",
+        "login_name": "",
+        "source_id": 0,
+        "full_name": "",
+        "email": "<redacted>",
+        "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+        "html_url": "http://127.0.0.1/author",
+        "language": "en-US",
+        "is_admin": false,
+        "last_login": "2026-09-25T15:57:44Z",
+        "created": "2026-09-25T15:54:06Z",
+        "restricted": false,
+        "active": true,
+        "prohibit_login": false,
+        "location": "",
+        "pronouns": "",
+        "website": "",
+        "description": "",
+        "visibility": "public",
+        "followers_count": 0,
+        "following_count": 0,
+        "starred_repos_count": 0,
+        "username": "author"
+      },
+      "team": null,
+      "state": "COMMENT",
+      "body": "E3 invalid anchor rendering",
+      "commit_id": "18a91fd83009dda60a6bf231921dfb5a126faf78",
+      "stale": false,
+      "official": false,
+      "dismissed": false,
+      "comments_count": 2,
+      "submitted_at": "2026-09-25T16:05:35Z",
+      "updated_at": "2026-09-25T16:05:35Z",
+      "html_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1#issuecomment-12",
+      "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1"
+    }
+  }
+}

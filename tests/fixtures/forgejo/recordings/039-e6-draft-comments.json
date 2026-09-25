@@ -1,0 +1,57 @@
+{
+  "experiment": "E6",
+  "request": {
+    "method": "GET",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews/9/comments",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "id": 20,
+        "body": "E6 UI draft deleted",
+        "user": {
+          "id": 2,
+          "login": "author",
+          "login_name": "",
+          "source_id": 0,
+          "full_name": "",
+          "email": "<redacted>",
+          "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+          "html_url": "http://127.0.0.1/author",
+          "language": "en-US",
+          "is_admin": false,
+          "last_login": "2026-09-25T16:11:34Z",
+          "created": "2026-09-25T15:54:06Z",
+          "restricted": false,
+          "active": true,
+          "prohibit_login": false,
+          "location": "",
+          "pronouns": "",
+          "website": "",
+          "description": "",
+          "visibility": "public",
+          "followers_count": 0,
+          "following_count": 0,
+          "starred_repos_count": 0,
+          "username": "author"
+        },
+        "resolver": null,
+        "pull_request_review_id": 9,
+        "created_at": "2026-09-25T16:13:13Z",
+        "updated_at": "2026-09-25T16:13:13Z",
+        "path": "beta.txt",
+        "commit_id": "66fb89c6507c37f3bd5b99857826d45719c09b56",
+        "original_commit_id": "",
+        "diff_hunk": "@@ -2,7 +2,7 @@ beta.txt line 01\n beta.txt line 02\n beta.txt line 03\n beta.txt line 04",
+        "position": 4,
+        "original_position": 0,
+        "extra_lines_count": 0,
+        "html_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1/files#issuecomment-20",
+        "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1"
+      }
+    ]
+  }
+}

@@ -1,0 +1,54 @@
+diff --git a/alpha.txt b/alpha.txt
+index 4412ebc..2e88a07 100644
+--- a/alpha.txt
++++ b/alpha.txt
+@@ -2,7 +2,7 @@ alpha.txt line 01
+ alpha.txt line 02
+ alpha.txt line 03
+ alpha.txt line 04
+-alpha.txt line 05
++alpha.txt line 05 changed
+ alpha.txt line 06
+ alpha.txt line 07
+ alpha.txt line 08
+@@ -22,7 +22,7 @@ alpha.txt line 21
+ alpha.txt line 22
+ alpha.txt line 23
+ alpha.txt line 24
+-alpha.txt line 25
++alpha.txt line 25 changed
+ alpha.txt line 26
+ alpha.txt line 27
+ alpha.txt line 28
+diff --git a/beta.txt b/beta.txt
+index 07dcb5e..6e1356d 100644
+--- a/beta.txt
++++ b/beta.txt
+@@ -2,7 +2,7 @@ beta.txt line 01
+ beta.txt line 02
+ beta.txt line 03
+ beta.txt line 04
+-beta.txt line 05
++beta.txt line 05 changed
+ beta.txt line 06
+ beta.txt line 07
+ beta.txt line 08
+@@ -22,7 +22,7 @@ beta.txt line 21
+ beta.txt line 22
+ beta.txt line 23
+ beta.txt line 24
+-beta.txt line 25
++beta.txt line 25 changed
+ beta.txt line 26
+ beta.txt line 27
+ beta.txt line 28
+diff --git a/new.txt b/new.txt
+new file mode 100644
+index 0000000..3d2f8b3
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,4 @@
++new line 1
++new line 2
++new line 3
++new line 4

@@ -1,0 +1,16 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "DELETE",
+    "path": "/repos/approver/issue54-review-api/branches/feature",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 500,
+    "body": {
+      "message": "",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

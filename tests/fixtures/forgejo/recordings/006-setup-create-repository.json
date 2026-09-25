@@ -1,0 +1,22 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "POST",
+    "path": "/user/repos",
+    "actor": "approver",
+    "body": {
+      "name": "issue54-review-api",
+      "auto_init": true,
+      "private": true,
+      "default_branch": "main",
+      "description": "Disposable issue 54 experiment"
+    }
+  },
+  "response": {
+    "status": 403,
+    "body": {
+      "message": "token does not have at least one of required scope(s): [write:user]",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

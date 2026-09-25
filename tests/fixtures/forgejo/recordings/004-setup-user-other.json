@@ -1,0 +1,38 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "GET",
+    "path": "/user",
+    "actor": "other",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": 3,
+      "login": "other",
+      "login_name": "",
+      "source_id": 0,
+      "full_name": "",
+      "email": "<redacted>",
+      "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+      "html_url": "http://127.0.0.1/other",
+      "language": "",
+      "is_admin": false,
+      "last_login": "1970-01-01T00:00:00Z",
+      "created": "2026-09-25T15:54:06Z",
+      "restricted": false,
+      "active": true,
+      "prohibit_login": false,
+      "location": "",
+      "pronouns": "",
+      "website": "",
+      "description": "",
+      "visibility": "public",
+      "followers_count": 0,
+      "following_count": 0,
+      "starred_repos_count": 0,
+      "username": "other"
+    }
+  }
+}

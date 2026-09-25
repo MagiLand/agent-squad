@@ -1,0 +1,57 @@
+{
+  "experiment": "E9",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews",
+    "actor": "approver",
+    "body": {
+      "body": "E9 first approval",
+      "event": "APPROVED",
+      "commit_id": "870338929ae9068af504358f390cada48a60be37"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": 11,
+      "user": {
+        "id": 1,
+        "login": "approver",
+        "login_name": "",
+        "source_id": 0,
+        "full_name": "",
+        "email": "<redacted>",
+        "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+        "html_url": "http://127.0.0.1/approver",
+        "language": "en-US",
+        "is_admin": true,
+        "last_login": "2026-09-25T16:03:52Z",
+        "created": "2026-09-25T15:54:05Z",
+        "restricted": false,
+        "active": true,
+        "prohibit_login": false,
+        "location": "",
+        "pronouns": "",
+        "website": "",
+        "description": "",
+        "visibility": "public",
+        "followers_count": 0,
+        "following_count": 0,
+        "starred_repos_count": 0,
+        "username": "approver"
+      },
+      "team": null,
+      "state": "APPROVED",
+      "body": "E9 first approval",
+      "commit_id": "870338929ae9068af504358f390cada48a60be37",
+      "stale": false,
+      "official": true,
+      "dismissed": false,
+      "comments_count": 0,
+      "submitted_at": "2026-09-25T16:13:17Z",
+      "updated_at": "2026-09-25T16:13:17Z",
+      "html_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1#issuecomment-22",
+      "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1"
+    }
+  }
+}

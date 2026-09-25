@@ -1,0 +1,20 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/2/merge",
+    "actor": "author",
+    "body": {
+      "Do": "merge",
+      "head_commit_id": "2222222222222222222222222222222222222222",
+      "delete_branch_after_merge": true
+    }
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "message": "head out of date",
+      "url": "http://127.0.0.1/api/swagger"
+    }
+  }
+}

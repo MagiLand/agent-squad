@@ -1,0 +1,38 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "GET",
+    "path": "/user",
+    "actor": "approver",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": 1,
+      "login": "approver",
+      "login_name": "",
+      "source_id": 0,
+      "full_name": "",
+      "email": "<redacted>",
+      "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+      "html_url": "http://127.0.0.1/approver",
+      "language": "en-US",
+      "is_admin": true,
+      "last_login": "2026-09-25T16:03:52Z",
+      "created": "2026-09-25T15:54:05Z",
+      "restricted": false,
+      "active": true,
+      "prohibit_login": false,
+      "location": "",
+      "pronouns": "",
+      "website": "",
+      "description": "",
+      "visibility": "public",
+      "followers_count": 0,
+      "following_count": 0,
+      "starred_repos_count": 0,
+      "username": "approver"
+    }
+  }
+}

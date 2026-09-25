@@ -1,0 +1,55 @@
+{
+  "experiment": "SETUP",
+  "request": {
+    "method": "GET",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews",
+    "actor": "author",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": [
+      {
+        "id": 1,
+        "user": {
+          "id": 1,
+          "login": "approver",
+          "login_name": "",
+          "source_id": 0,
+          "full_name": "",
+          "email": "<redacted>",
+          "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+          "html_url": "http://127.0.0.1/approver",
+          "language": "",
+          "is_admin": false,
+          "last_login": "0001-01-01T00:00:00Z",
+          "created": "2026-09-25T15:54:05Z",
+          "restricted": false,
+          "active": false,
+          "prohibit_login": false,
+          "location": "",
+          "pronouns": "",
+          "website": "",
+          "description": "",
+          "visibility": "public",
+          "followers_count": 0,
+          "following_count": 0,
+          "starred_repos_count": 0,
+          "username": "approver"
+        },
+        "team": null,
+        "state": "REQUEST_REVIEW",
+        "body": "",
+        "commit_id": "",
+        "stale": false,
+        "official": true,
+        "dismissed": false,
+        "comments_count": 0,
+        "submitted_at": "2026-09-25T16:05:34Z",
+        "updated_at": "2026-09-25T16:05:34Z",
+        "html_url": "",
+        "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1"
+      }
+    ]
+  }
+}

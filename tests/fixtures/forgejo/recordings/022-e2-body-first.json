@@ -1,0 +1,57 @@
+{
+  "experiment": "E2",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/1/reviews",
+    "actor": "author",
+    "body": {
+      "body": "E2 submitted body before roots",
+      "event": "COMMENT",
+      "commit_id": "18a91fd83009dda60a6bf231921dfb5a126faf78"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": 3,
+      "user": {
+        "id": 2,
+        "login": "author",
+        "login_name": "",
+        "source_id": 0,
+        "full_name": "",
+        "email": "<redacted>",
+        "avatar_url": "http://127.0.0.1/avatars/<redacted>",
+        "html_url": "http://127.0.0.1/author",
+        "language": "en-US",
+        "is_admin": false,
+        "last_login": "2026-09-25T15:57:44Z",
+        "created": "2026-09-25T15:54:06Z",
+        "restricted": false,
+        "active": true,
+        "prohibit_login": false,
+        "location": "",
+        "pronouns": "",
+        "website": "",
+        "description": "",
+        "visibility": "public",
+        "followers_count": 0,
+        "following_count": 0,
+        "starred_repos_count": 0,
+        "username": "author"
+      },
+      "team": null,
+      "state": "COMMENT",
+      "body": "E2 submitted body before roots",
+      "commit_id": "18a91fd83009dda60a6bf231921dfb5a126faf78",
+      "stale": false,
+      "official": false,
+      "dismissed": false,
+      "comments_count": 0,
+      "submitted_at": "2026-09-25T16:05:35Z",
+      "updated_at": "2026-09-25T16:05:35Z",
+      "html_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1#issuecomment-6",
+      "pull_request_url": "http://127.0.0.1/approver/issue54-review-api/pulls/1"
+    }
+  }
+}

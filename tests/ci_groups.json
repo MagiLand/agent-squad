@@ -20,6 +20,7 @@
     "tests/unit/test_conventions.py",
     "tests/unit/test_doctor.py",
     "tests/unit/test_forge.py",
+    "tests/unit/test_forgejo_recordings.py",
     "tests/unit/test_herdr.py",
     "tests/unit/test_merging.py",
     "tests/unit/test_skills.py",

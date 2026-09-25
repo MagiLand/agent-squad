@@ -1,0 +1,17 @@
+{
+  "experiment": "E7",
+  "request": {
+    "method": "POST",
+    "path": "/repos/approver/issue54-review-api/pulls/2/merge",
+    "actor": "author",
+    "body": {
+      "Do": "merge",
+      "head_commit_id": "c5c9809372ed389e920613299b13a0ce54bcc6ed",
+      "delete_branch_after_merge": true
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": null
+  }
+}
