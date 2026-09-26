@@ -350,6 +350,19 @@ class GitHub:
             raise ForgeError("invalid collaborator permission")
         return permission
 
+    def user_exists(self, login: str) -> bool:
+        try:
+            response = self.api(f'users/{quote(login, safe="")}')
+        except ForgeError as error:
+            if error.status == 404:
+                return False
+            raise
+        data = object_value(response, "user")
+        actual = V.require_string(data.get("login"), "user.login")
+        if actual.casefold() != login.casefold():
+            raise ForgeError("user lookup returned another login")
+        return True
+
     def issue(self, number: int) -> IssueRecord:
         data = object_value(
             self.api(f"{self.prefix}/issues/{number}"), "issue"
@@ -477,6 +490,9 @@ class GitHub:
             self.can_read_thread_resolution,
             self.can_read_branch_rules,
             "APPROVED",
+            (self.approvals(number)
+             if self.repository.configuration.identity_mode == "single"
+             else ()),
         )
 
     def thread_states(self, number: int) -> tuple[ThreadState, ...]:

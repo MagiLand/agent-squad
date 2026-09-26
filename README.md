@@ -6,7 +6,9 @@ Developer decisions, and approval. Each review identifies an exact commit and
 runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
 for the Developer's review before merging.
 
-The implementation follows the [v0.5.0 specification delta](docs/agent-squad-v0.5.0-spec.md).
+The implementation follows the [v0.6.0 specification delta](docs/agent-squad-v0.6.0-spec.md)
+through Increment 2: GitHub supports dual and single identity; the Forgejo
+adapter belongs to later increments.
 See [workflow verification](docs/workflow-verification.md) for deterministic
 coverage and the live-trial evidence required before releasing v0.5.0.
 
@@ -14,8 +16,10 @@ coverage and the live-trial evidence required before releasing v0.5.0.
 
 Requirements: Python 3.11 or later, Git, GitHub CLI (`gh`), Herdr, Codex CLI,
 Claude Code, and the installed `code-review` skill. Both agent integrations in
-Herdr must be current. Authenticate `gh` as two different GitHub accounts; the
-Reviewer account needs write permission on the consuming repository.
+Herdr must be current. In the default dual-identity mode, authenticate `gh` as
+two different GitHub accounts; the Reviewer account needs write permission on
+the consuming repository. Single-identity mode uses one shared agent account
+with push permission and a separate, person-operated approver account.
 The Python package has no runtime dependencies outside the standard library.
 
 Install from this checkout into your Python environment:
@@ -51,7 +55,7 @@ refused: move that configuration aside and rerun `init`; no migration is offered
 The defaults are Codex implementing, Claude Code reviewing, three review
 passes, and a merge commit. To reverse the agents, edit the existing
 `implementer.kind` and `reviewer.kind` configuration fields before the trial.
-See [configuration](docs/agent-squad-v0.5.0-spec.md#9-configuration-schema-version-2)
+See [configuration](docs/agent-squad-v0.6.0-spec.md#9-configuration-schema-version-2)
 for account, branch, merge method, and directory settings.
 
 `doctor` checks both forge identities, Reviewer permission, the remote base
@@ -61,6 +65,37 @@ Implementer is a warning. `--live-reviewer` additionally starts a disposable
 Reviewer, checks readiness and trust behavior, and closes it; it sends no
 review request. If startup needs a human answer, follow the reported pane and
 resource information. Never have an agent answer a trust or permission dialog.
+
+## Single identity with human approval
+
+For a shared agent account, initialize with a distinct human approver:
+
+```bash
+agent-squad init --implementer-account <agent-login> --reviewer-account <agent-login> \
+  --identity-mode single --approver-account <human-login>
+```
+
+Repeat `--approver-account` to allow additional people. The configuration stores
+`identity_mode` and `approver_accounts`; old schema 2 files without these fields
+continue to load as `dual` with no human-approval requirement. `doctor` checks
+the shared account's push permission and the existence of every approver.
+
+Both agents post under the shared login. Their role separation is by convention:
+the forge cannot establish which agent wrote a review, finding, or decision.
+The Reviewer posts comment reviews whose tagged verdict still records approval
+or required changes. Merge additionally requires a configured human's latest
+approval at exactly the PR head, not dismissed, and no configured human's latest
+approve-or-request-changes review may request changes, even at an older head.
+An older approval never becomes valid again after a later dismissed review.
+Agent and human approvals may arrive in either order.
+
+When only human approval is missing, `status` reports `await_human_approval`
+and names the approvers. The Implementer reports and goes idle without polling.
+Post human reviews by hand, then tell the Implementer to “check the PR”. A human
+request-changes is reported to the Developer for an instruction; it does not
+become a protocol finding or prevent a fresh agent review. Existing decisions,
+stops, review budgets, CI checks, and merge holds continue to apply. Configure
+branch protection separately if the forge must enforce these requirements.
 
 ## Work through an issue
 
@@ -211,7 +246,7 @@ make smoke
 make doctor
 ```
 
-The automated suite and twelve-step smoke scenario use temporary repositories,
+The automated suite and thirteen-step smoke scenario use temporary repositories,
 a fake GitHub executable, and fake Herdr; they never call models or GitHub.
 `make doctor` checks your real configured environment. Live reviews, decisions,
 and merges are separate evidence in [workflow verification](docs/workflow-verification.md).

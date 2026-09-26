@@ -73,6 +73,12 @@ def refresh(pr):
 
 
 def review_record(pr, body, event, head):
+    if (account in settings.get("human_accounts", [])
+            and event in ("APPROVE", "REQUEST_CHANGES")):
+        for previous in pr.get("reviews", []):
+            if (previous["user"]["login"].casefold() == account.casefold()
+                    and previous["state"] in ("APPROVED", "CHANGES_REQUESTED")):
+                dismiss_review(pr, previous)
     review = record(body)
     review.update(
         commit_id=head,
@@ -88,6 +94,16 @@ def review_record(pr, body, event, head):
     )
     pr.setdefault("reviews", []).append(review)
     return review
+
+
+def dismiss_review(pr, review):
+    pr.setdefault("events", []).append({
+        "event": "review_dismissed",
+        "dismissed_review": {
+            "review_id": str(review["id"]), "state": review["state"].lower(),
+        },
+    })
+    review["state"] = "DISMISSED"
 
 
 def root_record(pr, body, anchor, review_id=None):
@@ -195,6 +211,10 @@ if endpoint == "graphql":
 parsed = urlsplit(endpoint)
 query = parse_qs(parsed.query)
 parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
+if len(parts) == 2 and parts[0] == "users":
+    if parts[1] in settings.get("missing_users", []):
+        fail("user not found", 404)
+    output({"login": parts[1]})
 if len(parts) == 3 and parts[0] == "repos":
     if account in settings.get("repository_denied", []):
         fail("repository unreadable: " + token, 403)
@@ -226,6 +246,8 @@ if kind in ("branches", "rules"):
         output(settings.get("protection", {}))
     output(paged(settings.get("rules", []), query))
 if kind == "issues":
+    if parts[5:] == ["events"]:
+        output(paged(prs[number].get("events", []), query))
     if len(parts) == 5:
         if number not in model["issues"]:
             fail("issue not found", 404)
@@ -346,6 +368,9 @@ if parts[5] == "reviews":
         output(review)
     review_id = int(parts[6])
     review = next(r for r in pr["reviews"] if r["id"] == review_id)
+    if parts[7:] == ["dismissals"]:
+        dismiss_review(pr, review)
+        output(review)
     if parts[7:] == ["events"]:
         review["state"] = "COMMENTED"
         review["submitted_at"] = record("")["created_at"]

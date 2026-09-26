@@ -179,3 +179,33 @@ class InitDoctorTests(unittest.TestCase):
                 expected=2,
             )
             self.assertTrue(f.cli("doctor", "--live-reviewer")["ok"])
+
+
+class SingleInitTests(unittest.TestCase):
+    def test_missing_approver_is_usage_error_and_writes_nothing(self) -> None:
+        with ForgeFixture() as f:
+            result = f.cli('init', '--implementer-account', 'developer',
+                           '--reviewer-account', 'developer',
+                           '--identity-mode', 'single', expected=2)
+            self.assertIn('--approver-account', result['error'])
+            self.assertFalse((f.repo / '.agent-squad/config.json').exists())
+
+    def test_single_repeatable_approvers_and_dual_defaults(self) -> None:
+        with ForgeFixture() as f:
+            f.cli('init', '--implementer-account', 'developer',
+                  '--reviewer-account', 'DEVELOPER',
+                  '--identity-mode', 'single',
+                  '--approver-account', 'human', '--approver-account', 'other')
+            path = f.repo / '.agent-squad/config.json'
+            data = json.loads(path.read_text())
+            self.assertEqual(data['identity_mode'], 'single')
+            self.assertEqual(data['approver_accounts'], ['human', 'other'])
+            original = path.read_bytes()
+            f.initialize()
+            self.assertEqual(path.read_bytes(), original)
+        with ForgeFixture() as f:
+            f.initialize()
+            data = json.loads(
+                (f.repo / '.agent-squad/config.json').read_text())
+            self.assertEqual(data['identity_mode'], 'dual')
+            self.assertEqual(data['approver_accounts'], [])
