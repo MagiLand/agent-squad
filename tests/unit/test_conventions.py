@@ -28,6 +28,7 @@ from agent_squad.forge import (
     Evidence,
     PullRequest,
     Review,
+    ReviewState,
     Snapshot,
     ThreadState,
 )
@@ -93,9 +94,9 @@ def review(
         head,
         state
         or {
-            "approved": "APPROVED",
-            "changes_requested": "CHANGES_REQUESTED",
-            "needs_human": "COMMENTED",
+            "approved": ReviewState.APPROVED,
+            "changes_requested": ReviewState.CHANGES_REQUESTED,
+            "needs_human": ReviewState.COMMENTED,
         }[verdict],
     )
 
@@ -171,7 +172,9 @@ def snapshot(
         "clean",
     )
     return Snapshot(
-        pr, reviews, comments, conversation, (ThreadState(11, "T-11", True),)
+        pr, reviews, comments, conversation, (ThreadState(11, "T-11", True),),
+        can_resolve_threads=True, can_read_thread_resolution=True,
+        can_read_branch_rules=True,
     )
 
 
@@ -689,7 +692,7 @@ class DerivedStateTests(unittest.TestCase):
     def test_review_target_and_submission_validity(self) -> None:
         good = review(10)
         cases = [
-            replace(good, state="PENDING"),
+            replace(good, state=ReviewState.PENDING),
             replace(good, commit_id=J),
             replace(
                 good,
@@ -1069,7 +1072,9 @@ class DerivedStateTests(unittest.TestCase):
                     ),
                 )
             ),
-            derive_state(replace(s, reviews=(review(10, state="COMMENTED"),))),
+            derive_state(replace(
+                s, reviews=(review(10, state=ReviewState.COMMENTED),),
+            )),
             derive_state(
                 replace(
                     s, conversation=(decision(11, body="## Task\n\nChanged."),)

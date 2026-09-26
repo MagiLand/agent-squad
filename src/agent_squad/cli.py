@@ -14,7 +14,7 @@ from . import commands
 from . import reviewer
 from . import skills
 from .doctor import diagnose
-from .forge import GitHub
+from .forge import make_forge
 from .herdr import HerdrClient
 from .initialization import (
     AgentSquadError,
@@ -156,7 +156,7 @@ def execute(args: argparse.Namespace) -> dict:
         return diagnose(cwd, live_reviewer=args.live_reviewer)
     repository = load_initialized_repository(cwd)
     role = args.role or repository.default_role()
-    forge = GitHub(repository, role)
+    forge = make_forge(repository, role)
     key = (args.group, getattr(args, "command", None))
     if args.group == "review-worktree":
         worktree = reviewer.ReviewWorktree.for_pr(

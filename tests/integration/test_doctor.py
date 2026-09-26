@@ -445,7 +445,7 @@ class DoctorTests(unittest.TestCase):
         from agent_squad.forge import ForgeError
         with (
             patch.dict(os.environ, f.env, clear=True),
-            patch("agent_squad.doctor.GitHub.pr",
+            patch("agent_squad.github.GitHub.pr",
                   side_effect=ForgeError("API unavailable")),
         ):
             result = diagnose(f.repo)

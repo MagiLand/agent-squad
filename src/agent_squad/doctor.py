@@ -9,7 +9,7 @@ import re
 import tempfile
 from typing import Callable, Iterator
 
-from .forge import GitHub, PullRequest
+from .forge import Forge, PullRequest, make_forge
 from .herdr import HerdrClient, HerdrError
 from .initialization import (
     AgentSquadError,
@@ -127,7 +127,7 @@ def check_code_review(home: Path) -> None:
 
 def orphan_diagnostics(
     repository: Repository,
-    forge: GitHub | None,
+    forge: Forge | None,
     snapshot: dict | None,
 ) -> list[Diagnostic]:
     """Read forge state for resources scoped to this repository."""
@@ -326,12 +326,12 @@ def diagnose(
     forges = {}
     for role in ("implementer", "reviewer"):
         try:
-            forge = GitHub(repository, role)
+            forge = make_forge(repository, role)
         except AgentSquadError as error:
             add(f"{role} forge", "fail", error)
             continue
         if role == "implementer":
-            check("GitHub CLI", forge.version)
+            check(forge.version_label, forge.version)
         # verify_identity resolves the token internally. Never return a token
         # as a diagnostic value, or interpolate API bodies in success output.
         if check(f"{role} forge identity", forge.verify_identity):

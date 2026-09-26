@@ -1,17 +1,33 @@
-"""A bounded GitHub adapter with explicit identity and response validation."""
+"""Typed forge boundary, immutable evidence, and shared review vocabulary."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
+from enum import StrEnum
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 import re
-import shutil
-import subprocess
-from urllib.parse import quote, urlencode
-import json
 
-from .initialization import AgentSquadError, Repository, decode_json
+from .initialization import AgentSquadError, Repository
 from .validation import JsonValidator
+
+
+Role = Literal["implementer", "reviewer"]
+
+
+class ReviewState(StrEnum):
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    COMMENTED = "commented"
+    PENDING = "pending"
+
+
+def requested_state(verdict: str) -> ReviewState:
+    """Map the shared protocol verdict to its neutral publication state."""
+    if verdict == "needs_human":
+        return ReviewState.COMMENTED
+    if verdict in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED):
+        return ReviewState(verdict)
+    raise AgentSquadError(f"invalid review verdict: {verdict}")
 
 
 class ForgeError(AgentSquadError):
@@ -66,49 +82,19 @@ class Evidence:
     created_at: str
     body: str
 
-    @classmethod
-    def from_dict(cls, value: object, *, review: bool = False) -> Evidence:
-        data = object_value(value, "evidence")
-        user = object_value(data.get("user"), "evidence.user")
-        timestamp = (
-            data.get("submitted_at") if review else data.get("created_at")
-        )
-        if review and data.get("state") == "PENDING":
-            timestamp = data.get("created_at") or "1970-01-01T00:00:00Z"
-        return cls(
-            positive(data.get("id"), "evidence.id"),
-            V.require_string(user.get("login"), "evidence.user.login"),
-            V.require_timestamp(timestamp, "evidence.timestamp"),
-            text_value(
-                "" if data.get("body") is None else data["body"],
-                "evidence.body",
-            ).replace("\r\n", "\n"),
-        )
-
 
 @dataclass(frozen=True)
 class Review:
     evidence: Evidence
     commit_id: str
-    state: str
+    state: ReviewState
+    dismissed: bool = False
+    # Adapter-supplied display text is never used for authority decisions.
+    display_state: str | None = None
 
-    @classmethod
-    def from_dict(cls, value: object) -> Review:
-        data = object_value(value, "review")
-        state = V.require_string(data.get("state"), "review.state")
-        if state not in (
-            "PENDING",
-            "APPROVED",
-            "CHANGES_REQUESTED",
-            "COMMENTED",
-            "DISMISSED",
-        ):
-            raise ForgeError(f"unknown review state: {state}")
-        return cls(
-            Evidence.from_dict(data, review=True),
-            oid(data.get("commit_id"), "review.commit_id"),
-            state,
-        )
+    @property
+    def state_label(self) -> str:
+        return self.display_state or self.state.value
 
 
 @dataclass(frozen=True)
@@ -120,33 +106,6 @@ class Comment:
     line: int | None
     start_line: int | None
     side: str | None
-
-    @classmethod
-    def from_dict(cls, value: object) -> Comment:
-        data = object_value(value, "review comment")
-        numbers = {
-            key: None if data.get(key) is None else positive(data[key], key)
-            for key in ("in_reply_to_id", "line", "start_line")
-        }
-        strings = {
-            key: (
-                None
-                if data.get(key) is None
-                else V.require_string(data[key], key)
-            )
-            for key in ("path", "side")
-        }
-        return cls(
-            Evidence.from_dict(data),
-            positive(
-                data.get("pull_request_review_id"), "pull_request_review_id"
-            ),
-            numbers["in_reply_to_id"],
-            strings["path"],
-            numbers["line"],
-            numbers["start_line"],
-            strings["side"],
-        )
 
 
 @dataclass(frozen=True)
@@ -163,41 +122,12 @@ class PullRequest:
     merge_commit: str | None
     mergeable_state: str | None
 
-    @classmethod
-    def from_dict(cls, value: object) -> PullRequest:
-        data = object_value(value, "pull request")
-        head = object_value(data.get("head"), "pull request head")
-        base = object_value(data.get("base"), "pull request base")
-        state = data.get("state")
-        if state not in ("open", "closed"):
-            raise ForgeError("pull request state must be open or closed")
-        merged = boolean(data.get("merged"), "merged")
-        merge_commit = data.get("merge_commit_sha")
-        if merge_commit is not None:
-            merge_commit = oid(merge_commit, "merge_commit_sha")
-        mergeable = data.get("mergeable_state")
-        if mergeable is not None:
-            mergeable = text_value(mergeable, "mergeable_state")
-        return cls(
-            Evidence.from_dict(data),
-            positive(data.get("number"), "PR number"),
-            text_value(data.get("title"), "PR title"),
-            oid(head.get("sha"), "head.sha"),
-            V.require_string(head.get("ref"), "head.ref"),
-            oid(base.get("sha"), "base.sha"),
-            V.require_string(base.get("ref"), "base.ref"),
-            state,
-            merged,
-            merge_commit,
-            mergeable,
-        )
-
 
 @dataclass(frozen=True)
 class ThreadState:
     root_id: int
-    node_id: str
-    resolved: bool
+    node_id: str | None
+    resolved: bool | None
 
 
 @dataclass(frozen=True)
@@ -207,454 +137,130 @@ class Snapshot:
     comments: tuple[Comment, ...]
     conversation: tuple[Evidence, ...]
     threads: tuple[ThreadState, ...]
+    can_resolve_threads: bool = False
+    can_read_thread_resolution: bool = False
+    can_read_branch_rules: bool = False
+    approved_state_label: str = "approved"
 
 
-THREAD_QUERY = """query SquadThreads(
-  $owner:String!, $repo:String!, $pr:Int!, $cursor:String
-) {
-  repository(owner:$owner, name:$repo) { pullRequest(number:$pr) {
-    reviewThreads(first:100, after:$cursor) {
-      nodes { id isResolved comments(first:1) { nodes { databaseId } } }
-      pageInfo { hasNextPage endCursor }
-    }
-  } }
-}"""
-RESOLVE_MUTATION = """mutation SquadResolve($id:ID!) {
-  resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
-}"""
+@dataclass(frozen=True)
+class Anchor:
+    path: str
+    line: int
+    start_line: int | None = None
 
 
-class GitHub:
-    """One process-local forge identity. Mutation calls are never retried."""
+@dataclass(frozen=True)
+class Approval:
+    login: str
+    state: ReviewState
+    commit_id: str
+    dismissed: bool
+    timestamp: str
+    id: int
 
-    def __init__(
-        self, repository: Repository, role: str, *, timeout: float = 45
-    ) -> None:
-        assert repository.configuration is not None
-        self.repository = repository
-        self.role = role
-        self.account = repository.configuration.account(role)
-        forge = repository.configuration.forge
-        self.prefix = (
-            f'/repos/{quote(forge.owner, safe="")}'
-            f'/{quote(forge.repo, safe="")}'
+
+@dataclass(frozen=True)
+class ReviewComment:
+    anchor: Anchor
+    body: str
+
+
+@dataclass(frozen=True)
+class ReviewPublication:
+    head: str
+    state: ReviewState
+    body: str
+    fallback_body: str
+    comments: tuple[ReviewComment, ...]
+    base: str
+
+
+class IssueRecord(TypedDict):
+    number: int
+    title: str
+    state: str
+    is_pull_request: bool
+    body: str
+    labels: list[str]
+    comments: tuple[Evidence, ...]
+
+
+class MergeResult(TypedDict):
+    sha: str
+    message: str
+
+
+@runtime_checkable
+class Forge(Protocol):
+    """Only operations consumed by this increment; transport stays private."""
+
+    @property
+    def role(self) -> Role: ...
+
+    @property
+    def account(self) -> str: ...
+
+    @property
+    def version_label(self) -> str: ...
+
+    @property
+    def can_resolve_threads(self) -> bool: ...
+
+    @property
+    def can_read_thread_resolution(self) -> bool: ...
+
+    @property
+    def can_read_branch_rules(self) -> bool: ...
+
+    def version(self) -> str: ...
+    def verify_identity(self) -> None: ...
+    def repository_record(self) -> dict[str, object]: ...
+    def repository_permission(self) -> str: ...
+    def issue(self, number: int) -> IssueRecord: ...
+    def pr(self, number: int) -> PullRequest: ...
+    def reviews(self, number: int) -> tuple[Review, ...]: ...
+    def approvals(self, number: int) -> tuple[Approval, ...]: ...
+    def snapshot(self, number: int) -> Snapshot: ...
+    def thread_states(self, number: int) -> tuple[ThreadState, ...]: ...
+    def branch_rules(self, branch: str) -> dict[str, object]: ...
+    def branch_prs(self, branch: str) -> list[dict[str, object]]: ...
+
+    def create_pr(
+        self, title: str, head_branch: str, base_branch: str, body: str,
+    ) -> PullRequest: ...
+
+    def update_body(self, number: int, body: str) -> PullRequest: ...
+
+    def prepare_review(
+        self, number: int, *, reviews: tuple[Review, ...],
+    ) -> None: ...
+
+    def post_review(
+        self, number: int, publication: ReviewPublication,
+    ) -> Review: ...
+
+    def post_root(
+        self, number: int, head: str, review_id: int,
+        anchor: Anchor, body: str,
+    ) -> Comment: ...
+
+    def reply(self, number: int, root: int, body: str) -> Comment: ...
+    def comment(self, number: int, body: str) -> Evidence: ...
+    def resolve(self, node_id: str) -> dict[str, object]: ...
+    def merge(self, number: int, head: str, method: str) -> MergeResult: ...
+
+
+def make_forge(repository: Repository, role: Role) -> Forge:
+    """Select a configured adapter without reading credentials."""
+    assert repository.configuration is not None
+    kind = repository.configuration.forge.kind
+    if kind == "github":
+        from .github import GitHub
+
+        return GitHub(repository, role)
+    if kind == "forgejo":
+        raise AgentSquadError(
+            "forge.kind forgejo is not implemented until Increment 3"
         )
-        self.timeout = timeout
-        self._token: str | None = None
-        self._verified = False
-        self.executable = shutil.which("gh")
-        if self.executable is None:
-            raise ForgeError("gh is not installed or not on PATH")
-
-    def _run(
-        self,
-        arguments: list[str],
-        *,
-        authenticated: bool = False,
-        body: object = None,
-    ) -> str:
-        env = os.environ.copy()
-        for key in (
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-        ):
-            env.pop(key, None)
-        if authenticated:
-            env["GH_TOKEN"] = self.token()
-        env["GH_PROMPT_DISABLED"] = "1"
-        try:
-            result = subprocess.run(
-                [self.executable, *arguments],
-                cwd=self.repository.root,
-                env=env,
-                shell=False,
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
-                timeout=self.timeout,
-                input=None if body is None else json.dumps(body),
-            )
-        except subprocess.TimeoutExpired:
-            raise ForgeError(
-                "gh call timed out; re-read the PR before repeating a mutation"
-            ) from None
-        except OSError as error:
-            raise ForgeError(f"could not execute gh: {error}") from None
-        if result.returncode:
-            # Token-resolution output is never included, even on a failing
-            # command.
-            if arguments[:2] == ["auth", "token"]:
-                raise ForgeError(
-                    f"cannot resolve token for configured {self.role} account"
-                )
-            detail = (result.stderr or result.stdout).strip()
-            if self._token:
-                detail = detail.replace(self._token, "[redacted]")
-            status = re.search(r"HTTP (\d{3})", detail)
-            raise ForgeError(
-                " ".join(detail.splitlines()),
-                int(status[1]) if status else None,
-            )
-        return result.stdout
-
-    def token(self) -> str:
-        if self._token is None:
-            value = self._run(
-                ["auth", "token", "--user", self.account]
-            ).strip()
-            if not value or "\n" in value or "\r" in value:
-                raise ForgeError(f"invalid token response for {self.role}")
-            self._token = value
-        return self._token
-
-    def version(self) -> str:
-        """Report the installed version without pinning a release number."""
-        value = self._run(["--version"]).strip()
-        if not value:
-            raise ForgeError("gh --version returned no version text")
-        return value
-
-    def verify_identity(self) -> None:
-        if not self._verified:
-            data = object_value(self.api("/user"), "user")
-            login = V.require_string(data.get("login"), "user.login")
-            if login.casefold() != self.account.casefold():
-                raise ForgeError(
-                    f"GET /user does not match configured {self.role} account"
-                )
-            self._verified = True
-
-    def api(
-        self,
-        endpoint: str,
-        *,
-        method: str = "GET",
-        body: object = None,
-        mutation: bool | None = None,
-    ) -> object:
-        mutating = method != "GET" if mutation is None else mutation
-        if mutating:
-            self.verify_identity()
-        args = [
-            "api",
-            endpoint,
-            "--hostname",
-            "github.com",
-            "--method",
-            method,
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
-        ]
-        if body is not None:
-            args.extend(["--input", "-"])
-        output = self._run(args, authenticated=True, body=body)
-        try:
-            value = decode_json(output) if output.strip() else None
-        except ValueError:
-            raise ForgeError("gh returned invalid JSON") from None
-        if (
-            endpoint == "graphql"
-            and isinstance(value, dict)
-            and value.get("errors")
-        ):
-            messages = [
-                text_value(
-                    object_value(e, "GraphQL error").get("message"), "message"
-                )
-                for e in array(value["errors"], "GraphQL errors")
-            ]
-            detail = "; ".join(messages)
-            if self._token:
-                detail = detail.replace(self._token, "[redacted]")
-            raise ForgeError(detail)
-        return value
-
-    def listing(self, endpoint: str) -> list:
-        result = []
-        page = 1
-        while True:
-            separator = "&" if "?" in endpoint else "?"
-            entries = array(
-                self.api(f"{endpoint}{separator}per_page=100&page={page}"),
-                endpoint,
-            )
-            result.extend(entries)
-            if len(entries) < 100:
-                return result
-            page += 1
-
-    def repository_record(self) -> dict[str, object]:
-        data = object_value(self.api(self.prefix), "repository")
-        positive(data.get("id"), "repository.id")
-        V.require_string(data.get("full_name"), "repository.full_name")
-        return data
-
-    def repository_permission(self) -> str:
-        """Read this account's base repository permission, including roles."""
-        data = object_value(
-            self.api(
-                f'{self.prefix}/collaborators/'
-                f'{quote(self.account, safe="")}/permission'
-            ),
-            "collaborator permission",
-        )
-        user = object_value(data.get("user"), "collaborator user")
-        login = V.require_string(user.get("login"), "collaborator login")
-        if login.casefold() != self.account.casefold():
-            raise ForgeError("collaborator permission returned another user")
-        permission = data.get("permission")
-        # GitHub maps maintain to write, triage to read, and custom roles to
-        # their base permission. Do not infer access from role_name.
-        if permission not in ("admin", "write", "read", "none"):
-            raise ForgeError("invalid collaborator permission")
-        return permission
-
-    def issue(self, number: int) -> dict[str, object]:
-        data = object_value(
-            self.api(f"{self.prefix}/issues/{number}"), "issue"
-        )
-        evidence = Evidence.from_dict(data)
-        labels = [
-            V.require_string(
-                object_value(label, "label").get("name"), "label.name"
-            )
-            for label in array(data.get("labels"), "labels")
-        ]
-        comments = tuple(
-            Evidence.from_dict(c)
-            for c in self.listing(f"{self.prefix}/issues/{number}/comments")
-        )
-        return {
-            "number": positive(data.get("number"), "issue.number"),
-            "title": text_value(data.get("title"), "issue.title"),
-            "state": text_value(data.get("state"), "issue.state"),
-            "is_pull_request": "pull_request" in data,
-            "body": evidence.body,
-            "labels": labels,
-            "comments": comments,
-        }
-
-    def pr(self, number: int) -> PullRequest:
-        return PullRequest.from_dict(self.api(f"{self.prefix}/pulls/{number}"))
-
-    def reviews(self, number: int) -> tuple[Review, ...]:
-        return tuple(
-            Review.from_dict(r)
-            for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
-        )
-
-    def snapshot(self, number: int) -> Snapshot:
-        pr = self.pr(number)
-        reviews = self.reviews(number)
-        flat = {
-            c.evidence.id: c
-            for c in (
-                Comment.from_dict(c)
-                for c in self.listing(f"{self.prefix}/pulls/{number}/comments")
-            )
-        }
-        comments = dict(flat)
-        for review in reviews:
-            for value in self.listing(
-                f"{self.prefix}/pulls/{number}/reviews/"
-                f"{review.evidence.id}/comments"
-            ):
-                comment = Comment.from_dict(value)
-                # The flat endpoint has anchors; the per-review endpoint has
-                # all replies.
-                comments[comment.evidence.id] = flat.get(
-                    comment.evidence.id, comment
-                )
-        conversation = tuple(
-            Evidence.from_dict(c)
-            for c in self.listing(f"{self.prefix}/issues/{number}/comments")
-        )
-        return Snapshot(
-            pr,
-            reviews,
-            tuple(comments.values()),
-            conversation,
-            self.thread_states(number),
-        )
-
-    def thread_states(self, number: int) -> tuple[ThreadState, ...]:
-        config = self.repository.configuration
-        cursor = None
-        seen = set()
-        result = []
-        while True:
-            data = self.api(
-                "graphql",
-                method="POST",
-                mutation=False,
-                body={
-                    "query": THREAD_QUERY,
-                    "variables": {
-                        "owner": config.forge.owner,
-                        "repo": config.forge.repo,
-                        "pr": number,
-                        "cursor": cursor,
-                    },
-                },
-            )
-            try:
-                connection = object_value(
-                    data["data"]["repository"]["pullRequest"]["reviewThreads"],
-                    "threads",
-                )
-            except (KeyError, TypeError):
-                raise ForgeError(
-                    "missing GraphQL reviewThreads response"
-                ) from None
-            for value in array(connection.get("nodes"), "thread nodes"):
-                node = object_value(value, "thread")
-                roots = array(
-                    object_value(node.get("comments"), "thread comments").get(
-                        "nodes"
-                    ),
-                    "root nodes",
-                )
-                if not roots:
-                    raise ForgeError("thread has no root comment")
-                result.append(
-                    ThreadState(
-                        positive(
-                            object_value(roots[0], "root").get("databaseId"),
-                            "root id",
-                        ),
-                        V.require_string(node.get("id"), "thread.id"),
-                        boolean(node.get("isResolved"), "thread.isResolved"),
-                    )
-                )
-            page = object_value(connection.get("pageInfo"), "pageInfo")
-            if not boolean(page.get("hasNextPage"), "hasNextPage"):
-                return tuple(result)
-            cursor = V.require_string(page.get("endCursor"), "endCursor")
-            if cursor in seen:
-                raise ForgeError("GraphQL pagination repeated a cursor")
-            seen.add(cursor)
-
-    def create_pr(self, body: dict[str, object]) -> PullRequest:
-        return PullRequest.from_dict(
-            self.api(f"{self.prefix}/pulls", method="POST", body=body)
-        )
-
-    def branch_rules(self, branch: str) -> dict[str, object]:
-        """Report classic protection and active rulesets when exposed."""
-        result = {}
-        for name, endpoint in (
-            ("protection", f"branches/{quote(branch, safe='')}/protection"),
-            ("rules", f"rules/branches/{quote(branch, safe='')}"),
-        ):
-            try:
-                value = (
-                    self.listing(f"{self.prefix}/{endpoint}")
-                    if name == "rules"
-                    else self.api(f"{self.prefix}/{endpoint}")
-                )
-                if name == "protection":
-                    object_value(value, "branch protection")
-                result[name] = value
-            except ForgeError as error:
-                if error.status == 404 or (
-                    error.status == 403 and re.search(
-                        r"upgrade|not available.*plan|requires GitHub",
-                        str(error), re.IGNORECASE,
-                    )
-                ):
-                    result[name] = {"visibility": "no rule visible"}
-                else:
-                    raise
-        return result
-
-    def merge(self, number: int, head: str, method: str) -> dict[str, str]:
-        data = object_value(self.api(
-            f"{self.prefix}/pulls/{number}/merge", method="PUT",
-            body={"sha": head, "merge_method": method},
-        ), "merge response")
-        message = text_value(data.get("message"), "merge.message")
-        if not boolean(data.get("merged"), "merge.merged"):
-            raise ForgeError(message, 405)
-        return {"sha": oid(data.get("sha"), "merge.sha"), "message": message}
-
-    def branch_prs(self, branch: str) -> list:
-        config = self.repository.configuration
-        query = urlencode(
-            {"head": f"{config.forge.owner}:{branch}", "state": "all"}
-        )
-        return self.listing(f"{self.prefix}/pulls?{query}")
-
-    def update_body(self, number: int, body: str) -> PullRequest:
-        return PullRequest.from_dict(
-            self.api(
-                f"{self.prefix}/pulls/{number}",
-                method="PATCH",
-                body={"body": body},
-            )
-        )
-
-    def post_review(self, number: int, payload: dict[str, object]) -> Review:
-        return Review.from_dict(
-            self.api(
-                f"{self.prefix}/pulls/{number}/reviews",
-                method="POST",
-                body=payload,
-            )
-        )
-
-    def submit_pending(self, number: int, review: int) -> Review:
-        return Review.from_dict(
-            self.api(
-                f"{self.prefix}/pulls/{number}/reviews/{review}/events",
-                method="POST",
-                body={"event": "COMMENT"},
-            )
-        )
-
-    def post_root(self, number: int, payload: dict[str, object]) -> Comment:
-        return Comment.from_dict(
-            self.api(
-                f"{self.prefix}/pulls/{number}/comments",
-                method="POST",
-                body=payload,
-            )
-        )
-
-    def reply(self, number: int, root: int, body: str) -> Comment:
-        return Comment.from_dict(
-            self.api(
-                f"{self.prefix}/pulls/{number}/comments/{root}/replies",
-                method="POST",
-                body={"body": body},
-            )
-        )
-
-    def comment(self, number: int, body: str) -> Evidence:
-        return Evidence.from_dict(
-            self.api(
-                f"{self.prefix}/issues/{number}/comments",
-                method="POST",
-                body={"body": body},
-            )
-        )
-
-    def resolve(self, node_id: str) -> dict[str, object]:
-        value = self.api(
-            "graphql",
-            method="POST",
-            body={"query": RESOLVE_MUTATION, "variables": {"id": node_id}},
-        )
-        try:
-            thread = object_value(
-                value["data"]["resolveReviewThread"]["thread"],
-                "resolved thread",
-            )
-        except (KeyError, TypeError):
-            raise ForgeError("missing resolveReviewThread response") from None
-        if thread.get("id") != node_id or thread.get("isResolved") is not True:
-            raise ForgeError("forge did not confirm thread resolution")
-        return thread
+    raise AgentSquadError(f"unsupported forge.kind: {kind}")

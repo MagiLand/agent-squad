@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
 from agent_squad.conventions import MERGE_INSTRUCTION
-from agent_squad.forge import GitHub
+from agent_squad.github import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
     load_initialized_repository, run_git,

@@ -60,7 +60,7 @@ class ConfigurationTests(unittest.TestCase):
                 (data if parent is None else data[parent])["unknown"] = True
                 Configuration.from_dict(data)
         for group, key, value in [
-            ("forge", "kind", "forgejo"),
+            ("forge", "kind", "unsupported"),
             ("forge", "owner", "a/b"),
             ("forge", "repo", "white space"),
             ("forge", "owner", 1),

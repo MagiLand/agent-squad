@@ -127,8 +127,8 @@ class Configuration:
             raise ConfigurationError("schema_version must equal 2")
         forge = V.require_object(data["forge"], "forge")
         V.check_fields(forge, required={"kind", "owner", "repo"}, path="forge")
-        if forge["kind"] != "github":
-            raise ConfigurationError("forge.kind must be github")
+        if forge["kind"] not in ("github", "forgejo"):
+            raise ConfigurationError("forge.kind must be github or forgejo")
         for key in ("owner", "repo"):
             text = V.require_string(forge[key], f"forge.{key}")
             if re.search(r"[/\s]", text):
@@ -406,7 +406,7 @@ def initialize_repository(
     repo: str | None = None,
     base_branch: str | None = None,
 ) -> dict[str, object]:
-    from .forge import GitHub
+    from .forge import make_forge
 
     repository = discover_git_worktree(start)
     url = git_output(repository.root, "remote", "get-url", "origin")
@@ -470,7 +470,7 @@ def initialize_repository(
         raise ConfigurationError(
             f"base_branch does not exist on origin: {config.base_branch}"
         )
-    GitHub(repository, "implementer").repository_record()
+    make_forge(repository, "implementer").repository_record()
     validate_roots(repository, writable=True)
     repository.control_root.mkdir(parents=True, exist_ok=True)
     exclude = repository.common / "info/exclude"

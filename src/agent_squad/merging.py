@@ -10,7 +10,7 @@ import shutil
 from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
-from .forge import ForgeError, GitHub
+from .forge import ForgeError, Forge
 from .herdr import HerdrClient
 from .initialization import (
     AgentSquadError,
@@ -381,11 +381,14 @@ def fast_forward_primary(
 
 
 def merge_pr(
-    repository: Repository, forge: GitHub, pr: int,
+    repository: Repository, forge: Forge, pr: int,
     *, accept_moved_base: bool = False, accept_merge_hold: bool = False,
 ) -> dict:
     snapshot = forge.snapshot(pr)
-    rules = forge.branch_rules(snapshot.pr.base_branch)
+    rules = (
+        forge.branch_rules(snapshot.pr.base_branch)
+        if forge.can_read_branch_rules else {"visibility": "not visible"}
+    )
     # Re-read authority after the potentially slow rules lookup.
     snapshot = forge.snapshot(pr)
     state = state_for(repository, snapshot)
