@@ -20,6 +20,8 @@ This is a delta over v0.5.0 only, not a consolidated specification. The v0.5.0 d
 
 The normative language of v0.4.4 §3 applies: **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** retain their defined meanings. Sections marked *Informative* are not independently normative. `v0.5.0 §N` names the baseline; `§N` alone names this delta. A retained subsection keeps its baseline number, including when referenced from this delta. Within copied text, references to retained sections resolve to that retained baseline text.
 
+The skill-rule markers retain their baseline meanings: **[verbatim]** marks a rule quoted unchanged from the baseline prompts, **[adapted]** an adapted rule, and **[new]** a rule with no counterpart in those prompts.
+
 The input is the whole v0.6.0 plan, with later decisions taking precedence where they explicitly amend earlier ones. Section 20 maps every decision and lists departures and evidence-driven refinements. The v0.5.0 text is not edited. Historical v0.5.0 release requirements remain historical, not new release gates. Increment numbers inside retained historical text refer to that baseline release; the new work order is exclusively §17.
 
 The package version becomes `0.6.0` only in Increment 6. The protocol tag remains `AGENT_SQUAD/0.5.0`: no tagged-line or Herdr-line grammar changes. The release audit checks a declared protocol constant independently of the package version.
@@ -29,6 +31,8 @@ The package version becomes `0.6.0` only in Increment 6. The protocol tag remain
 ## 2. Disposition of v0.5.0 Sections
 
 The baseline's title, metadata, and Amendments list are historical context. Its §2 mapping of v0.4.4 continues to apply through the baseline. New subsections §11.0, §11.4, §16.6, and §17.8 are defined here.
+
+A parent row governs only the parent's own introductory text; each subsection's row governs that subsection. Informative notes under retained headings explain the disposition without amending the retained rules.
 
 | v0.5.0 section | Disposition | Where in this delta |
 | --- | --- | --- |
@@ -368,7 +372,7 @@ Derived facts:
 
   1. `merged` when the PR is merged; otherwise `closed` when closed without merge.
   2. `address_findings` when the agent-side approval conditions hold but `unaddressed_findings` holds.
-  3. `await_human_approval` in `single` mode when the agent-side approval conditions hold but condition 5a or 5b does not, with separate reasons for missing approval and human request-changes. An active stop or unresolved protocol decision takes precedence over this wait.
+  3. `await_human_approval` in `single` mode when the agent-side approval conditions hold, neither `stopped` nor `needs_decision` holds, and condition 5a or 5b does not, with separate reasons for missing approval and human request-changes.
   4. `merge` when all approval conditions hold, a standing instruction is in force, the latest review has no merge hold, and neither `stopped` nor `needs_decision` holds.
   5. `approved` when all approval conditions hold.
   6. `stopped` when that gate holds.
@@ -428,7 +432,9 @@ The `rebase` merge method remains unsupported. A failed integration check retain
 
 ## 8. Herdr Handoff
 
-All of v0.5.0 §8, including §8.3 and §8.4, is **retained**. The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the fixed handoff lines or the asynchronous discipline.
+All of v0.5.0 §8, including §8.3 and §8.4, is **retained**.
+
+*Informative.* The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the fixed handoff lines or the asynchronous discipline.
 
 ## 9. Configuration (Schema Version 2)
 
@@ -515,7 +521,7 @@ This is the whole surface. It is not an invitation to expose internal steps as c
 
 ### 10.3 `doctor`
 
-Checks use the factory and neutral adapter methods. A failed check exits 1; a safely retained live Reviewer exits 3; warnings alone do not fail. Error details may add a role or path to these named failure messages, but MUST NOT include token contents.
+Checks use the factory and neutral adapter methods. `doctor.py` contains no forge name or branch on `forge.kind`: applicability of transport prerequisites is implemented inside the selected adapter. It calls `version()` using the adapter's `version_label`, then `verify_identity()` for each role; each method raises the applicable named failure below as `ForgeError`. Configuration validation supplies configuration failures; common mode checks consume neutral permissions and `user_exists()` results. A failed check exits 1; a safely retained live Reviewer exits 3; warnings alone do not fail. Error details may add a role or path to these named failure messages, but MUST NOT include token contents.
 
 | Applicability | Check | Failure text |
 | --- | --- | --- |
@@ -529,13 +535,13 @@ Checks use the factory and neutral adapter methods. A failed check exits 1; a sa
 | Single only | Equal role logins and non-empty independent approver list | `single identity_mode requires equal forge accounts`; `single identity_mode requires approver_accounts`; `approver account must differ from role accounts` |
 | Single only | Shared account has push/write or admin permission | `shared account requires repository push permission` |
 | Single only | Every configured approver login exists | `approver account does not exist: <login>` |
-| GitHub | Executable/version; per-role token lookup through gh | `GitHub CLI not found on PATH`; safe CLI/version/token error |
-| Forgejo | Valid configured API URL; reachable version endpoint; version at least 16.0.0 | `invalid forge.base_url: <reason>`; `cannot read forge version`; `Forgejo version must be at least 16.0.0` |
-| Forgejo, each role | Absolute regular token file outside worktrees; owner-only mode; one non-empty line | `<role> token_file must be an absolute regular file outside repository worktrees`; `<role> token_file must have no group or other permissions`; `<role> token_file must contain one non-empty line` |
+| GitHub | Adapter `version()` checks executable/version; `verify_identity()` resolves the per-role token through gh | `GitHub CLI not found on PATH`; safe CLI/version/token error |
+| Forgejo | Configuration validation checks API URL; adapter `version()` checks reachable version endpoint and version at least 16.0.0 | `invalid forge.base_url: <reason>`; `cannot read forge version`; `Forgejo version must be at least 16.0.0` |
+| Forgejo, each role | Adapter `verify_identity()` validates absolute regular token file outside worktrees, owner-only mode and one non-empty line before use | `<role> token_file must be an absolute regular file outside repository worktrees`; `<role> token_file must have no group or other permissions`; `<role> token_file must contain one non-empty line` |
 | All | Herdr executable, schema, socket and integration for both harness kinds | underlying Herdr error with affected check named |
 | All | Installed skills match package, expected Claude symlinks and installed code-review skill | `installed skill differs from package: <path>`; `skill symlink must point to <target>`; `skill requires frontmatter name: code-review: <path>` |
 
-The GitHub check label and existing failure details may be preserved byte for byte in Increment 1. Forgejo repository push permission is read from `permissions.push` (Setup 009–010); a role's base permission is normalized before the common mode check. Approver existence is not proof that the forge will accept or count its review; forge branch protections remain authoritative at merge time.
+Labels and transport-specific failure text belong to the adapter, including Increment 1's existing `GitHub CLI` label; moving that label out of `doctor.py` preserves its displayed output without exempting the module from plan §4.1. Forgejo repository push permission is read from `permissions.push` (Setup 009–010); a role's base permission is normalized before the common mode check. Approver existence is not proof that the forge will accept or count its review; forge branch protections remain authoritative at merge time.
 
 Retain the live Implementer-name/kind check (absence is a warning), orphan reporting for closed/merged PR resources and closed-issue scratch, and the `.gitmodules` warning. An unreadable issue/PR is a failure, never an assumed orphan; doctor never removes residue. Keep all Git object-format, committed-HEAD, ownership, and root probes.
 
@@ -553,7 +559,7 @@ These reads refer to the configured forge, not to GitHub as a universal authorit
 
 ### 11.0 Neutral protocol, records, and capabilities
 
-`forge.py` defines a typed `Forge` protocol and `make_forge(repository: Repository, role: str) -> Forge`, selected only by `forge.kind`. Each role has a process-local adapter instance with its configured account. Factory selection, adapter code, configuration validation, and user-facing prerequisite labels may name a forge; `conventions.py` contains no forge-specific rule or wire-state literal. Command and lifecycle code use the protocol. `EVENTS`/`STATES` wire maps leave `conventions.py`; `Anchor` emits no payload. Raw HTTP endpoints, `gh` commands, transport errors and review payload fields stay in adapters.
+`forge.py` defines a typed `Forge` protocol and `make_forge(repository: Repository, role: Role) -> Forge`, selected only by `forge.kind`. Each role has a process-local adapter instance with its configured account. Factory selection, adapter code and configuration validation may name a forge; `conventions.py`, `commands.py`, `merging.py`, `reviewer.py` and `doctor.py` contain no forge name. They use the protocol, neutral states, capabilities and adapter-supplied diagnostics, never a branch on kind. `EVENTS`/`STATES` wire maps leave `conventions.py`; `Anchor` emits no payload. Raw HTTP endpoints, `gh` commands, transport errors and review payload fields stay in adapters.
 
 **Neutral records.** Use typed, immutable records (typed mappings are acceptable for existing dictionary-shaped outputs). IDs are positive integers unless explicitly an opaque thread identity; SHAs are full object IDs; timestamps are offset-bearing ISO 8601 values with §7.1 instant ordering; bodies normalize CRLF to LF without otherwise rewriting text.
 
@@ -577,14 +583,14 @@ The shared review states are exactly `approved`, `changes_requested`, `commented
 
 `approvals(number)` returns all approve-or-request-changes reviews by every login, including dismissed ones, in deterministic submission-time/ID order. Ordinary comment and pending reviews are excluded. When GitHub exposes only `DISMISSED`, the adapter joins the review ID to its documented `review_dismissed` event's original state, keeping the review's author, commit and submission time, and sets `dismissed=true`. The original state is available in the [GitHub issue-event contract](https://docs.github.com/en/rest/using-the-rest-api/issue-event-types#review_dismissed); never fabricate it or treat the dismissal event's actor as the reviewer. Missing or ambiguous history needed to classify such a record is a response-validation failure, not permission to revive an older approval. These additional reads belong to the new approvals method; Increment 1's existing loop does not call it. The common derivation selects configured approvers and their latest approve-or-request-changes review before examining head/dismissal. No adapter treats server `stale` or `official` as proof of approval.
 
-**Complete protocol surface.** The following are method contracts; equivalent keyword-only signatures or typed request records preserve these contracts. A method that adds transport-private data is not thereby a new common method. `number`, review IDs and root IDs are positive integers; `branch`, login, body and opaque thread ID are strings; `head` is a full SHA; `method` is `merge` or `squash`. `Role` is `implementer|reviewer`. The listed operations are not CLI commands.
+**Complete protocol surface.** The following are method contracts; equivalent keyword-only signatures or typed request records preserve these contracts. A method that adds transport-private data is not thereby a new common method. `number`, review IDs and root IDs are positive integers; `branch`, login, body and opaque thread ID are strings; `head` is a full SHA; `method` is `merge` or `squash`. `Role` is `implementer|reviewer`. The listed operations are not CLI commands. Besides the capability flags below, the protocol exposes a read-only `version_label: str` supplied by the adapter for the doctor version check; it carries no transport decision into the caller.
 
 Every I/O method may raise `ForgeError(message, status=None)` for bounded transport failure, inaccessible/missing resources, bad JSON, malformed data or identity mismatch; messages redact credentials. Invalid configuration/factory inputs raise `AgentSquadError`; protected publication drafts raise the existing `GateError` (exit 4). The extra gate/failure contracts in the last column are exhaustive exceptions to ordinary success/failure handling. Mutations are never automatically retried.
 
 | Method and inputs | Neutral result | Additional contract / errors |
 | --- | --- | --- |
-| `version()` | version text | minimum-version enforcement in the adapter/doctor |
-| `verify_identity()` | none | verifies selected role before first mutation; no token result |
+| `version()` | version text | adapter checks its transport prerequisite and enforces any minimum version; raises the applicable §10.3 failures |
+| `verify_identity()` | none | adapter resolves and validates its selected role's credential source and identity before first mutation; raises applicable §10.3 failures; no token result |
 | `repository_record()` | repository record | validates configured repository identity |
 | `repository_permission()` | normalized permission | selected role's base permission, not a custom-role name |
 | `user_exists(login)` | boolean | absent login is false; access or transport failure is an error |
@@ -654,6 +660,8 @@ The Forgejo fake is a committed `http.server.ThreadingHTTPServer` on `127.0.0.1:
 
 The fake also shuffles comments, varies timestamp offsets, and serves multiple paginated review/issue lists to test defensive handling even where the live sample did not reproduce variation (§19). Per-review comments are returned unpaginated as the F16 handler does. It can expose or hide resolver/rule data. Its private test log records each request and fake Authorization value to prove token-per-role selection; CLI output must never reveal even fake tokens. No real token is put in a fixture or evidence record. Automated tests call neither a real model nor real Herdr.
 
+For operations not exercised by #54, seed the fake from the pinned source contracts in §11.4 and mark the cases **synthetic, source-backed**: squash merge, successful explicit deletion of an existing branch, PR-body PATCH and issue GET. Their inclusion in automated tests is not live evidence; retain their §19 limitations until a recorded trial verifies them.
+
 ### 11.4 Forgejo through the standard-library HTTP client
 
 The adapter uses `urllib.request` against `<forge.base_url>/api/v1`, preserving a configured instance sub-path. Minimum supported version is 16.0.0; the reference experiment version is 16.0.3. This is a support policy with no version-dependent behaviour; other versions have not been live-trialled. No `fj`, HTTP library or forge SDK is added. URL components are encoded individually. Requests have bounded timeouts, validate JSON and response types, and redact credentials from errors. Do not forward an Authorization header across origins or follow redirects to an unvalidated origin.
@@ -672,7 +680,7 @@ The table covers every row of plan §4.3. Observations refer to [#54](verificati
 | Comment enumeration | F16 [GetPullReviewComments and ToPullReviewCommentList](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/pull_review.go) returns the whole converted list; conversion iterates grouped maps. E1's three reads happened to have the same order | Read once per review and sort by ID. Do not assert live random order or paginate this endpoint. |
 | Base tip | Setup 016–017: `base.sha` advanced while `merge_base` stayed fixed | Accept both fields; compute review base locally after fetch. Never replace moved-base checks with the API base field. |
 | Ranges | E5 and the F16 struct: start position plus additional lines | Use §11.2's start-line mapping; preserve full range text and local diff validation. |
-| Merge and deletion | E7: 405 before approval, isolated wrong-head 409 after approval, correct-head 200, absent-branch GET 404, repeated DELETE 500; E9: post-deletion PR head differed | POST merge with `Do=merge\|squash`, `head_commit_id` and `delete_branch_after_merge`; verify returned/re-read merge identity by Git. Check branch existence before DELETE; pin cleanup to pre-merge branch and approved head. |
+| Merge and deletion | E7: 405 before approval, isolated wrong-head 409 after approval, correct-head 200, absent-branch GET 404, repeated DELETE 500; E9: post-deletion PR head differed. F16 [MergePullRequestForm](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/services/forms/repo_form.go) admits `merge` and `squash`; [MergePullRequest](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/pull.go) applies the selected method/head guard and may delete the branch; [DeleteBranch](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/branch.go) returns 204 after successful explicit deletion. Squash and successful explicit DELETE were not exercised by #54 (§19). | POST merge with `Do=merge\|squash`, `head_commit_id` and `delete_branch_after_merge`; verify returned/re-read merge identity by Git, including §7.10's squash tree check. Check branch existence before DELETE and confirm absence with a follow-up GET; pin cleanup to pre-merge branch and approved head. |
 | Bodies | E1–E9 recording bodies retain the submitted text, including invalid roots | Preserve text with existing CRLF normalization; validate rather than assume all future responses are non-null. |
 | Review-list rows and flags | Setup 014–015: `REQUEST_REVIEW` has empty commit; E8 pending visibility; E9 newer reviews dismissed prior decisions | Skip REQUEST_REVIEW before full-SHA validation. Normalize APPROVED/REQUEST_CHANGES/COMMENT/PENDING, preserve dismissed, ignore stale/official for approval. Unknown states fail validation. |
 | Timestamps | F16 structs use time.Time for submitted/created values; #54 samples are UTC | Parse offsets and order by instant, tie by ascending ID; do not compare raw strings. Non-UTC variation is tested synthetically. |
@@ -686,6 +694,8 @@ Publish the formal review with the full `## Findings` list and complete `## Unan
 On interruption, re-read the PR: `--resume <review-id>` validates the exact tagged review/header/list and creates only missing usable roots; `thread open` recovers one finding from the durable body alone. Both leave existing usable roots unchanged, never publish another logical review, and never discard a pending draft implicitly. A plain post is a new review and consumes budget. A draft left by an invalid event or an interruption requires explicit discard, not a blind retry. The adapter may delete any named acting-account pending draft only because `--discard-draft` is explicit authorization for that exact ID; it never decides on its own that a human draft is disposable.
 
 Issue, PR, review, conversation-comment and branch operations use repository-scoped API paths; create/update/read-back identities must match the requested repository and number. Identity and scope failures are ordinary ForgeError failures. Body-first and reply paths are E2; PR creation and conversation comments are Setup 013 and final recordings 064–065; merge is E7. Transport success never substitutes for protocol validation or Git integration proof.
+
+PR-body PATCH and issue GET are source-backed, not #54 observations: F16 [EditPullRequest](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/pull.go) applies the optional body from [EditPullRequestOption](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/modules/structs/pull.go), and [GetIssue](https://codeberg.org/forgejo/forgejo/src/tag/v16.0.3/routers/api/v1/repo/issue.go) reads the requested repository/index with an access check. The adapter validates issue identity and required fields and reads back the PR after a body update; a mismatch fails without claiming a successful report update (§19).
 
 ## 12. Skills
 
@@ -825,7 +835,9 @@ An outline; markers refer to the current Reviewer prompt.
 
 ## 13. Harness Specifics
 
-All of v0.5.0 §13 is retained. There is no forge-specific harness mechanism. The #53 [recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) leaves first-launch trust resolution to a person and supplies no safe post-error wait bound. Runtime and skill installation remain between PRs from merged main (§17.8); no PR reviews itself using its unmerged runtime or changed skill rules.
+All of v0.5.0 §13 is retained.
+
+*Informative.* There is no forge-specific harness mechanism. The #53 [recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) leaves first-launch trust resolution to a person and supplies no safe post-error wait bound. Runtime and skill installation remain between PRs from merged main (§17.8); no PR reviews itself using its unmerged runtime or changed skill rules.
 
 ## 14. Failure and Recovery Semantics
 
@@ -921,13 +933,13 @@ Additional required coverage:
 - Factory selection by kind, all three construction sites, protocol stubs, no concrete adapter annotations or wire states in common derivation; Increment 1 refuses Forgejo with `forge.kind forgejo is not implemented until Increment 3` (exit 1), accepts it at configuration validation, and keeps init's default GitHub output.
 - Every state/event translation in both directions, including dismissed state/flag, pending rows and unknown-state rejection; single mode always requests commented; neutral Anchor has no payload method, and both adapter single/range payloads match §11.2.
 - `approvals()` includes every login's approve/request-changes history, preserves dismissal, excludes ordinary comments/pending, selects latest by instant then ID before head filtering, and cannot resurrect a dismissed/superseded approval. Configured and unrelated authors, multiple approvers, either arrival order, each failed 5a/5b condition, a request-changes at an old head, and a later approval must be covered.
-- Both identity modes, mismatch diagnostics, exact-head equality, Task-amendment invalidation, current worktree identity, stops and review budget alongside the human wait; an approved last-budget-slot review still waits for a human without asking for another agent review. Human reviews change no protocol count or finding gate.
+- Both identity modes, mismatch diagnostics, exact-head equality, Task-amendment invalidation, current worktree identity, stops and review budget alongside the human wait; an approved last-budget-slot review still waits for a human without asking for another agent review. A `needs-human` disposition on an unsettled optional thread yields `needs_decision`, not the human-approval wait. Human reviews change no protocol count or finding gate.
 - Schema 2 compatibility and every new field's default/type/value/conditional presence; URL schemes, loopback spellings, preserved path prefixes, query/fragment/credentials rejection; invalid token paths, modes, multi-line/empty files, alias containment and revalidation.
 - `can_resolve_threads=false` exits 1 with exact unsupported message using a protocol stub; unknown resolution serializes null, not false; branch-rule nonvisibility does not erase requirements or hide unrelated errors.
 - Protected pending gate is exit 4 with IDs; explicit discard refuses wrong owner, wrong PR, submitted or missing review; validates before deletion, deletes exactly one ID, rechecks, and never silently discards another draft. GitHub's existing stranded-draft handling remains tested unchanged.
 - Full durable finding text before first root, unknown-event pending response, malformed review read-back, empty hunk, duplicate conversation anchors, comment order shuffling, multi-page lists, REQUEST_REVIEW skipping before SHA parsing, stale/official independence, offset/tie ordering, and interrupted resume without duplicate roots or review count.
 - Merge refusal statuses including 409; capture pre-merge branch/head; verify integration by Git despite E9-like API fields; confirmed remote absence and expected-SHA ref deletion; absent ref, changed ref, unreadable branch, and no cleanup on failed integration.
-- Every new doctor diagnostic and mode/forge applicability; packaged skill capability checks, no-poll human wait, unchanged six-item hold rule and fixed handoff strings.
+- Every new doctor diagnostic and mode/forge applicability, including adapter-supplied version labels/failures without forge names in the five common modules listed in §11.0; packaged skill capability checks, no-poll human wait, unchanged six-item hold rule and fixed handoff strings.
 - CLI table matches the 23 command paths; release version and protocol constant are tested independently. Packaging keeps no runtime dependencies.
 
 ### 16.2 Integration tests
@@ -995,6 +1007,8 @@ Before the v0.6.0 release, record these four trials, each in one agent direction
 4. **Network Forgejo single identity:** on the Developer's authorized VPS instance pinned to 16.0.3, use HTTPS API transport, SSH pushes and branch protection requiring one human approval; reach a Git-verified merge and ownership-safe cleanup. This is the rehearsal for the client pilot, not use of the client's repository.
 
 Two-account Forgejo mode is implemented and fake-tested but not live-trialled. Record it as unverified and create the independently required follow-up issue when preparing the release. No Codeberg trial is required. The client pilot is supervised after release and is not a release condition. Record actual completion, not a planned trial, as evidence.
+
+For trials 3 and 4, record the actual merge method, whether cleanup explicitly deleted an existing branch or found it already absent, and whether PR-body PATCH and issue GET were exercised. A path that neither trial exercises remains explicitly unverified in release evidence (§19); source-backed fake coverage does not close that gap.
 
 ### 16.5 Evidence record
 
@@ -1115,6 +1129,9 @@ The following limits MUST remain visible in release evidence. An unverified fact
 | Staleness computation and the push effect on a still-valid approval were not isolated | E4/E9: the earlier approval was already dismissed before the push. Ignore stale/official for protocol approval; require exact head and latest decision, with dismissal preserved. |
 | PR 1's actual integration head/tree and cause of post-deletion head discrepancy are unknown | E9 did not fetch the integration commit. Save the approved SHA/branch before merge and verify with Git; failure retains resources and refuses cleanup/fast-forward. |
 | Branch DELETE for an already absent branch returned 500 | E7. Confirm absence first and skip DELETE. Do not reinterpret that recorded error as an expected successful no-op. |
+| Squash merge and successful explicit DELETE of an existing branch were not exercised by #54 | F16 merge form and merge/branch handlers (§11.4) supply synthetic, source-backed fake cases (§11.3). Keep the squash tree-identity check of §7.10 step 3; confirm DELETE success only with the follow-up branch GET. Trials 3/4 record whether each path ran, retaining unverified status when neither did. |
+| PR-body PATCH and issue GET were not exercised by #54 | F16 EditPullRequest/EditPullRequestOption and GetIssue (§11.4) supply synthetic, source-backed fake cases. Validate issue identity/shape and read back the updated PR body; fail a mismatch rather than assume success. Trials 3/4 record actual coverage. |
+| No authorized Forgejo CI-evidence read path in the current skill allowance | §10.4 permits GitHub CI reads only; decision 33 keeps the tool itself out of CI. For a Forgejo repository with PR checks, the Implementer reports the gap and waits for the Developer to supply evidence or authorize a read path before merging, even under a standing instruction. A tool-level commit-status read requires a Developer decision; the available status endpoint (#54 recording 066) does not grant that authority. |
 | Concurrent human draft creation between check and post was not tested or made atomic | E6 proves absorption, not concurrency prevention. Gate known pending drafts, require explicit named discard, never automatically delete an unexpected draft; advise avoiding simultaneous review publication on the shared account. |
 | Other versions, TLS/SSH deployment and client configuration were not established by #54 | Scope of #54. Trials 3/4 supply loop and network evidence; minimum 16.0.0 is policy, reference 16.0.3, with no version-specific behaviour. |
 | Two-account Forgejo loop has no release live trial | Plan decision 18. Implement and fake-test it, label unverified, track a follow-up at release unless the explicit schedule contingency removes fake coverage too. |
@@ -1171,6 +1188,8 @@ The following limits MUST remain visible in release evidence. An unverified fact
 6. The method table and neutral records make the plan's interface implementable; request signatures may use equivalent typed records, but transports never leak into protocol rules. A pending draft is a review-publication gate (exit 4), unsupported resolution is exit 1, and the human wait is a successful status read with a refused merge (exit 4).
 7. Token-file checks use actual filesystem identity and redirects must not leak credentials; these implement the plan's outside-worktree, owner-only and explicit-host constraints without granting skills new credential authority.
 8. #56's future installation record belongs with #57's trial 1 evidence because installation occurs only after merge and merged PR descriptions are frozen. This is a provenance placement rule, not permission to omit the runtime SHA.
+9. Doctor labels and transport-specific failures are adapter-supplied (§§10.3, 11.0), preserving plan §4.1's boundary for all five common modules while retaining the existing displayed GitHub label.
+10. Decision 33 and the existing skill read allowance leave no authorized Forgejo CI-evidence read path. The resulting Developer wait (§19 and Appendix A) is a visible limit on the plan's fewer-turns objective, not a new CI capability or a departure from that decision.
 
 No amendment to the decided product scope is implied by a refined failure message, a source-backed defensive parser, or the retained #53 trust behaviour.
 
@@ -1218,7 +1237,7 @@ agent-squad reviewer launch --pr 102
 
 After the approved handoff, status shows `await_human_approval`. The Implementer reports the exact head and `human-reviewer`, then goes idle. The human requests changes on the forge. On the Developer's “check PR #102”, the Implementer reports that login and commit; it makes no synthetic protocol finding. The Developer supplies the actual change instruction. If scope changes, record the complete Task amendment before implementing; otherwise record the instruction as appropriate. Implement, validate, push, disposition any agent findings, and obtain a fresh agent approval at the new head.
 
-The person gives a formal approval at that exact head. That new approval supersedes their request-changes (E9 demonstrates the server-side review sequence; §7.10 is the independent protocol rule). The human could instead have approved before the agent. A subsequent “check PR #102” produces `merge` only when both approvals, dispositions and the standing instruction are valid and there is no hold. The Implementer checks available CI evidence, reporting inaccessible evidence and waiting when necessary, then runs from the primary checkout:
+The person gives a formal approval at that exact head. That new approval supersedes their request-changes (E9 demonstrates the server-side review sequence; §7.10 is the independent protocol rule). The human could instead have approved before the agent. A subsequent “check PR #102” produces `merge` only when both approvals, dispositions and the standing instruction are valid and there is no hold. If this Forgejo repository has PR checks, the current skill allowance provides no authorized CI-evidence read path: the Implementer reports the gap and waits for the Developer to supply evidence or authorize a read path (§19). The standing instruction does not bypass that wait. Once the applicable CI evidence has been checked under §7.10, the Implementer runs from the primary checkout:
 
 ```bash
 agent-squad pr merge --as implementer --pr 102
