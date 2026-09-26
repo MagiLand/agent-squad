@@ -43,4 +43,4 @@ class SmokeTests(unittest.TestCase):
             evidence = json.loads(result.stdout)
             self.assertTrue(evidence["ok"])
             self.assertEqual([s["step"] for s in evidence["steps"]],
-                             list(range(1, 13)))
+                             list(range(1, 14)))

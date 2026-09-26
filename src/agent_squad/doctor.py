@@ -341,7 +341,7 @@ def diagnose(
                 forge.repository_record()
 
             check(f"{role} repository access", readable)
-            if role == "reviewer":
+            if role == "reviewer" and config.identity_mode == "dual":
                 def reviewer_write() -> str:
                     permission = forge.repository_permission()
                     if permission not in ("write", "admin"):
@@ -352,6 +352,29 @@ def diagnose(
                     return permission
 
                 check("Reviewer write permission", reviewer_write)
+            if role == "implementer" and config.identity_mode == "single":
+                def shared_push() -> str:
+                    permission = forge.repository_permission()
+                    if permission not in ("write", "admin"):
+                        raise AgentSquadError(
+                            "shared account requires repository push"
+                            " permission"
+                        )
+                    return permission
+
+                check("shared account push permission", shared_push)
+
+                def approver_exists(login: str) -> None:
+                    if not forge.user_exists(login):
+                        raise AgentSquadError(
+                            f"approver account does not exist: {login}"
+                        )
+
+                for login in config.approver_accounts:
+                    check(
+                        f"approver {login} exists",
+                        lambda login=login: approver_exists(login),
+                    )
 
     client = herdr_client or HerdrClient(repository.root)
     herdr_ok = check(

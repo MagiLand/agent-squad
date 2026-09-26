@@ -409,7 +409,9 @@ def post_review(
             for item, fid in zip(inputs, ids)
         )
         publication = ReviewPublication(
-            head, requested_state(verdict), complete_body,
+            head,
+            requested_state(verdict, repository.configuration.identity_mode),
+            complete_body,
             complete_body + "\n\n## Unanchored findings\n\n"
             + "\n\n".join(comment.body for comment in comments),
             comments, base,

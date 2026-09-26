@@ -269,6 +269,37 @@ class ForgeFixture:
         self.git("worktree", "add", "-b", "issue-1", str(self.worktree))
         return self.push("value = 1\nsecond = 2\nthird = 3\n")
 
+    def single_identity(self) -> None:
+        """Initialize a shared account and scripted human approver."""
+        self.cli(
+            "init", "--implementer-account", "developer",
+            "--reviewer-account", "developer", "--identity-mode", "single",
+            "--approver-account", "human",
+        )
+        self.settings(human_accounts=["human"])
+
+    def human_review(
+        self, event: str, *, head: str | None = None, login: str = "human",
+    ) -> dict:
+        """Script a person-operated review through the fake transport only."""
+        payload = self.write("human-review.json", json.dumps({
+            "body": "Scripted human review.", "event": event,
+            "commit_id": head or self.git(
+                "rev-parse", "HEAD", cwd=self.worktree,
+            ),
+        }))
+        result = subprocess.run(
+            [str(self.bin / "gh"), "api",
+             "repos/MagiLand/trial/pulls/1/reviews",
+             "--method", "POST", "--input", "-"],
+            input=Path(payload).read_text(), cwd=self.repo,
+            env={**self.env, "GH_TOKEN": "fake-token-" + login},
+            text=True, capture_output=True, timeout=90, shell=False,
+        )
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        return json.loads(result.stdout)
+
     def commit(self, text: str) -> str:
         (self.worktree / "example.py").write_text(text)
         self.git("add", "example.py", cwd=self.worktree)

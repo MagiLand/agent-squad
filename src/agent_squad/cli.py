@@ -43,6 +43,10 @@ def parser() -> argparse.ArgumentParser:
     init = groups.add_parser("init")
     init.add_argument("--implementer-account", required=True)
     init.add_argument("--reviewer-account", required=True)
+    init.add_argument(
+        "--identity-mode", choices=("dual", "single"), default="dual",
+    )
+    init.add_argument("--approver-account", action="append", default=[])
     for name in ("owner", "repo", "base-branch"):
         init.add_argument("--" + name)
     init.add_argument("--json", action="store_true")
@@ -150,6 +154,8 @@ def execute(args: argparse.Namespace) -> dict:
             owner=args.owner,
             repo=args.repo,
             base_branch=args.base_branch,
+            identity_mode=args.identity_mode,
+            approver_accounts=tuple(args.approver_account),
         )
     # doctor reports invalid configuration as one of its prerequisite failures.
     if args.group == "doctor":
@@ -288,7 +294,11 @@ def json_default(value: object) -> object:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    root = parser()
+    args = root.parse_args(argv)
+    if (args.group == "init" and args.identity_mode == "single"
+            and not args.approver_account):
+        root.error("--identity-mode single requires --approver-account")
     try:
         result = execute(args)
         if args.json:

@@ -13,7 +13,7 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn("removed", result["cleanup"])
         self.assertEqual([s["step"] for s in result["steps"]],
-                         list(range(1, 13)))
+                         list(range(1, 14)))
 
     def test_failed_command_removes_the_owned_temporary_root(self) -> None:
         fixtures = []

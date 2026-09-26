@@ -184,3 +184,43 @@ class ConfigurationTests(unittest.TestCase):
         for text in ['{"a": 1, "a": 2}', '{"a": NaN}', '{"a": Infinity}']:
             with self.assertRaises(ValueError):
                 decode_json(text)
+
+
+class IdentityModeTests(unittest.TestCase):
+    def single(self):
+        data = config().to_dict()
+        data.update(identity_mode='single', approver_accounts=['human'])
+        data['reviewer']['forge_account'] = 'DEV'
+        return data
+
+    def test_old_schema_two_defaults_and_single_roundtrip(self) -> None:
+        data = config().to_dict()
+        data.pop('identity_mode')
+        data.pop('approver_accounts')
+        loaded = Configuration.from_dict(data)
+        self.assertEqual(loaded.identity_mode, 'dual')
+        self.assertEqual(loaded.approver_accounts, ())
+        loaded = Configuration.from_dict(self.single())
+        self.assertEqual(Configuration.from_dict(loaded.to_dict()), loaded)
+
+    def test_mode_conditional_fields_and_types_are_named(self) -> None:
+        for field, value in [
+            ('identity_mode', 'unknown'), ('identity_mode', None),
+            ('identity_mode', True), ('identity_mode', []),
+            ('approver_accounts', []), ('approver_accounts', 'human'),
+            ('approver_accounts', [None]), ('approver_accounts', ['']),
+            ('approver_accounts', ['deV']), ('approver_accounts', ['bad\x00']),
+        ]:
+            with self.subTest(field=field, value=value):
+                data = self.single()
+                data[field] = value
+                with self.assertRaisesRegex(ConfigurationError, field):
+                    Configuration.from_dict(data)
+        data = self.single()
+        data['reviewer']['forge_account'] = 'reviewer'
+        with self.assertRaisesRegex(ConfigurationError, 'identity_mode'):
+            Configuration.from_dict(data)
+        data = config().to_dict()
+        data['approver_accounts'] = ['human']
+        with self.assertRaisesRegex(ConfigurationError, 'approver_accounts'):
+            Configuration.from_dict(data)

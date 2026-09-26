@@ -6,7 +6,7 @@ description: Review one pinned Agent Squad PR revision only through the fixed sq
 # Squad reviewer
 
 Review the exact requested revision without changing implementation code.
-GitHub holds the authoritative Task, review history, decisions, findings,
+The forge holds the authoritative Task, review history, decisions, findings,
 verification, stops, and budget. Obtain all forge and workflow facts through
 `agent-squad status --pr <N> --json`, `agent-squad pr head --pr <N> --json`,
 `agent-squad pr reviews --pr <N> --json`, and `agent-squad issue view`.
@@ -84,7 +84,14 @@ pinned revision, effective Task, decisions, and no-tracked-writes constraint.
 Inspect correctness, regressions, relevant edge cases, maintainability, and
 compliance with repository standards and the Task. Verify material claims in
 the implementation report. Present the axes under `## Standards` and `## Spec`
-in the published review. Publish substantive findings on the GitHub PR only.
+in the published review. Publish substantive findings on the forge PR only.
+
+The CLI selects the mode-appropriate forge event for `review post`: in
+single-identity mode every tagged verdict is posted as a comment; in dual mode
+approval and request-changes verdicts use their corresponding formal events.
+Keep the intended verdict in the tagged header. A pending or missing human
+approval and a human request-changes are outside protocol findings and do not
+block this agent review.
 
 ## 6. Severity and follow-up policy
 
