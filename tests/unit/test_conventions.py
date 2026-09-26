@@ -1294,6 +1294,14 @@ class SingleIdentityTests(unittest.TestCase):
         self.assertEqual(self.state(conversation=(amended,))['next_action'],
                          'launch_review')
 
+    def test_stop_older_than_agent_approval_still_precedes_human_wait(
+        self,
+    ) -> None:
+        stop = evidence(5, render_line('stop', head=H, reason='scope'), 'dev')
+        state = self.state(conversation=(stop,))
+        self.assertTrue(state['gates']['stopped'])
+        self.assertEqual(state['next_action'], 'stopped')
+
     def test_optional_disposition_precedes_wait(self) -> None:
         agent = review(10, author='dev', state=ReviewState.COMMENTED,
                        findings='REV-1 [optional] Finding')

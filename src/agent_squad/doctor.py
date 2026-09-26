@@ -363,10 +363,17 @@ def diagnose(
                     return permission
 
                 check("shared account push permission", shared_push)
+
+                def approver_exists(login: str) -> None:
+                    if not forge.user_exists(login):
+                        raise AgentSquadError(
+                            f"approver account does not exist: {login}"
+                        )
+
                 for login in config.approver_accounts:
                     check(
                         f"approver {login} exists",
-                        lambda login=login: forge.user_exists(login),
+                        lambda login=login: approver_exists(login),
                     )
 
     client = herdr_client or HerdrClient(repository.root)

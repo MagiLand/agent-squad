@@ -498,7 +498,7 @@ class SingleIdentityAdapterTests(unittest.TestCase):
         with patch.object(
             forge, "api", return_value={"login": "Human"},
         ) as api:
-            forge.user_exists("human")
+            self.assertIs(forge.user_exists("human"), True)
         api.assert_called_once_with("users/human")
         for response in ({}, {"login": "someone"}, {"login": False}):
             with self.subTest(response=response):
@@ -508,5 +508,22 @@ class SingleIdentityAdapterTests(unittest.TestCase):
         with patch.object(
             forge, "api", return_value={"login": "a/b?c"},
         ) as api:
-            forge.user_exists("a/b?c")
+            self.assertIs(forge.user_exists("a/b?c"), True)
         api.assert_called_once_with("users/a%2Fb%3Fc")
+
+    def test_approver_lookup_distinguishes_absence_from_access_failure(
+        self,
+    ) -> None:
+        forge = GitHub(Repository(Path("/repo"), Path("/repo"),
+                                  Path("/repo/.git"), config()), "implementer")
+        with patch.object(forge, "api", side_effect=ForgeError(
+            "user not found", 404,
+        )):
+            self.assertIs(forge.user_exists("missing"), False)
+        for status in (401, 403, 500, None):
+            error = ForgeError("lookup failed", status)
+            with self.subTest(status=status):
+                with patch.object(forge, "api", side_effect=error):
+                    with self.assertRaises(ForgeError) as raised:
+                        forge.user_exists("human")
+                self.assertIs(raised.exception, error)

@@ -658,6 +658,10 @@ class SingleDoctorTests(unittest.TestCase):
             self.assertEqual(
                 checks['approver other exists']['severity'], 'fail')
             self.assertEqual(
+                checks['approver other exists']['detail'],
+                'approver account does not exist: other',
+            )
+            self.assertEqual(
                 checks['approver human exists']['severity'], 'pass')
             self.assertEqual(
                 checks['shared account push permission']['severity'], 'fail',
