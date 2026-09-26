@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The implementation baseline is `docs/agent-squad-v0.5.0-spec.md`, the approved delta over `docs/agent-squad-v0.4.4-spec.md`; do not treat files under ignored `.local/` as project inputs.
+The implementation baseline is `docs/agent-squad-v0.6.0-spec.md`, the approved delta over `docs/agent-squad-v0.5.0-spec.md`; do not treat files under ignored `.local/` as project inputs.
 
 Implementation should follow the specification's focused increments. Production code belongs under `src/agent_squad/`, with the installed command defined in `cli.py`. Put unit tests in `tests/unit/`, Git and process integration tests in `tests/integration/`, reusable data in `tests/fixtures/`, smoke tooling in `scripts/`, and consumer examples in `examples/`. Prefer combining small modules over creating shallow wrappers.
 
