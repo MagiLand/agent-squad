@@ -231,6 +231,10 @@ class ForgeBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(verdict=verdict):
                 self.assertEqual(review_event(requested_state(verdict)), event)
+                self.assertEqual(
+                    review_event(requested_state(verdict, "single")),
+                    "COMMENT",
+                )
         with self.assertRaisesRegex(ForgeError, 'cannot publish'):
             review_event(ReviewState.PENDING)
 
@@ -459,3 +463,42 @@ class ForgeBoundaryTests(unittest.TestCase):
         self.assertEqual(result.threads, ())
         threads.assert_not_called()
         approvals.assert_not_called()
+
+
+class SingleIdentityAdapterTests(unittest.TestCase):
+    def test_snapshot_reads_approval_history_once_only_in_single_mode(self) -> None:
+        from dataclasses import replace
+        from agent_squad.forge import Approval, ReviewState
+        c = config()
+        c = replace(c, identity_mode="single", approver_accounts=("human",),
+                    reviewer=replace(c.reviewer, forge_account="dev"))
+        repository = Repository(
+            Path("/repo"), Path("/repo"), Path("/repo/.git"), c)
+        forge = GitHub(repository, "implementer")
+        record = Approval("human", ReviewState.APPROVED, H, False,
+                          "2026-01-01T00:00:20Z", 20)
+        with (
+            patch.object(forge, "pr", return_value=snapshot().pr),
+            patch.object(forge, "reviews", return_value=()),
+            patch.object(forge, "listing", return_value=[]),
+            patch.object(forge, "thread_states", return_value=()),
+            patch.object(forge, "approvals", return_value=(record,)) as approvals,
+        ):
+            result = forge.snapshot(1)
+        approvals.assert_called_once_with(1)
+        self.assertEqual(result.human_approvals, (record,))
+
+    def test_approver_lookup_validates_identity_and_quotes_path(self) -> None:
+        forge = GitHub(Repository(Path("/repo"), Path("/repo"),
+                                  Path("/repo/.git"), config()), "implementer")
+        with patch.object(forge, "api", return_value={"login": "Human"}) as api:
+            forge.user_exists("human")
+        api.assert_called_once_with("users/human")
+        for response in ({}, {"login": "someone"}, {"login": False}):
+            with self.subTest(response=response):
+                with patch.object(forge, "api", return_value=response):
+                    with self.assertRaises(ForgeError):
+                        forge.user_exists("human")
+        with patch.object(forge, "api", return_value={"login": "a/b?c"}) as api:
+            forge.user_exists("a/b?c")
+        api.assert_called_once_with("users/a%2Fb%3Fc")

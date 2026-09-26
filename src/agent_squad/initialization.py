@@ -98,6 +98,8 @@ class Configuration:
     merge_method: str
     worktree_root: str
     scratch_root: str
+    identity_mode: str = "dual"
+    approver_accounts: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, value: object) -> Configuration:
@@ -120,7 +122,9 @@ class Configuration:
                 "worktree_root",
                 "scratch_root",
             },
-            optional={"developer_accounts"},
+            optional={
+                "developer_accounts", "identity_mode", "approver_accounts",
+            },
             path="configuration",
         )
         if V.require_int(data["schema_version"], "schema_version") != 2:
@@ -166,9 +170,36 @@ class Configuration:
                 ("reviewer", reviewer),
             ]
         ]
-        if accounts[0].casefold() == accounts[1].casefold():
+        mode = V.require_string(
+            data.get("identity_mode", "dual"), "identity_mode",
+        )
+        if mode not in ("dual", "single"):
+            raise ConfigurationError("identity_mode must be dual or single")
+        approvers = string_list(
+            data.get("approver_accounts", []), "approver_accounts",
+        )
+        equal_accounts = accounts[0].casefold() == accounts[1].casefold()
+        if mode == "dual" and equal_accounts:
             raise ConfigurationError(
-                "Implementer and Reviewer accounts must differ"
+                "identity_mode dual: Implementer and Reviewer accounts"
+                " must differ"
+            )
+        if mode == "single" and not equal_accounts:
+            raise ConfigurationError(
+                "identity_mode single: forge_account values must be equal"
+            )
+        if mode == "single" and not approvers:
+            raise ConfigurationError(
+                "approver_accounts must be non-empty in single mode"
+            )
+        if mode == "dual" and approvers:
+            raise ConfigurationError(
+                "approver_accounts must be empty in dual mode"
+            )
+        role_accounts = {a.casefold() for a in accounts}
+        if any(login.casefold() in role_accounts for login in approvers):
+            raise ConfigurationError(
+                "approver_accounts must exclude both role accounts"
             )
         args = string_list(reviewer["start_args"], "reviewer.start_args")
         developers = string_list(
@@ -205,6 +236,8 @@ class Configuration:
             budget,
             method,
             *roots,
+            mode,
+            approvers,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -405,6 +438,8 @@ def initialize_repository(
     owner: str | None = None,
     repo: str | None = None,
     base_branch: str | None = None,
+    identity_mode: str = "dual",
+    approver_accounts: tuple[str, ...] = (),
 ) -> dict[str, object]:
     from .forge import make_forge
 
@@ -438,6 +473,8 @@ def initialize_repository(
                 "forge_account": reviewer_account,
             },
             "developer_accounts": [],
+            "identity_mode": identity_mode,
+            "approver_accounts": list(approver_accounts),
             "base_branch": branch,
             "max_review_passes": 3,
             "merge_method": "merge",

@@ -833,3 +833,79 @@ class ForgeCommandTests(unittest.TestCase):
                 parse_pullrequest(value)
             with self.assertRaises(ForgeError):
                 parse_review(value)
+
+
+class SingleForgeCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.f = ForgeFixture()
+        self.addCleanup(self.f.close)
+        self.f.single_identity()
+        self.head = self.f.candidate()
+        self.f.create_pr()
+
+    def test_shared_comment_approval_human_wait_and_guarded_merge(self) -> None:
+        import sys
+        f = self.f
+        f.review('approved')
+        waiting = f.status()
+        self.assertEqual(waiting['next_action'], 'await_human_approval')
+        refused = f.cli('pr', 'merge', '--as', 'implementer',
+                        '--pr', '1', expected=4)
+        self.assertIn('human', refused['error'])
+        text = f.run(
+            [sys.executable, '-m', 'agent_squad', 'status', '--pr', '1'])
+        self.assertEqual(text.returncode, 0)
+        self.assertTrue(text.stdout.startswith('await_human_approval:'))
+        self.assertIn('human', text.stdout.splitlines()[0])
+        calls = f.read_model()['calls']
+        submitted = [c for c in calls if (c.get('body') or {}).get('event')]
+        self.assertEqual(submitted[-1]['body']['event'], 'COMMENT')
+        self.assertTrue(all(c['account'] == 'developer' for c in calls
+                            if c['arguments'][0] == 'api'))
+        self.assertTrue(any(c['arguments'] == ['auth', 'token', '--user', 'developer']
+                            for c in calls))
+        human = f.human_review('APPROVE')
+        approved = f.status()
+        self.assertTrue(approved['approval']['approved'])
+        self.assertEqual(approved['human_approvals'][0]['id'], human['id'])
+        self.assertEqual(approved['budget']['used'], 1)
+        f.decision(body=MERGE_INSTRUCTION)
+        self.assertEqual(f.status()['next_action'], 'merge')
+        merged = f.cli('pr', 'merge', '--as', 'implementer',
+                       '--pr', '1', cwd=f.repo)
+        self.assertEqual(merged['integration'], 'verified by ancestry')
+
+    def test_human_request_changes_does_not_gate_launch_and_replacement_wins(self) -> None:
+        f = self.f
+        f.human_review('APPROVE')
+        f.review('approved')
+        requested = f.human_review('REQUEST_CHANGES')
+        state = f.status()
+        self.assertFalse(state['approval']['approved'])
+        self.assertEqual(state['human_request_changes']
+                         [0]['id'], requested['id'])
+        self.assertTrue(state['human_approvals'][0]['dismissed'])
+        self.assertFalse(state['gates']['needs_decision'])
+        f.push('value = 2\nsecond = 2\nthird = 3\n')
+        f.cli('reviewer', 'launch', '--pr', '1')
+        f.review('approved')
+        self.assertEqual(f.status()['next_action'], 'await_human_approval')
+        f.human_review('APPROVE')
+        self.assertTrue(f.status()['approval']['approved'])
+        self.assertEqual(f.status()['human_request_changes'], [])
+
+    def test_shared_findings_dispositions_and_verifications(self) -> None:
+        f = self.f
+        f.review('changes_requested', [finding()])
+        self.assertEqual(f.status()['next_action'], 'address_findings')
+        f.reply('REV-1', 'DISPOSITION rejected\nAlready correct in this fixture.')
+        f.reply('REV-1', 'VERIFIED rejection accepted\nScripted check.',
+                role='reviewer')
+        f.review('approved')
+        state = f.status()
+        self.assertTrue(state['findings'][0]['settled'])
+        self.assertEqual(state['next_action'], 'await_human_approval')
+        self.assertEqual([r['state'] for r in state['reviews']],
+                         ['COMMENTED', 'COMMENTED'])
+        f.review('needs_human')
+        self.assertEqual(f.status()['next_action'], 'needs_decision')

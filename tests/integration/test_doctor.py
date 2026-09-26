@@ -633,3 +633,39 @@ class DoctorTests(unittest.TestCase):
         f.save_herdr(model)
         self.diagnostic(f.cli("doctor", expected=1), "orphan resources")
         self.assertEqual(cycle.readlink(), Path("cycle"))
+
+
+class SingleDoctorTests(unittest.TestCase):
+    def test_shared_permission_and_every_approver_lookup(self) -> None:
+        with ForgeFixture() as f:
+            f.single_identity()
+            path = f.repo / '.agent-squad/config.json'
+            config = json.loads(path.read_text())
+            config['approver_accounts'].append('other')
+            path.write_text(json.dumps(config))
+            result = f.cli('doctor')
+            self.assertTrue(result['ok'])
+            checks = {d['check']: d for d in result['diagnostics']}
+            self.assertNotIn('Reviewer write permission', checks)
+            for name in ('shared account push permission', 'approver human exists',
+                         'approver other exists'):
+                self.assertEqual(checks[name]['severity'], 'pass')
+            f.settings(missing_users=['other'], permission='read')
+            result = f.cli('doctor', expected=1)
+            checks = {d['check']: d for d in result['diagnostics']}
+            self.assertEqual(
+                checks['approver other exists']['severity'], 'fail')
+            self.assertEqual(
+                checks['approver human exists']['severity'], 'pass')
+            self.assertEqual(
+                checks['shared account push permission']['severity'], 'fail',
+            )
+            self.assertNotIn('fake-token-', json.dumps(result))
+
+    def test_dual_check_list_retains_reviewer_permission_without_approvers(self) -> None:
+        with ForgeFixture() as f:
+            f.initialize()
+            checks = {d['check'] for d in f.cli('doctor')['diagnostics']}
+            self.assertIn('Reviewer write permission', checks)
+            self.assertNotIn('shared account push permission', checks)
+            self.assertFalse(any(c.startswith('approver ') for c in checks))

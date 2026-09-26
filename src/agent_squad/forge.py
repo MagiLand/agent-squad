@@ -21,8 +21,12 @@ class ReviewState(StrEnum):
     PENDING = "pending"
 
 
-def requested_state(verdict: str) -> ReviewState:
+def requested_state(verdict: str, identity_mode: str = "dual") -> ReviewState:
     """Map the shared protocol verdict to its neutral publication state."""
+    if identity_mode == "single" and verdict in (
+        "approved", "changes_requested", "needs_human",
+    ):
+        return ReviewState.COMMENTED
     if verdict == "needs_human":
         return ReviewState.COMMENTED
     if verdict in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED):
@@ -141,6 +145,7 @@ class Snapshot:
     can_read_thread_resolution: bool = False
     can_read_branch_rules: bool = False
     approved_state_label: str = "approved"
+    human_approvals: tuple[Approval, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -217,6 +222,7 @@ class Forge(Protocol):
     def verify_identity(self) -> None: ...
     def repository_record(self) -> dict[str, object]: ...
     def repository_permission(self) -> str: ...
+    def user_exists(self, login: str) -> None: ...
     def issue(self, number: int) -> IssueRecord: ...
     def pr(self, number: int) -> PullRequest: ...
     def reviews(self, number: int) -> tuple[Review, ...]: ...

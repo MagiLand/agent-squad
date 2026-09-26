@@ -1181,3 +1181,136 @@ class DerivedStateTests(unittest.TestCase):
         self.assertIn(
             "Detailed execution", result["findings"][0]["replies"][0]["body"]
         )
+
+
+class SingleIdentityTests(unittest.TestCase):
+    def configuration(self):
+        c = config()
+        return replace(
+            c, identity_mode='single', approver_accounts=('human', 'other'),
+            reviewer=replace(c.reviewer, forge_account='dev'),
+        )
+
+    def approval(self, ident=20, *, state=ReviewState.APPROVED,
+                 head=H, login='human', dismissed=False):
+        from agent_squad.forge import Approval
+        return Approval(login, state, head, dismissed,
+                        evidence(ident, '').created_at, ident)
+
+    def state(self, approvals=(), *, reviews=None, configuration=None,
+              **snapshot_args):
+        if reviews is None:
+            reviews = (review(10, author='dev', state=ReviewState.COMMENTED),)
+        s = replace(snapshot(reviews=reviews, **snapshot_args),
+                    human_approvals=tuple(approvals))
+        return derive_state(
+            s, configuration=configuration or self.configuration(),
+        )
+
+    def test_missing_old_dismissed_and_unconfigured_approvals(self) -> None:
+        for approvals in ((), (self.approval(head=A),),
+                          (self.approval(dismissed=True),),
+                          (self.approval(login='stranger'),)):
+            with self.subTest(approvals=approvals):
+                state = self.state(approvals)
+                self.assertFalse(state['approval']['approved'])
+                self.assertEqual(state['next_action'], 'await_human_approval')
+                self.assertIn(H, ' '.join(state['reasons']))
+                self.assertIn('human', ' '.join(state['reasons']))
+                self.assertEqual(state['budget']['used'], 1)
+        self.assertEqual(self.state((self.approval(login='stranger'),))[
+            'human_approvals'], [])
+
+    def test_either_arrival_order_and_casefolded_login(self) -> None:
+        for ident in (5, 20):
+            state = self.state((self.approval(ident, login='HUMAN'),))
+            self.assertTrue(state['approval']['approved'])
+            self.assertEqual(state['next_action'], 'approved')
+
+    def test_latest_selected_before_dismissal_or_head_filter(self) -> None:
+        for newest in (self.approval(21, dismissed=True),
+                       self.approval(21, head=A),
+                       self.approval(21, state=ReviewState.CHANGES_REQUESTED)):
+            state = self.state((newest, self.approval()))
+            self.assertFalse(state['approval']['approved'])
+        requests = self.approval(21, head=A, dismissed=True,
+                                 state=ReviewState.CHANGES_REQUESTED)
+        state = self.state((self.approval(), requests,
+                            self.approval(22, login='other')))
+        self.assertEqual(state['next_action'], 'await_human_approval')
+        self.assertEqual(state['human_request_changes'][0]['id'], 21)
+        self.assertIn(A, ' '.join(state['reasons']))
+        state = self.state((requests, self.approval(22)))
+        self.assertTrue(state['approval']['approved'])
+        self.assertEqual(state['human_request_changes'], [])
+
+    def test_timestamp_offsets_and_id_ties_order_latest(self) -> None:
+        old = replace(self.approval(), timestamp='2026-01-01T01:00:00+01:00')
+        newer = replace(self.approval(21, state=ReviewState.CHANGES_REQUESTED),
+                        timestamp='2026-01-01T00:00:00Z')
+        self.assertFalse(self.state((newer, old))['approval']['approved'])
+        newest = replace(self.approval(1), timestamp='2026-01-01T00:00:01Z')
+        state = self.state((newer, newest, old))
+        self.assertTrue(state['approval']['approved'])
+
+    def test_mirror_rule_for_every_verdict_and_dismissed_agent(self) -> None:
+        for state in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED,
+                      ReviewState.PENDING):
+            result = self.state((self.approval(),), reviews=(review(
+                10, author='dev', state=state),))
+            self.assertFalse(result['approval']['approved'])
+            self.assertIn('forge_state_mismatch',
+                          [d['kind'] for d in result['diagnostics']])
+        agent = replace(review(10, author='dev', state=ReviewState.COMMENTED),
+                        dismissed=True)
+        self.assertFalse(self.state((self.approval(),), reviews=(agent,))[
+            'approval']['approved'])
+        dual = derive_state(snapshot(
+            reviews=(review(10, state=ReviewState.COMMENTED),),
+        ))
+        self.assertFalse(dual['approval']['approved'])
+        self.assertNotIn('human_approvals', dual)
+        self.assertEqual(dual['approval']['reasons'],
+                         ['forge review state is not approved'])
+
+    def test_wait_precedes_budget_and_merge_but_not_stop_or_decision(self) -> None:
+        c = replace(self.configuration(), max_review_passes=1)
+        self.assertEqual(self.state(configuration=c)['next_action'],
+                         'await_human_approval')
+        instruction = decision(12, body=MERGE_INSTRUCTION)
+        self.assertEqual(self.state(conversation=(instruction,))['next_action'],
+                         'await_human_approval')
+        state = self.state((self.approval(),), conversation=(instruction,))
+        self.assertEqual(state['next_action'], 'merge')
+        stop = evidence(25, render_line('stop', head=H, reason='scope'), 'dev')
+        self.assertEqual(self.state(conversation=(stop,))
+                         ['next_action'], 'stopped')
+        amended = decision(
+            25, body='Approved amendment\n\n## Task\n\nNew Task')
+        self.assertEqual(self.state(conversation=(amended,))['next_action'],
+                         'launch_review')
+
+    def test_optional_disposition_precedes_wait(self) -> None:
+        agent = review(10, author='dev', state=ReviewState.COMMENTED,
+                       findings='REV-1 [optional] Finding')
+        comment = root(author='dev', severity='optional')
+        state = self.state(reviews=(agent,), comments=(comment,))
+        self.assertEqual(state['next_action'], 'address_findings')
+        state = self.state(reviews=(agent,), comments=(comment, reply(
+            12, 'DISPOSITION needs-human\nDeveloper must decide.')))
+        self.assertEqual(state['next_action'], 'needs_decision')
+
+    def test_agent_worktree_head_and_human_reviews_are_independent(self) -> None:
+        agent = review(10, author='dev', state=ReviewState.COMMENTED)
+        s = replace(snapshot(reviews=(agent,)),
+                    human_approvals=(self.approval(),))
+        for kwargs in ({'local_head': J}, {'missing_worktree': True}):
+            state = derive_state(
+                s, configuration=self.configuration(), **kwargs)
+            self.assertFalse(state['approval']['approved'])
+            self.assertNotEqual(state['next_action'], 'await_human_approval')
+        state = self.state((self.approval(),), reviews=(
+            review(10, author='dev', state=ReviewState.COMMENTED),
+            review(20, author='human'),))
+        self.assertEqual(state['budget']['used'], 1)
+        self.assertEqual(state['findings'], [])

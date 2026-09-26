@@ -174,3 +174,16 @@ class SkillTests(unittest.TestCase):
             self.assertTrue(packaged_skill(name).startswith(
                 f"---\nname: {name}\ndescription: ".encode()
             ))
+
+
+class SingleIdentitySkillTests(unittest.TestCase):
+    def test_human_wait_and_mode_appropriate_publication_are_packaged(self) -> None:
+        implementer = packaged_skill("squad-implementer").decode()
+        reviewer = packaged_skill("squad-reviewer").decode()
+        self.assertIn("await_human_approval", implementer)
+        self.assertIn("go idle without\npolling", implementer)
+        self.assertIn("human_request_changes", implementer)
+        self.assertIn("Never post a human approval yourself", implementer)
+        self.assertIn("single-identity mode every tagged verdict", reviewer)
+        self.assertIn("do not\nblock this agent review", reviewer)
+        self.assertNotIn("GitHub", implementer + reviewer)

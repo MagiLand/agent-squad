@@ -1,4 +1,4 @@
-"""All twelve steps of §16.3, with scripted reviews and decisions."""
+"""Scripted baseline smoke plus the single-identity approval scenario."""
 
 from __future__ import annotations
 
@@ -381,6 +381,41 @@ def run_smoke() -> dict:
                       "result": "fallback and resume preserved reviews"})
     assert all(not root.exists() for root in roots)
     steps.append({"step": 12, "result": "all temporary roots removed"})
+    with ForgeFixture() as f:
+        roots.append(f.root)
+        f.single_identity()
+        assert f.cli("doctor")["ok"]
+        f.candidate()
+        f.create_pr()
+        f.decision(body=MERGE_INSTRUCTION)
+        f.review("approved")
+        assert f.status()["next_action"] == "await_human_approval"
+        f.cli("pr", "merge", "--as", "implementer", "--pr", "1", expected=4)
+        requested = f.human_review("REQUEST_CHANGES")
+        state = f.status()
+        assert state["human_request_changes"][0]["id"] == requested["id"]
+        assert state["next_action"] == "await_human_approval"
+        f.push("value = 2\nsecond = 2\nthird = 3\n")
+        assert f.status()["next_action"] == "launch_review"
+        f.cli("reviewer", "launch", "--pr", "1")
+        f.review("approved")
+        assert f.status()["next_action"] == "await_human_approval"
+        f.human_review("APPROVE")
+        state = f.status()
+        assert state["next_action"] == "merge"
+        assert state["human_request_changes"] == []
+        assert state["human_approvals"][0]["dismissed"]
+        assert state["budget"]["used"] == 2
+        result = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                       cwd=f.repo)
+        assert result["integration"] == "verified by ancestry"
+        assert_merge_cleanup(f, 1, "issue-1", issue=1)
+        commands.extend(f.history)
+    assert all(not root.exists() for root in roots)
+    steps.append({
+        "step": 13,
+        "result": "single identity, human decisions, merge and cleanup",
+    })
     return {
         "ok": True,
         "duration_seconds": round(time.monotonic() - started, 3),
