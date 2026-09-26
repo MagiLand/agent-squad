@@ -1,7 +1,7 @@
 """Reviewer lifecycle, with ownership in linked-worktree Git metadata.
 
 The ownership record identifies resources only. All review authority remains
-on GitHub; no delivery status or review result is stored here.
+on the forge; no delivery status or review result is stored here.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import time
 import uuid
 
 from .commands import state_for
-from .forge import GitHub
+from .forge import Forge
 from .herdr import (
     AGENT_STATES,
     REVIEW_DELIVERY,
@@ -436,7 +436,7 @@ def start_reviewer(
 
 def launch(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     pr: int,
     *,
     client: HerdrClient | None = None,
@@ -552,7 +552,7 @@ def launch(
 
 def adopt(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     pr: int,
     *,
     client: HerdrClient | None = None,
@@ -616,7 +616,7 @@ def adopt(
 
 def handoff(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     pr: int,
     head: str,
     *,

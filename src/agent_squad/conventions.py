@@ -7,7 +7,7 @@ from datetime import datetime
 import re
 from typing import Callable
 
-from .forge import Comment, Evidence, Snapshot
+from .forge import Comment, Evidence, ReviewState, Snapshot, requested_state
 from .initialization import AgentSquadError, Configuration, Worktree
 
 TAG = "AGENT_SQUAD/0.5.0"
@@ -17,16 +17,6 @@ SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 NUMBER = r"[1-9][0-9]*"
 FINDING_ID = rf"REV-{NUMBER}"
 VERDICTS = ("approved", "changes_requested", "needs_human")
-EVENTS = {
-    "approved": "APPROVE",
-    "changes_requested": "REQUEST_CHANGES",
-    "needs_human": "COMMENT",
-}
-STATES = {
-    "approved": "APPROVED",
-    "changes_requested": "CHANGES_REQUESTED",
-    "needs_human": "COMMENTED",
-}
 PREFIXES = ("AGENT_SQUAD/", "[REV-", "DISPOSITION", "VERIFIED", "NOT FIXED")
 PATTERNS = {
     "review": re.compile(
@@ -491,6 +481,7 @@ def derive(
                 )
     resolution = {t.root_id: t for t in snapshot.threads}
     reviews = []
+    latest_review = None
     findings = []
     seen_ids = set()
 
@@ -556,7 +547,7 @@ def derive(
             if (
                 int(fields["pr"]) != pr.number
                 or fields["head"] != review.commit_id
-                or review.state == "PENDING"
+                or review.state == ReviewState.PENDING
                 or not ancestor(fields["base"], fields["head"])
                 or not ancestor(fields["base"], base_tip)
             ):
@@ -606,16 +597,20 @@ def derive(
             **fields,
             "pr": pr.number,
             "commit_id": review.commit_id,
-            "state": review.state,
+            "state": review.state_label,
             "current": review.commit_id == pr.head,
             "findings": listed,
         }
         reviews.append(entry)
-        if review.state != STATES[fields["verdict"]]:
+        latest_review = review
+        if (
+            review.dismissed
+            or review.state != requested_state(fields["verdict"])
+        ):
             diagnostic(
                 "forge_state_mismatch",
                 e,
-                f'{review.state} does not mirror {fields["verdict"]}',
+                f'{review.state_label} does not mirror {fields["verdict"]}',
             )
         incomplete = False
         for listed_finding in listed:
@@ -687,7 +682,8 @@ def derive(
                     resolution_state.node_id if resolution_state else None
                 ),
                 "resolved": (
-                    resolution_state.resolved if resolution_state else False
+                    (resolution_state.resolved if resolution_state else False)
+                    if snapshot.can_read_thread_resolution else None
                 ),
                 "unanchored": comment is None,
             }
@@ -831,8 +827,10 @@ def derive(
             "a STOPPED comment is newer than the review",
         ),
         (
-            latest is not None and latest["state"] == "APPROVED",
-            "forge review state is not APPROVED",
+            latest_review is not None
+            and latest_review.state == ReviewState.APPROVED
+            and not latest_review.dismissed,
+            f"forge review state is not {snapshot.approved_state_label}",
         ),
         (not newer(amendment, latest), "Task was amended after the review"),
     ]
@@ -905,6 +903,9 @@ def derive(
             "base_tip": base_tip,
             "base_branch": pr.base_branch,
         },
+        "can_resolve_threads": snapshot.can_resolve_threads,
+        "can_read_thread_resolution": snapshot.can_read_thread_resolution,
+        "can_read_branch_rules": snapshot.can_read_branch_rules,
         "pr": asdict(pr),
         "task": task,
         "implementation_report": report,

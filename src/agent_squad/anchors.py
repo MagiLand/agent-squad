@@ -2,28 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from .forge import Anchor
 from .initialization import AgentSquadError, git_output
-
-
-@dataclass(frozen=True)
-class Anchor:
-    path: str
-    line: int
-    start_line: int | None = None
-
-    def payload(self) -> dict[str, object]:
-        result: dict[str, object] = {
-            "path": self.path,
-            "line": self.line,
-            "side": "RIGHT",
-        }
-        if self.start_line is not None:
-            result.update(start_line=self.start_line, start_side="RIGHT")
-        return result
 
 
 def unquote_path(value: str) -> str:

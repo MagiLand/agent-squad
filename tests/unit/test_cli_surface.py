@@ -15,7 +15,7 @@ from agent_squad.conventions import TAG
 
 class CliSurfaceTests(unittest.TestCase):
     def test_command_surface_equals_specification_table(self) -> None:
-        spec = (PROJECT_ROOT / "docs/agent-squad-v0.5.0-spec.md").read_text()
+        spec = (PROJECT_ROOT / "docs/agent-squad-v0.6.0-spec.md").read_text()
         table = spec.split("### 10.2 Command table\n", 1)[1].split(
             "### 10.3", 1)[0]
         expected = set()

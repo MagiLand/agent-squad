@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture, TASK, REPORT, finding
-from agent_squad.forge import ForgeError, GitHub, PullRequest, Review
+from agent_squad.forge import ForgeError
+from agent_squad.github import GitHub, parse_pullrequest, parse_review
 from agent_squad.initialization import load_initialized_repository
 from agent_squad.conventions import MERGE_INSTRUCTION, MERGE_WITHDRAWAL
 
@@ -829,6 +830,6 @@ class ForgeCommandTests(unittest.TestCase):
                 forge.token()
         for value in [None, {}, {"id": True}, {"number": "1"}]:
             with self.assertRaises(ForgeError):
-                PullRequest.from_dict(value)
+                parse_pullrequest(value)
             with self.assertRaises(ForgeError):
-                Review.from_dict(value)
+                parse_review(value)

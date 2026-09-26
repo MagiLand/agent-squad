@@ -8,7 +8,6 @@ import re
 
 from .anchors import Anchor, commentable_lines, validate_anchor
 from .conventions import (
-    EVENTS,
     PATTERNS,
     allocate_id,
     derive,
@@ -28,10 +27,13 @@ from .conventions import (
 )
 from .forge import (
     ForgeError,
-    GitHub,
+    Forge,
+    ReviewComment,
+    ReviewPublication,
     Snapshot,
     array,
     positive,
+    requested_state,
 )
 from .initialization import (
     AgentSquadError,
@@ -102,7 +104,7 @@ def state_for(
         "--verify",
         f"refs/remotes/origin/{pr.base_branch}^{{commit}}",
     )
-    # GitHub's PR base SHA can lag behind the branch. Ancestry and the
+    # The forge's PR base SHA can lag behind the branch. Ancestry and the
     # review target use the fetched tip, not that informational snapshot.
     base = git_output(repository.root, "merge-base", tip, pr.head)
     worktrees = list_worktrees(repository.root)
@@ -166,7 +168,7 @@ def find_finding(state: dict, fid: str) -> dict:
 
 def create_pr(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     issue: int,
     task: str | None,
     report: str,
@@ -198,18 +200,14 @@ def create_pr(
 
     metadata, identity = implementation_identity(repository, issue, branch)
     created = forge.create_pr(
-        {
-            "title": title or issue_record["title"],
-            "head": branch,
-            "base": repository.configuration.base_branch,
-            "body": body,
-        }
+        title or issue_record["title"], branch,
+        repository.configuration.base_branch, body,
     )
     record_implementation(metadata, identity, created.number)
     return asdict(created)
 
 
-def report_pr(forge: GitHub, number: int, report: str) -> dict:
+def report_pr(forge: Forge, number: int, report: str) -> dict:
     validate_section(report, "Implementation report")
     pr = forge.pr(number)
     if pr.state != "open":
@@ -328,7 +326,7 @@ def compose_review(
 
 def post_review(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     number: int,
     head: str,
     base: str,
@@ -405,41 +403,18 @@ def post_review(
                     "changes_requested requires a blocking finding or NOT"
                     " FIXED during this pass"
                 )
-        # Preserve any stranded draft and its replies before the new review.
-        for review in snapshot.reviews:
-            if (
-                review.state == "PENDING"
-                and review.evidence.author.casefold()
-                == forge.account.casefold()
-            ):
-                forge.submit_pending(number, review.evidence.id)
-        comments = [
-            {**f.anchor.payload(), "body": f.root(fid)}
-            for f, fid in zip(inputs, ids)
-        ]
-        payload = {
-            "commit_id": head,
-            "event": EVENTS[verdict],
-            "body": complete_body,
-            "comments": comments,
-        }
-        try:
-            review = forge.post_review(number, payload)
-        except ForgeError as error:
-            # Only a definite batch rejection permits the specified alternative
-            # write.
-            if error.status != 422 or not comments:
-                raise
-            lines = commentable_lines(repository.root, base, head)
-            for item in inputs:
-                validate_anchor(item.anchor, lines)
-            payload["comments"] = []
-            payload["body"] = (
-                complete_body
-                + "\n\n## Unanchored findings\n\n"
-                + "\n\n".join(f.root(fid) for f, fid in zip(inputs, ids))
-            )
-            review = forge.post_review(number, payload)
+        forge.prepare_review(number, reviews=snapshot.reviews)
+        comments = tuple(
+            ReviewComment(item.anchor, item.root(fid))
+            for item, fid in zip(inputs, ids)
+        )
+        publication = ReviewPublication(
+            head, requested_state(verdict), complete_body,
+            complete_body + "\n\n## Unanchored findings\n\n"
+            + "\n\n".join(comment.body for comment in comments),
+            comments, base,
+        )
+        review = forge.post_review(number, publication)
         review_id = review.evidence.id
     else:
         review_id = existing["id"]
@@ -456,12 +431,7 @@ def post_review(
             # authoritative.
             root_body = finding["unanchored_body"] or item.root(fid)
             forge.post_root(
-                number,
-                {
-                    "commit_id": head,
-                    **item.anchor.payload(),
-                    "body": root_body,
-                },
+                number, head, review_id, item.anchor, root_body,
             )
         except ForgeError as error:
             failed.append(f"{fid}: {error}")
@@ -488,7 +458,7 @@ def post_review(
 
 
 def reply_thread(
-    repository: Repository, forge: GitHub, number: int, fid: str, body: str
+    repository: Repository, forge: Forge, number: int, fid: str, body: str
 ) -> dict:
     parsed = parse_line(first_line(body))
     allowed = {"implementer": "disposition", "reviewer": "verification"}
@@ -538,7 +508,7 @@ def reply_thread(
 
 def open_thread(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     number: int,
     fid: str,
     anchor: Anchor,
@@ -559,19 +529,17 @@ def open_thread(
     )
     return asdict(
         forge.post_root(
-            number,
-            {
-                "commit_id": finding["opening_head"],
-                **anchor.payload(),
-                "body": finding["unanchored_body"],
-            },
+            number, finding["opening_head"], finding["opening_review"],
+            anchor, finding["unanchored_body"],
         )
     )
 
 
 def resolve_thread(
-    repository: Repository, forge: GitHub, number: int, fid: str
+    repository: Repository, forge: Forge, number: int, fid: str
 ) -> dict:
+    if not forge.can_resolve_threads:
+        raise ForgeError("not supported on this forge")
     state = state_for(repository, forge.snapshot(number))
     finding = find_finding(state, fid)
     if finding["severity"] == "blocking" and not finding["settled"]:
@@ -583,7 +551,7 @@ def resolve_thread(
 
 def post_decision(
     repository: Repository,
-    forge: GitHub,
+    forge: Forge,
     number: int,
     finding: str,
     body: str,
@@ -643,7 +611,7 @@ def post_decision(
 
 
 def post_stop(
-    forge: GitHub, number: int, head: str, reason: str, body: str
+    forge: Forge, number: int, head: str, reason: str, body: str
 ) -> dict:
     header = render_line("stop", head=head, reason=reason)
     if not body.strip() or parse_line(first_line(body)) is not None:
