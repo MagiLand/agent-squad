@@ -843,7 +843,9 @@ class SingleForgeCommandTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
 
-    def test_shared_comment_approval_human_wait_and_guarded_merge(self) -> None:
+    def test_shared_comment_approval_human_wait_and_guarded_merge(
+        self,
+    ) -> None:
         import sys
         f = self.f
         f.review('approved')
@@ -862,8 +864,8 @@ class SingleForgeCommandTests(unittest.TestCase):
         self.assertEqual(submitted[-1]['body']['event'], 'COMMENT')
         self.assertTrue(all(c['account'] == 'developer' for c in calls
                             if c['arguments'][0] == 'api'))
-        self.assertTrue(any(c['arguments'] == ['auth', 'token', '--user', 'developer']
-                            for c in calls))
+        token_args = ['auth', 'token', '--user', 'developer']
+        self.assertTrue(any(c['arguments'] == token_args for c in calls))
         human = f.human_review('APPROVE')
         approved = f.status()
         self.assertTrue(approved['approval']['approved'])
@@ -875,7 +877,9 @@ class SingleForgeCommandTests(unittest.TestCase):
                        '--pr', '1', cwd=f.repo)
         self.assertEqual(merged['integration'], 'verified by ancestry')
 
-    def test_human_request_changes_does_not_gate_launch_and_replacement_wins(self) -> None:
+    def test_human_request_changes_does_not_gate_launch_and_replacement_wins(
+        self,
+    ) -> None:
         f = self.f
         f.human_review('APPROVE')
         f.review('approved')
@@ -898,7 +902,8 @@ class SingleForgeCommandTests(unittest.TestCase):
         f = self.f
         f.review('changes_requested', [finding()])
         self.assertEqual(f.status()['next_action'], 'address_findings')
-        f.reply('REV-1', 'DISPOSITION rejected\nAlready correct in this fixture.')
+        f.reply('REV-1',
+                'DISPOSITION rejected\nAlready correct in this fixture.')
         f.reply('REV-1', 'VERIFIED rejection accepted\nScripted check.',
                 role='reviewer')
         f.review('approved')

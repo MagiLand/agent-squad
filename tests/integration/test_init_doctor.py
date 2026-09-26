@@ -193,7 +193,8 @@ class SingleInitTests(unittest.TestCase):
     def test_single_repeatable_approvers_and_dual_defaults(self) -> None:
         with ForgeFixture() as f:
             f.cli('init', '--implementer-account', 'developer',
-                  '--reviewer-account', 'DEVELOPER', '--identity-mode', 'single',
+                  '--reviewer-account', 'DEVELOPER',
+                  '--identity-mode', 'single',
                   '--approver-account', 'human', '--approver-account', 'other')
             path = f.repo / '.agent-squad/config.json'
             data = json.loads(path.read_text())

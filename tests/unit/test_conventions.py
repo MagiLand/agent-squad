@@ -1273,13 +1273,17 @@ class SingleIdentityTests(unittest.TestCase):
         self.assertEqual(dual['approval']['reasons'],
                          ['forge review state is not approved'])
 
-    def test_wait_precedes_budget_and_merge_but_not_stop_or_decision(self) -> None:
+    def test_wait_precedes_budget_and_merge_but_not_stop_or_decision(
+        self,
+    ) -> None:
         c = replace(self.configuration(), max_review_passes=1)
         self.assertEqual(self.state(configuration=c)['next_action'],
                          'await_human_approval')
         instruction = decision(12, body=MERGE_INSTRUCTION)
-        self.assertEqual(self.state(conversation=(instruction,))['next_action'],
-                         'await_human_approval')
+        self.assertEqual(
+            self.state(conversation=(instruction,))['next_action'],
+            'await_human_approval',
+        )
         state = self.state((self.approval(),), conversation=(instruction,))
         self.assertEqual(state['next_action'], 'merge')
         stop = evidence(25, render_line('stop', head=H, reason='scope'), 'dev')
@@ -1300,7 +1304,9 @@ class SingleIdentityTests(unittest.TestCase):
             12, 'DISPOSITION needs-human\nDeveloper must decide.')))
         self.assertEqual(state['next_action'], 'needs_decision')
 
-    def test_agent_worktree_head_and_human_reviews_are_independent(self) -> None:
+    def test_agent_worktree_head_and_human_reviews_are_independent(
+        self,
+    ) -> None:
         agent = review(10, author='dev', state=ReviewState.COMMENTED)
         s = replace(snapshot(reviews=(agent,)),
                     human_approvals=(self.approval(),))

@@ -466,7 +466,9 @@ class ForgeBoundaryTests(unittest.TestCase):
 
 
 class SingleIdentityAdapterTests(unittest.TestCase):
-    def test_snapshot_reads_approval_history_once_only_in_single_mode(self) -> None:
+    def test_snapshot_reads_approval_history_once_only_in_single_mode(
+        self,
+    ) -> None:
         from dataclasses import replace
         from agent_squad.forge import Approval, ReviewState
         c = config()
@@ -482,7 +484,9 @@ class SingleIdentityAdapterTests(unittest.TestCase):
             patch.object(forge, "reviews", return_value=()),
             patch.object(forge, "listing", return_value=[]),
             patch.object(forge, "thread_states", return_value=()),
-            patch.object(forge, "approvals", return_value=(record,)) as approvals,
+            patch.object(
+                forge, "approvals", return_value=(record,),
+            ) as approvals,
         ):
             result = forge.snapshot(1)
         approvals.assert_called_once_with(1)
@@ -491,7 +495,9 @@ class SingleIdentityAdapterTests(unittest.TestCase):
     def test_approver_lookup_validates_identity_and_quotes_path(self) -> None:
         forge = GitHub(Repository(Path("/repo"), Path("/repo"),
                                   Path("/repo/.git"), config()), "implementer")
-        with patch.object(forge, "api", return_value={"login": "Human"}) as api:
+        with patch.object(
+            forge, "api", return_value={"login": "Human"},
+        ) as api:
             forge.user_exists("human")
         api.assert_called_once_with("users/human")
         for response in ({}, {"login": "someone"}, {"login": False}):
@@ -499,6 +505,8 @@ class SingleIdentityAdapterTests(unittest.TestCase):
                 with patch.object(forge, "api", return_value=response):
                     with self.assertRaises(ForgeError):
                         forge.user_exists("human")
-        with patch.object(forge, "api", return_value={"login": "a/b?c"}) as api:
+        with patch.object(
+            forge, "api", return_value={"login": "a/b?c"},
+        ) as api:
             forge.user_exists("a/b?c")
         api.assert_called_once_with("users/a%2Fb%3Fc")

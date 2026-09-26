@@ -177,7 +177,9 @@ class SkillTests(unittest.TestCase):
 
 
 class SingleIdentitySkillTests(unittest.TestCase):
-    def test_human_wait_and_mode_appropriate_publication_are_packaged(self) -> None:
+    def test_human_wait_and_mode_appropriate_publication_are_packaged(
+        self,
+    ) -> None:
         implementer = packaged_skill("squad-implementer").decode()
         reviewer = packaged_skill("squad-reviewer").decode()
         self.assertIn("await_human_approval", implementer)

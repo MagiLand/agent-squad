@@ -6,7 +6,9 @@ Developer decisions, and approval. Each review identifies an exact commit and
 runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
 for the Developer's review before merging.
 
-The implementation follows the [v0.5.0 specification delta](docs/agent-squad-v0.5.0-spec.md).
+The implementation follows the [v0.6.0 specification delta](docs/agent-squad-v0.6.0-spec.md)
+through Increment 2: GitHub supports dual and single identity; the Forgejo
+adapter belongs to later increments.
 See [workflow verification](docs/workflow-verification.md) for deterministic
 coverage and the live-trial evidence required before releasing v0.5.0.
 
@@ -53,7 +55,7 @@ refused: move that configuration aside and rerun `init`; no migration is offered
 The defaults are Codex implementing, Claude Code reviewing, three review
 passes, and a merge commit. To reverse the agents, edit the existing
 `implementer.kind` and `reviewer.kind` configuration fields before the trial.
-See [configuration](docs/agent-squad-v0.5.0-spec.md#9-configuration-schema-version-2)
+See [configuration](docs/agent-squad-v0.6.0-spec.md#9-configuration-schema-version-2)
 for account, branch, merge method, and directory settings.
 
 `doctor` checks both forge identities, Reviewer permission, the remote base

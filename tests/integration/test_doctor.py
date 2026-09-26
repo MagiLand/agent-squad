@@ -647,8 +647,10 @@ class SingleDoctorTests(unittest.TestCase):
             self.assertTrue(result['ok'])
             checks = {d['check']: d for d in result['diagnostics']}
             self.assertNotIn('Reviewer write permission', checks)
-            for name in ('shared account push permission', 'approver human exists',
-                         'approver other exists'):
+            for name in (
+                'shared account push permission', 'approver human exists',
+                'approver other exists',
+            ):
                 self.assertEqual(checks[name]['severity'], 'pass')
             f.settings(missing_users=['other'], permission='read')
             result = f.cli('doctor', expected=1)
@@ -662,7 +664,9 @@ class SingleDoctorTests(unittest.TestCase):
             )
             self.assertNotIn('fake-token-', json.dumps(result))
 
-    def test_dual_check_list_retains_reviewer_permission_without_approvers(self) -> None:
+    def test_dual_check_list_retains_reviewer_permission_without_approvers(
+        self,
+    ) -> None:
         with ForgeFixture() as f:
             f.initialize()
             checks = {d['check'] for d in f.cli('doctor')['diagnostics']}
