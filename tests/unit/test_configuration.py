@@ -15,12 +15,55 @@ from agent_squad.initialization import (
     Worktree,
     atomic_config,
     decode_json,
+    initialize_repository,
     remote_coordinates,
     validate_roots,
 )
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_init_validates_both_token_files_before_git_network_or_api(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            primary = root / "primary"
+            primary.mkdir()
+            repository = Repository(primary, primary, primary / ".git")
+            token = root / "private.token"
+            token.write_text("synthetic-token\n")
+            token.chmod(0o600)
+
+            def local_git(root, *args):
+                self.assertEqual(args, ("remote", "get-url", "origin"))
+                return "git@unknown-alias:prefix/Owner/repository.git"
+
+            with (
+                patch("agent_squad.initialization.discover_git_worktree",
+                      return_value=repository),
+                patch("agent_squad.initialization.git_output",
+                      side_effect=local_git),
+                patch("agent_squad.initialization.list_worktrees",
+                      return_value=(Worktree(primary, "a" * 40, "main"),)),
+                patch("agent_squad.forgejo.list_worktrees",
+                      return_value=(Worktree(primary, "a" * 40, "main"),)),
+                patch("agent_squad.forge.make_forge") as factory,
+            ):
+                for role in ("implementer", "reviewer"):
+                    with self.subTest(role=role):
+                        paths = {"implementer_token_file": str(token),
+                                 "reviewer_token_file": str(token)}
+                        paths[role + "_token_file"] = str(root / "missing")
+                        with self.assertRaisesRegex(ConfigurationError, role):
+                            initialize_repository(
+                                primary, implementer_account="dev",
+                                reviewer_account="reviewer", forge="forgejo",
+                                base_url="https://forge.example/prefix/",
+                                **paths,
+                            )
+                        factory.assert_not_called()
+                        self.assertFalse(repository.control_root.exists())
+
     def test_schema_round_trip_and_optional_developer_accounts(self) -> None:
         value = config().to_dict()
         self.assertEqual(Configuration.from_dict(value), config())

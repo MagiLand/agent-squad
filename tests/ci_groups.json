@@ -1,6 +1,7 @@
 {
   "doctor": [
-    "tests/integration/test_doctor.py"
+    "tests/integration/test_doctor.py",
+    "tests/integration/test_forgejo_init_doctor.py"
   ],
   "reviewer": [
     "tests/integration/test_reviewer.py"

@@ -324,6 +324,7 @@ def diagnose(
 
     check("remote base branch", base_branch)
     forges = {}
+    approvers_ok = False
     for role in ("implementer", "reviewer"):
         try:
             forge = make_forge(repository, role)
@@ -372,11 +373,29 @@ def diagnose(
                             f"approver account does not exist: {login}"
                         )
 
+                approvers_ok = True
                 for login in config.approver_accounts:
-                    check(
+                    approvers_ok &= check(
                         f"approver {login} exists",
                         lambda login=login: approver_exists(login),
                     )
+
+    if config.identity_mode == "single":
+        for name in ("distinct forge identities", "Reviewer write permission"):
+            add(name, "skip", "single identity mode")
+        add(
+            "approver accounts", "pass" if approvers_ok else "fail",
+            "every independent approver exists" if approvers_ok
+            else "cannot verify every configured approver",
+        )
+    else:
+        add(
+            "distinct forge identities",
+            "pass" if len(forges) == 2 else "fail",
+            "both distinct configured logins verified" if len(forges) == 2
+            else "cannot verify both configured logins",
+        )
+        add("approver accounts", "pass", "empty as required in dual mode")
 
     client = herdr_client or HerdrClient(repository.root)
     herdr_ok = check(

@@ -44,6 +44,11 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--implementer-account", required=True)
     init.add_argument("--reviewer-account", required=True)
     init.add_argument(
+        "--forge", choices=("github", "forgejo"), default="github",
+    )
+    for name in ("base-url", "implementer-token-file", "reviewer-token-file"):
+        init.add_argument("--" + name)
+    init.add_argument(
         "--identity-mode", choices=("dual", "single"), default="dual",
     )
     init.add_argument("--approver-account", action="append", default=[])
@@ -158,6 +163,10 @@ def execute(args: argparse.Namespace) -> dict:
             base_branch=args.base_branch,
             identity_mode=args.identity_mode,
             approver_accounts=tuple(args.approver_account),
+            forge=args.forge,
+            base_url=args.base_url,
+            implementer_token_file=args.implementer_token_file,
+            reviewer_token_file=args.reviewer_token_file,
         )
     # doctor reports invalid configuration as one of its prerequisite failures.
     if args.group == "doctor":
@@ -306,6 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     if (args.group == "init" and args.identity_mode == "single"
             and not args.approver_account):
         root.error("--identity-mode single requires --approver-account")
+    if args.group == "init" and args.forge == "forgejo":
+        for name in (
+            "base_url", "implementer_token_file", "reviewer_token_file",
+        ):
+            if getattr(args, name) is None:
+                root.error(
+                    "--forge forgejo requires --" + name.replace("_", "-"),
+                )
     try:
         result = execute(args)
         if args.json:

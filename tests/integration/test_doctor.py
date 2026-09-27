@@ -198,7 +198,7 @@ class DoctorTests(unittest.TestCase):
 
     def test_empty_gh_version_is_a_failure(self) -> None:
         self.f.settings(version="")
-        self.diagnostic(self.f.cli("doctor", expected=1), "GitHub CLI")
+        self.diagnostic(self.f.cli("doctor", expected=1), "forge client")
 
     def test_remote_base_must_exist_now_not_only_in_local_refs(self) -> None:
         f = self.f
@@ -646,7 +646,7 @@ class SingleDoctorTests(unittest.TestCase):
             result = f.cli('doctor')
             self.assertTrue(result['ok'])
             checks = {d['check']: d for d in result['diagnostics']}
-            self.assertNotIn('Reviewer write permission', checks)
+            self.assertEqual(checks['Reviewer write permission']['severity'], 'skip')
             for name in (
                 'shared account push permission', 'approver human exists',
                 'approver other exists',
@@ -676,7 +676,8 @@ class SingleDoctorTests(unittest.TestCase):
             checks = {d['check'] for d in f.cli('doctor')['diagnostics']}
             self.assertIn('Reviewer write permission', checks)
             self.assertNotIn('shared account push permission', checks)
-            self.assertFalse(any(c.startswith('approver ') for c in checks))
+            self.assertEqual({c for c in checks if c.startswith('approver ')},
+                             {'approver accounts'})
 
 
 class ForgejoDoctorTests(unittest.TestCase):
@@ -694,7 +695,7 @@ class ForgejoDoctorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         checks = {d["check"]: d for d in result["diagnostics"]}
         for name in (
-            "Forgejo version",
+            "forge client",
             "implementer forge identity",
             "reviewer forge identity",
             "implementer repository access",
@@ -723,7 +724,7 @@ class ForgejoDoctorTests(unittest.TestCase):
         self.f.single_identity()
         result = self.f.cli("doctor")
         checks = {d["check"]: d for d in result["diagnostics"]}
-        self.assertNotIn("Reviewer write permission", checks)
+        self.assertEqual(checks["Reviewer write permission"]["severity"], "skip")
         self.assertEqual(
             checks["shared account push permission"]["severity"], "pass"
         )
@@ -747,7 +748,14 @@ class ForgejoDoctorTests(unittest.TestCase):
         self.f.settings(version="15.0.9")
         result = self.f.cli("doctor", expected=1)
         checks = {d["check"]: d for d in result["diagnostics"]}
-        self.assertEqual(checks["reviewer token file"]["severity"], "fail")
-        self.assertEqual(checks["Forgejo version"]["severity"], "fail")
-        self.assertIn("16.0.0", checks["Forgejo version"]["detail"])
+        self.assertEqual(
+            checks["repository and configuration"]["severity"], "fail"
+        )
+        self.assertIn("reviewer token_file", json.dumps(result))
+        self.assertEqual(self.f.read_model()["calls"], [])
+        (self.f.root / "reviewer.token").chmod(0o600)
+        result = self.f.cli("doctor", expected=1)
+        checks = {d["check"]: d for d in result["diagnostics"]}
+        self.assertEqual(checks["forge client"]["severity"], "fail")
+        self.assertIn("16.0.0", checks["forge client"]["detail"])
         self.assertNotIn("fake-token-", json.dumps(result))
