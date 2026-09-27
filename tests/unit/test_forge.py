@@ -407,7 +407,7 @@ class ForgeBoundaryTests(unittest.TestCase):
             ])
         self.assertEqual(result, 1)
         self.assertEqual(errors.getvalue(),
-                         'error: not supported on this forge\n')
+                         'error: thread resolve is not supported on this forge\n')
 
     def test_unknown_resolution_is_null_and_never_settles_findings(
         self,
