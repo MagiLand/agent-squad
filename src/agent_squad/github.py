@@ -160,6 +160,9 @@ class GitHub:
     """One process-local forge identity. Mutation calls are never retried."""
 
     version_label = "GitHub CLI"
+    credential_label = None
+    can_mutate = True
+    mutation_unavailable_message = "not supported on this forge"
     can_resolve_threads = True
     can_read_thread_resolution = True
     can_read_branch_rules = True
@@ -252,6 +255,9 @@ class GitHub:
         if not value:
             raise ForgeError("gh --version returned no version text")
         return value
+
+    def verify_credentials(self) -> None:
+        self.token()
 
     def verify_identity(self) -> None:
         if not self._verified:

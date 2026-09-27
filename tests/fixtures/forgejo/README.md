@@ -122,3 +122,26 @@ lsof -nP -iTCP:18554 -sTCP:LISTEN
 The final command should find no listener. Remove the private throwaway
 credential files. The driver does not remove containers, volumes, output
 directories, or Git working directories itself.
+
+## Read-adapter fixture (Increment 3)
+
+`tests/fixtures/fake_forgejo.py` runs a `ThreadingHTTPServer` on
+`127.0.0.1:0`. `ForgejoFixture` owns its socket and serving thread, selects the
+JSON model through `FAKE_FORGE_MODEL`, and closes the server before removing
+its temporary directory. It creates private synthetic token files outside the
+fixture's Git worktrees. Request logs contain only these fake credentials.
+
+The shared `tests/fixtures/forge_read_scenario.json` supplies the same review,
+finding, disposition, verification, and approval to the HTTP and fake-`gh`
+fixtures. Wire responses copy the committed recordings before substituting
+fixture identities. Issue GET, shuffled ordering, offset timestamps, and
+resolver visibility are synthetic cases; they do not add live-trial evidence.
+
+Settings cover `pending_draft`, `shuffle_comments`, `request_review_rows`,
+`empty_hunk_paths`, `author_approval_422`, `head_out_of_date_409`,
+`unknown_event_pending`, `version`, `user_failure`, `login_mismatch`,
+`token_failure`, and `permission`. Additional read-failure settings expose
+invisible branch rules, missing users, repository denial, missing resolver
+fields, and redirects. The few write responses model recorded faults for
+transport tests; the production adapter's mutation methods and CLI commands
+remain disabled until Increment 4.

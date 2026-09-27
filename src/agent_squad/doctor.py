@@ -332,6 +332,8 @@ def diagnose(
             continue
         if role == "implementer":
             check(forge.version_label, forge.version)
+        if forge.credential_label is not None:
+            check(f"{role} {forge.credential_label}", forge.verify_credentials)
         # verify_identity resolves the token internally. Never return a token
         # as a diagnostic value, or interpolate API bodies in success output.
         if check(f"{role} forge identity", forge.verify_identity):

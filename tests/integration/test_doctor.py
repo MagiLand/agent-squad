@@ -677,3 +677,77 @@ class SingleDoctorTests(unittest.TestCase):
             self.assertIn('Reviewer write permission', checks)
             self.assertNotIn('shared account push permission', checks)
             self.assertFalse(any(c.startswith('approver ') for c in checks))
+
+
+class ForgejoDoctorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.forge_support import ForgejoFixture
+
+        self.f = ForgejoFixture()
+        self.addCleanup(self.f.close)
+        self.f.initialize()
+
+    def test_dual_mode_checks_version_identity_tokens_access_and_write(
+        self,
+    ) -> None:
+        result = self.f.cli("doctor")
+        self.assertTrue(result["ok"])
+        checks = {d["check"]: d for d in result["diagnostics"]}
+        for name in (
+            "Forgejo version",
+            "implementer forge identity",
+            "reviewer forge identity",
+            "implementer repository access",
+            "reviewer repository access",
+            "implementer token file",
+            "reviewer token file",
+            "Reviewer write permission",
+        ):
+            self.assertEqual(checks[name]["severity"], "pass", name)
+        self.assertNotIn("GitHub CLI", checks)
+        self.assertNotIn("fake-token-", json.dumps(result))
+        self.assertTrue(
+            all(c["method"] == "GET" for c in self.f.read_model()["calls"])
+        )
+        self.f.settings(permission="read")
+        result = self.f.cli("doctor", expected=1)
+        self.assertTrue(
+            any(
+                d["check"] == "Reviewer write permission"
+                and d["severity"] == "fail"
+                for d in result["diagnostics"]
+            )
+        )
+
+    def test_single_mode_shared_push_and_approver_existence(self) -> None:
+        self.f.single_identity()
+        result = self.f.cli("doctor")
+        checks = {d["check"]: d for d in result["diagnostics"]}
+        self.assertNotIn("Reviewer write permission", checks)
+        self.assertEqual(
+            checks["shared account push permission"]["severity"], "pass"
+        )
+        self.assertEqual(checks["approver human exists"]["severity"], "pass")
+        self.f.settings(permission="read", missing_users=["human"])
+        result = self.f.cli("doctor", expected=1)
+        failed = {
+            d["check"]
+            for d in result["diagnostics"]
+            if d["severity"] == "fail"
+        }
+        self.assertTrue(
+            {"shared account push permission", "approver human exists"}
+            <= failed
+        )
+
+    def test_invalid_token_and_old_server_have_specific_diagnostics(
+        self,
+    ) -> None:
+        (self.f.root / "reviewer.token").chmod(0o640)
+        self.f.settings(version="15.0.9")
+        result = self.f.cli("doctor", expected=1)
+        checks = {d["check"]: d for d in result["diagnostics"]}
+        self.assertEqual(checks["reviewer token file"]["severity"], "fail")
+        self.assertEqual(checks["Forgejo version"]["severity"], "fail")
+        self.assertIn("16.0.0", checks["Forgejo version"]["detail"])
+        self.assertNotIn("fake-token-", json.dumps(result))

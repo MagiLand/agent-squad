@@ -663,6 +663,11 @@ def derive(
             eligible = []
             for candidate, line in candidates:
                 if (
+                    not candidate.path or candidate.line is None
+                    or candidate.side != "RIGHT"
+                ):
+                    continue
+                if (
                     line.fields["severity"] != listed_finding["severity"]
                     or line.fields["title"] != listed_finding["title"]
                 ):

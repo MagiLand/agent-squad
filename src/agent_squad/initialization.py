@@ -70,6 +70,7 @@ class ForgeConfiguration:
     kind: str
     owner: str
     repo: str
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class ImplementerConfiguration:
     agent_name: str
     kind: AgentKind
     forge_account: str
+    token_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class ReviewerConfiguration:
     kind: AgentKind
     start_args: tuple[str, ...]
     forge_account: str
+    token_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,7 +133,10 @@ class Configuration:
         if V.require_int(data["schema_version"], "schema_version") != 2:
             raise ConfigurationError("schema_version must equal 2")
         forge = V.require_object(data["forge"], "forge")
-        V.check_fields(forge, required={"kind", "owner", "repo"}, path="forge")
+        V.check_fields(
+            forge, required={"kind", "owner", "repo"},
+            optional={"base_url"}, path="forge",
+        )
         if forge["kind"] not in ("github", "forgejo"):
             raise ConfigurationError("forge.kind must be github or forgejo")
         for key in ("owner", "repo"):
@@ -144,13 +150,33 @@ class Configuration:
         V.check_fields(
             implementer,
             required={"agent_name", "kind", "forge_account"},
+            optional={"token_file"},
             path="implementer",
         )
         V.check_fields(
             reviewer,
             required={"kind", "start_args", "forge_account"},
+            optional={"token_file"},
             path="reviewer",
         )
+        if forge["kind"] == "forgejo":
+            validate_base_url(forge.get("base_url"))
+            for label, role in (
+                ("implementer", implementer), ("reviewer", reviewer),
+            ):
+                V.require_absolute_path(
+                    role.get("token_file"), f"{label}.token_file",
+                )
+        else:
+            for data_part, key, label in (
+                (forge, "base_url", "forge.base_url"),
+                (implementer, "token_file", "implementer.token_file"),
+                (reviewer, "token_file", "reviewer.token_file"),
+            ):
+                if key in data_part:
+                    raise ConfigurationError(
+                        f"{label} is only allowed when forge.kind is forgejo"
+                    )
         name = V.require_string(
             implementer["agent_name"], "implementer.agent_name"
         )
@@ -229,8 +255,12 @@ class Configuration:
         return cls(
             2,
             ForgeConfiguration(**forge),
-            ImplementerConfiguration(name, kinds[0], accounts[0]),
-            ReviewerConfiguration(kinds[1], args, accounts[1]),
+            ImplementerConfiguration(
+                name, kinds[0], accounts[0], implementer.get("token_file"),
+            ),
+            ReviewerConfiguration(
+                kinds[1], args, accounts[1], reviewer.get("token_file"),
+            ),
             developers,
             branch,
             budget,
@@ -241,12 +271,49 @@ class Configuration:
         )
 
     def to_dict(self) -> dict[str, object]:
-        return json.loads(json.dumps(asdict(self)))
+        value = json.loads(json.dumps(asdict(self)))
+        for section, field in (
+            ("forge", "base_url"), ("implementer", "token_file"),
+            ("reviewer", "token_file"),
+        ):
+            if value[section][field] is None:
+                del value[section][field]
+        return value
 
     def account(self, role: str) -> str:
         if role not in ("implementer", "reviewer"):
             raise ConfigurationError(f"unknown role: {role}")
         return getattr(self, role).forge_account
+
+
+def validate_base_url(value: object) -> str:
+    """Validate the explicitly configured API origin and instance prefix."""
+    message = "invalid forge.base_url: "
+    if not isinstance(value, str) or not value:
+        raise ConfigurationError(message + "an absolute URL is required")
+    try:
+        parts = urlsplit(value)
+        valid_port = parts.port is None or parts.port > 0
+        host = parts.hostname
+    except ValueError:
+        raise ConfigurationError(message + "invalid host or port") from None
+    if (
+        not host or not parts.netloc or not valid_port
+        or re.search(r"[\s\x00-\x1f\x7f]", value)
+        or "\\" in value
+    ):
+        raise ConfigurationError(message + "an absolute URL is required")
+    if parts.username is not None or parts.password is not None:
+        raise ConfigurationError(message + "embedded credentials are refused")
+    if "?" in value or "#" in value:
+        raise ConfigurationError(message + "query and fragment are refused")
+    if parts.scheme != "https" and not (
+        parts.scheme == "http" and host in ("127.0.0.1", "::1", "localhost")
+    ):
+        raise ConfigurationError(
+            message + "HTTPS is required except on loopback"
+        )
+    return value
 
 
 def string_list(value: object, label: str) -> tuple[str, ...]:
