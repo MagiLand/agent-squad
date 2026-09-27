@@ -797,9 +797,15 @@ class Forgejo:
                                            "body": body},
         ), "posted root")
         comment_id = positive(written.get("id"), "root ID")
-        comments, _ = parse_comments(
-            self._review_comments(number, review_id), review_id,
-        )
+        try:
+            comments, _ = parse_comments(
+                self._review_comments(number, review_id), review_id,
+            )
+        except ForgeError as error:
+            raise ForgeError(
+                f"root {comment_id} in review {review_id} written;"
+                f" read-back failed: {error}"
+            ) from None
         tag = FINDING.match(body)
         matches = [c for c in comments if c.evidence.id == comment_id]
         root = matches[0] if len(matches) == 1 else None
@@ -879,7 +885,15 @@ class Forgejo:
         )
         # A successful POST may have no body. The merged PR's head can change
         # after branch deletion (E9); only its merge commit is used here.
-        pr = self.pr(number)
+        try:
+            pr = self.pr(number)
+        except ForgeError as error:
+            # A failed confirmation read is not a refusal of the POST that
+            # already succeeded. Drop its HTTP status so callers retain an
+            # uncertain merge outcome and all local resources.
+            raise ForgeError(
+                f"merge submitted; confirmation failed: {error}; re-read the PR"
+            ) from None
         if not pr.merged or pr.merge_commit is None:
             raise ForgeError("merge not confirmed; re-read the PR")
         return {"sha": pr.merge_commit, "message": "merge confirmed"}

@@ -685,6 +685,16 @@ class MutationContractTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, status)
             self.assertEqual(forge.api.call_count, 1)
 
+    def test_failed_merge_confirmation_cannot_look_like_a_refused_post(self):
+        forge = self.forge()
+        for status in (403, 404, 409, 422):
+            forge.pr = Mock(side_effect=ForgeError("read failed", status))
+            with self.assertRaises(ForgeError) as caught:
+                forge.merge(1, "a" * 40, "merge")
+            self.assertIsNone(caught.exception.status)
+            self.assertIn("merge submitted; confirmation failed",
+                          str(caught.exception))
+
     def test_usable_recovery_root_keeps_original_unanchored_evidence(self):
         rows = recording("026-e2-comments.json")
         original = dict(rows[0], id=10, body="[REV-1] original",

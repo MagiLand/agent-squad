@@ -289,6 +289,19 @@ class ForgejoMutationCases:
             self.assertFalse(f.status()["pr"]["merged"])
             f.settings(**{fault: False})
 
+    def test_failed_confirmation_read_keeps_merge_outcome_unknown(self):
+        f = self.f
+        f.review("approved")
+        self.human_approve()
+        f.settings(merge_confirmation_403=True)
+        result = self.merge(1)
+        self.assertIsNone(result["merged"])
+        self.assertTrue(result["resources_retained"])
+        self.assertIn("merge submitted; confirmation failed", result["error"])
+        self.assertTrue(f.worktree.exists())
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertTrue(f.read_model()["prs"]["1"]["merged"])
+
     def test_merge_ancestry_and_tracking_cleanup_use_premerge_identity(self):
         f = self.f
         f.review("approved")

@@ -313,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
             pr.setdefault("merge_base", pr["base"]["sha"])
             pr["base"]["sha"] = self.branch(model, pr["base"]["ref"])
         if len(parts) == 5:
+            if pr["merged"] and settings.get("merge_confirmation_403"):
+                return 403, {"message": "merge confirmation unreadable"}
             if self.command == "PATCH":
                 if settings.get("fail_mirror"):
                     return 503, {"message": "injected Task mirror failure"}
