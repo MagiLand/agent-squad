@@ -1,11 +1,12 @@
 """Forgejo write/recovery contracts through the CLI in both identity modes."""
 
 import json
-from pathlib import Path
 import sys
 import unittest
 
-from tests.forge_support import ForgeFixture, ForgejoFixture, REPORT, TASK, finding
+from tests.forge_support import (
+    ForgeFixture, ForgejoFixture, REPORT, TASK, finding,
+)
 
 
 class ForgejoMutationCases:
@@ -67,8 +68,10 @@ class ForgejoMutationCases:
     def test_body_first_ranges_replies_tokens_and_resolution(self):
         f = self.f
         f.settings(random_comment_order=True)
-        items = [finding(line=1), dict(finding(title="Range", line=3),
-                                      start_line=2)]
+        items = [
+            finding(line=1),
+            dict(finding(title="Range", line=3), start_line=2),
+        ]
         result = f.review("changes_requested", items)
         writes = self.writes()
         review = next(c for c in writes if c["path"].endswith("/reviews"))
@@ -79,11 +82,13 @@ class ForgejoMutationCases:
         self.assertEqual(review["body"]["event"],
                          "COMMENT" if self.single else "REQUEST_CHANGES")
         self.assertEqual([c["body"]["new_position"] for c in roots], [1, 2])
-        self.assertEqual([c["body"]["extra_lines_count"] for c in roots], [0, 1])
+        self.assertEqual(
+            [c["body"]["extra_lines_count"] for c in roots], [0, 1])
         self.assertEqual(result["findings"], ["REV-1", "REV-2"])
         state = f.status()
         self.assertEqual(state["next_action"], "address_findings")
-        self.assertEqual([x["anchor"]["line"] for x in state["findings"]], [1, 3])
+        self.assertEqual(
+            [x["anchor"]["line"] for x in state["findings"]], [1, 3])
         # Replies must use the stored wire position, not the displayed line.
         model = f.read_model()
         for root in model["prs"]["1"]["comments"]:
@@ -96,8 +101,10 @@ class ForgejoMutationCases:
         state = f.status()
         self.assertTrue(all(x["settled"] for x in state["findings"]))
         self.assertTrue(all(len(x["replies"]) == 2 for x in state["findings"]))
-        replies = [c for c in self.writes()
-                   if c["body"]["body"].startswith(("DISPOSITION", "VERIFIED"))]
+        replies = [
+            c for c in self.writes()
+            if c["body"]["body"].startswith(("DISPOSITION", "VERIFIED"))
+        ]
         self.assertEqual([c["body"]["new_position"] for c in replies],
                          [101, 101, 102, 102])
         self.assertFalse(state["capabilities"]["can_resolve_threads"])
@@ -112,9 +119,11 @@ class ForgejoMutationCases:
                 expected = "developer"
             else:
                 expected = self.reviewer if is_review else "developer"
-            self.assertEqual(call["Authorization"], "token fake-token-" + expected)
+            self.assertEqual(
+                call["Authorization"], "token fake-token-" + expected)
         self.assertNotIn("fake-token-", json.dumps(state))
-        self.assertTrue(all("GH_TOKEN" not in c for c in f.read_model()["calls"]))
+        self.assertTrue(
+            all("GH_TOKEN" not in c for c in f.read_model()["calls"]))
         f.review("approved")
         self.assertEqual(f.status()["next_action"],
                          "await_human_approval" if self.single else "approved")
@@ -159,7 +168,9 @@ class ForgejoMutationCases:
             self.assertEqual(len(f.read_model()["calls"]), before)
         self.assertEqual(f.status()["budget"]["used"], 0)
 
-    def test_interruptions_and_resume_preserve_one_review_and_existing_roots(self):
+    def test_interruptions_and_resume_preserve_one_review_and_existing_roots(
+        self,
+    ) -> None:
         f = self.f
         f.settings(interrupt_before_review=True)
         f.review("changes_requested", [finding()], expected=1)
@@ -175,8 +186,10 @@ class ForgejoMutationCases:
                  resume=rid, expected=1)
         state = f.status()
         first_root = state["findings"][0]["root"]["id"]
-        for verdict, items in (("needs_human", [finding(), finding(line=3)]),
-                               ("changes_requested", [finding(title="Changed")])):
+        for verdict, items in (
+            ("needs_human", [finding(), finding(line=3)]),
+            ("changes_requested", [finding(title="Changed")]),
+        ):
             before = len(f.read_model()["calls"])
             f.review(verdict, items, resume=rid, expected=1)
             self.assertEqual(self.writes(before), [])
@@ -238,7 +251,9 @@ class ForgejoMutationCases:
         self.assertEqual(state["next_action"], "launch_review")
         f.settings(fail_mirror=False)
         self.assertTrue(f.decision(task=changed)["reused"])
-        report = f.write("report-next.md", REPORT.replace("Scripted", "Updated"))
+        report = f.write(
+            "report-next.md", REPORT.replace("Scripted", "Updated"),
+        )
         f.cli("pr", "report", "--as", "implementer", "--pr", "1",
               "--report", report)
         state = f.status()
@@ -275,7 +290,9 @@ class ForgejoMutationCases:
         self.assertIn(body, f.status()["decisions"][-1]["body"])
         self.assertIn("Closes #1", f.status()["pr"]["evidence"]["body"])
 
-    def test_merge_refusals_retain_resources_and_report_hidden_protection(self):
+    def test_merge_refusals_retain_resources_and_report_hidden_protection(
+        self,
+    ) -> None:
         f = self.f
         f.review("approved")
         self.human_approve()
@@ -283,8 +300,9 @@ class ForgejoMutationCases:
         for fault in ("head_race_409", "merge_405", "merge_422"):
             f.settings(**{fault: True}, protection_403=True)
             result = self.merge(1)
-            self.assertFalse(result["merged"])
-            self.assertEqual(result["branch_rules"], {"visibility": "not visible"})
+            self.assertIs(result["merged"], False)
+            self.assertEqual(
+                result["branch_rules"], {"visibility": "not visible"})
             self.assertEqual(f.git("worktree", "list", "--porcelain"), before)
             self.assertFalse(f.status()["pr"]["merged"])
             f.settings(**{fault: False})
@@ -320,8 +338,9 @@ class ForgejoMutationCases:
             "delete_branch_after_merge": True,
         })
         self.assertFalse(any(c["method"] == "DELETE" for c in writes))
-        self.assertEqual(f.cli("status", "--pr", "1", cwd=f.repo)["next_action"],
-                         "merged")
+        self.assertEqual(
+            f.cli("status", "--pr", "1", cwd=f.repo)["next_action"], "merged",
+        )
 
     def test_squash_and_explicit_branch_delete(self):
         f = self.f
@@ -364,6 +383,54 @@ class ForgejoMutationCases:
         self.assertFalse(result["cleanup"][-1]["ok"])
         self.assertEqual(f.git("rev-parse", "origin/issue-1"), f.base)
         self.assertTrue(f.worktree.exists())
+
+    def test_unreadable_remote_branch_retains_tracking_ref(self) -> None:
+        f = self.f
+        f.review("approved")
+        self.human_approve()
+        f.settings(branch_read_403=True)
+        result = self.merge(3)
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
+        self.assertIn("unreadable", result["cleanup"][-1]["detail"])
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertTrue(f.worktree.exists())
+        self.assertFalse(any(c["method"] == "DELETE" for c in self.writes()))
+
+    def test_ignored_branch_deletion_is_reported_not_trusted(self) -> None:
+        f = self.f
+        f.review("approved")
+        self.human_approve()
+        f.settings(leave_branch=True, branch_delete_ignored=True)
+        result = self.merge(3)
+        self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
+        self.assertIn("remote branch remains", result["cleanup"][-1]["detail"])
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertTrue(f.worktree.exists())
+
+    def test_thread_open_refuses_a_location_held_by_another_root(self) -> None:
+        f = self.f
+        f.settings(fail_roots=["REV-2"])
+        f.review("changes_requested", [finding(), finding(line=3)], expected=1)
+        self.assertEqual(f.status()["next_action"], "open_threads")
+        f.settings(fail_roots=[])
+        before = len(f.read_model()["calls"])
+        error = f.cli(
+            "thread", "open", "--as", "reviewer", "--pr", "1",
+            "--finding", "REV-2", "--path", "example.py", "--line", "2",
+            expected=1,
+        )
+        self.assertIn("already has a root", error["error"])
+        self.assertEqual(self.writes(before), [])
+        f.cli("thread", "open", "--as", "reviewer", "--pr", "1",
+              "--finding", "REV-2", "--path", "example.py", "--line", "3")
+        state = f.status()
+        self.assertEqual(state["next_action"], "address_findings")
+        self.assertEqual(
+            [(item["finding"], item["anchor"]["line"])
+             for item in state["findings"]],
+            [("REV-1", 2), ("REV-2", 3)],
+        )
 
     def test_moved_base_refuses_despite_live_api_base(self):
         f = self.f

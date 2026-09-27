@@ -50,13 +50,27 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(step["ok"])
         self.assertEqual(step["detail"], "already absent")
 
-    def test_branch_delete_refusal_keeps_tracking_ref_and_worktree(self) -> None:
+    def test_branch_delete_refusal_keeps_tracking_ref_and_worktree(
+        self,
+    ) -> None:
         f = self.f
         f.settings(branch_delete_403=True)
         result = self.merge(expected=3)
         self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
         self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
         self.assertTrue(f.worktree.exists())
+
+    def test_unreadable_remote_branch_retains_tracking_ref(self) -> None:
+        f = self.f
+        f.settings(branch_read_403=True)
+        result = self.merge(expected=3)
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
+        self.assertIn("unreadable", result["cleanup"][-1]["detail"])
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertTrue(f.worktree.exists())
+        self.assertFalse(any("DELETE" in c["arguments"]
+                             for c in f.read_model()["calls"]))
 
     def test_hold_names_review_and_requires_explicit_acceptance(self) -> None:
         f = self.f
@@ -375,7 +389,8 @@ class MergeTests(unittest.TestCase):
         result = self.merge()
         self.assertEqual(result["integration"], "verified by tree identity")
         self.assertIn("confirmed absent", str(result["cleanup"]))
-        self.assertEqual(self.f.git("branch", "-r", "--list", "origin/issue-1"), "")
+        self.assertEqual(
+            self.f.git("branch", "-r", "--list", "origin/issue-1"), "")
         self.assertFalse(any("DELETE" in c["arguments"]
                              for c in self.f.read_model()["calls"]))
         self.assert_removed()
@@ -443,7 +458,7 @@ class MergeTests(unittest.TestCase):
                 f.settings(**settings)
                 result = self.merge(expected=1)
                 self.assertIn(message, result["error"])
-                self.assertFalse(result["merged"])
+                self.assertIs(result["merged"], False)
                 self.assertEqual(
                     f.git("worktree", "list", "--porcelain"), before)
                 self.assertEqual(

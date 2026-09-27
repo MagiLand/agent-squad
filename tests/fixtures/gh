@@ -239,6 +239,8 @@ if kind == "collaborators" and parts[5:] == ["permission"]:
         "user": {"login": number},
     }))
 if kind == "git" and parts[4] in ("ref", "refs"):
+    if method == "GET" and settings.get("branch_read_403"):
+        fail("branch unreadable", 403)
     branch = "/".join(parts[6:])
     ref = f"refs/heads/{branch}"
     result = subprocess.run(

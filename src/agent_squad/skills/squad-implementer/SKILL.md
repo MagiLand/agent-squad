@@ -259,8 +259,9 @@ pass `--accept-merge-hold`. A standing instruction never releases a hold.
 
 When `next_action` is `merge`, proceed without another confirmation. Before
 `pr merge`, confirm every check run for the approved head concluded `success`,
-`neutral`, or `skipped`. Wait for running checks with
-`gh run watch <run-id> --exit-status`. A failed check is a defect: fix it and
+`neutral`, or `skipped`. Wait for running checks through the CI-read allowance
+above (`gh run watch <run-id> --exit-status` on GitHub); on another forge,
+report inaccessible CI evidence and wait. A failed check is a defect: fix it and
 have the new head reviewed, or report it if the fix is outside the Task. If
 no check exists at that head although the repository runs checks on pull
 requests, report that and wait. Apply the same checks to an explicit merge.

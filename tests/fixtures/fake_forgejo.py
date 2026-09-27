@@ -145,8 +145,10 @@ class Handler(BaseHTTPRequestHandler):
         return result.stdout.strip()
 
     def branch(self, model: dict, branch: str) -> str | None:
-        rows = self.git(model, "for-each-ref", "--format=%(refname) %(objectname)",
-                        f"refs/heads/{branch}").splitlines()
+        rows = self.git(
+            model, "for-each-ref", "--format=%(refname) %(objectname)",
+            f"refs/heads/{branch}",
+        ).splitlines()
         return next((r.split()[1] for r in rows
                      if r.split()[0] == f"refs/heads/{branch}"), None)
 
@@ -154,13 +156,19 @@ class Handler(BaseHTTPRequestHandler):
     def record(model: dict, account: str, body: str) -> dict:
         model["next_id"] = model.get("next_id", 100) + 1
         ident = model["next_id"]
-        date = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=ident)
+        date = (
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            + timedelta(seconds=ident)
+        )
         return {"id": ident, "body": body, "user": {"login": account},
                 "created_at": date.isoformat().replace("+00:00", "Z")}
 
-    def merge_pr(self, model: dict, pr: dict, body: dict) -> tuple[int, object]:
+    def merge_pr(
+        self, model: dict, pr: dict, body: dict,
+    ) -> tuple[int, object]:
         settings = model["settings"]
-        if settings.get("head_out_of_date_409") or settings.get("head_race_409"):
+        if (settings.get("head_out_of_date_409")
+                or settings.get("head_race_409")):
             return 409, recording("guard/007-e7-wrong-approved-head.json")
         if settings.get("merge_405"):
             return 405, recording("049-e7-no-approval.json")
@@ -339,9 +347,13 @@ class Handler(BaseHTTPRequestHandler):
                     return 503, {"message": "interrupted before review"}
                 if (settings.get("author_approval_422")
                         and account == pr["user"]["login"]
-                        and body.get("event") in ("APPROVED", "REQUEST_CHANGES")):
-                    name = ("042-e8-approved.json" if body["event"] == "APPROVED"
-                            else "043-e8-request_changes.json")
+                        and body.get("event") in (
+                            "APPROVED", "REQUEST_CHANGES",
+                        )):
+                    name = (
+                        "042-e8-approved.json" if body["event"] == "APPROVED"
+                        else "043-e8-request_changes.json"
+                    )
                     return 422, recording(name)
                 row = self.record(model, account, body.get("body", ""))
                 row.update(
@@ -357,12 +369,18 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     reviews.append(row)
                 if settings.get("interrupt_after_body"):
-                    return 503, {"message": f"review {row['id']} stored; interrupted"}
+                    return 503, {
+                        "message": f"review {row['id']} stored; interrupted",
+                    }
                 return 200, review_wire(row)
-            rows = [review_wire(r) for r in reviews
-                    if r["state"] != "PENDING" or r["user"]["login"] == account]
+            rows = [
+                review_wire(r) for r in reviews
+                if r["state"] != "PENDING" or r["user"]["login"] == account
+            ]
             if settings.get("request_review_rows"):
-                rows.insert(0, recording("015-setup-requested-reviews.json")[0])
+                rows.insert(
+                    0, recording("015-setup-requested-reviews.json")[0],
+                )
             return 200, self.paged(rows, query)
         review_id = int(parts[6])
         review = next((r for r in reviews if r["id"] == review_id), None)
@@ -379,9 +397,7 @@ class Handler(BaseHTTPRequestHandler):
                 if review_id == 9999:
                     settings["pending_draft"] = False
                 return 204, None
-            result = review_wire(review)
-            result.update(settings.get("review_readback_override", {}))
-            return 200, result
+            return 200, review_wire(review)
         if parts[7:] == ["comments"]:
             if self.command == "POST":
                 fid = body["body"].split("]")[0].removeprefix("[")
@@ -391,8 +407,11 @@ class Handler(BaseHTTPRequestHandler):
                 row = self.record(model, account, body["body"])
                 row.update(
                     pull_request_review_id=review_id, path=body["path"],
-                    position=start, line=start + body.get("extra_lines_count", 0),
-                    start_line=start if body.get("extra_lines_count") else None,
+                    position=start,
+                    line=start + body.get("extra_lines_count", 0),
+                    start_line=(
+                        start if body.get("extra_lines_count") else None
+                    ),
                 )
                 if settings.get("out_of_diff_accepted"):
                     row["diff_hunk"] = ""

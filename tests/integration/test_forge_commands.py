@@ -537,7 +537,8 @@ class ForgeCommandTests(unittest.TestCase):
         f.save_model(model)
         f.settings(omit_flat_replies=True, thread_page_size=1)
         f.review(
-            "changes_requested", [finding(), finding("optional", "Optional", line=3)]
+            "changes_requested",
+            [finding(), finding("optional", "Optional", line=3)],
         )
         f.reply(
             "REV-1",

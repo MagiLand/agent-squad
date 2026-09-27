@@ -892,7 +892,8 @@ class Forgejo:
             # already succeeded. Drop its HTTP status so callers retain an
             # uncertain merge outcome and all local resources.
             raise ForgeError(
-                f"merge submitted; confirmation failed: {error}; re-read the PR"
+                f"merge submitted; confirmation failed: {error}; "
+                "re-read the PR"
             ) from None
         if not pr.merged or pr.merge_commit is None:
             raise ForgeError("merge not confirmed; re-read the PR")

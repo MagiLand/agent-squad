@@ -615,7 +615,9 @@ class MutationContractTests(unittest.TestCase):
             forge.validate_anchors((Anchor("a.py", 2), Anchor("a.py", 4, 2)))
         forge.api.assert_not_called()
 
-    def test_review_readback_requires_state_author_head_body_and_identity(self):
+    def test_review_readback_requires_state_author_head_body_and_identity(
+        self,
+    ) -> None:
         from agent_squad.forge import ReviewPublication, ReviewState
 
         wire = recording("022-e2-body-first.json")
@@ -701,8 +703,9 @@ class MutationContractTests(unittest.TestCase):
                         diff_hunk="")
         recovered = dict(original, id=11, diff_hunk="@@ -0,0 +2 @@\n+line")
         reply = dict(recovered, id=12, body="DISPOSITION rejected\nEvidence")
-        comments, _ = parse_comments([reply, recovered, original],
-                                    original["pull_request_review_id"])
+        comments, _ = parse_comments(
+            [reply, recovered, original], original["pull_request_review_id"],
+        )
         self.assertEqual([c.evidence.id for c in comments], [10, 11, 12])
         self.assertIsNone(comments[0].line)
         self.assertEqual(comments[1].line, 2)
