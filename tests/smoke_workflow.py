@@ -47,8 +47,8 @@ def run_smoke() -> dict:
             "changes_requested",
             [
                 finding(title="First blocking"),
-                finding(title="Second blocking"),
-                finding("optional", "Advisory finding"),
+                finding(title="Second blocking", line=3),
+                finding("optional", "Advisory finding", line=1),
             ],
         )
         f.cli(
@@ -329,7 +329,7 @@ def run_smoke() -> dict:
             "changes_requested",
             [
                 finding(title="Fallback blocking"),
-                finding("optional", "Fallback advisory"),
+                finding("optional", "Fallback advisory", line=3),
             ],
             expected=1,
         )

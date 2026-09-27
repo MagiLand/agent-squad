@@ -179,6 +179,11 @@ these notes are recovery aids, never review authority. Run
 previous blocking findings settled. Changes requested requires a blocking
 finding or a NOT FIXED verification from this pass.
 
+If exit 4 reports `pending_draft`, report the named review IDs and wait for
+an explicit Developer instruction to discard a particular draft. Never delete
+or submit it automatically. Only for that authorized ID, add
+`--discard-draft <review-id>` to the validated post or resume command.
+
 If exit 1 reports unanchored findings, re-anchor every blocking one with
 `thread open` before handing off. After interruption run `status` first:
 
@@ -196,7 +201,8 @@ If exit 1 reports unanchored findings, re-anchor every blocking one with
   ambiguity and retain the files; do not guess that it finished or publish a
   second review blindly.
 
-Resolve each thread verified in this pass using
+Only when `status --json` reports `capabilities.can_resolve_threads` true,
+resolve each thread verified in this pass using
 `agent-squad thread resolve --as reviewer --pr <N> --finding REV-<n>`.
 Forge resolution is a convenience; the verification replies establish settlement.
 

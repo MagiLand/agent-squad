@@ -974,6 +974,14 @@ def derive(
             "base_tip": base_tip,
             "base_branch": pr.base_branch,
         },
+        "capabilities": {
+            "can_resolve_threads": snapshot.can_resolve_threads,
+            "can_read_thread_resolution": snapshot.can_read_thread_resolution,
+            "can_read_branch_rules": snapshot.can_read_branch_rules,
+        },
+        "pending_drafts": list(snapshot.pending_drafts),
+        "pending_draft": bool(snapshot.pending_drafts
+                              and snapshot.protects_pending_drafts),
         "can_resolve_threads": snapshot.can_resolve_threads,
         "can_read_thread_resolution": snapshot.can_read_thread_resolution,
         "can_read_branch_rules": snapshot.can_read_branch_rules,

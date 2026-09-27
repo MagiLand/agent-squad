@@ -355,6 +355,7 @@ class ForgeFixture:
         threads: list[dict] | None = None,
         *,
         resume: int | None = None,
+        discard_draft: int | None = None,
         head: str | None = None,
         base: str | None = None,
         expected: int = 0,
@@ -378,6 +379,8 @@ class ForgeFixture:
             "--threads",
             file,
         ]
+        if discard_draft is not None:
+            args += ["--discard-draft", str(discard_draft)]
         if resume is not None:
             args += ["--resume", str(resume)]
         return self.cli(*args, expected=expected)
@@ -444,6 +447,7 @@ class ForgejoFixture(ForgeFixture):
 
         with patch.dict(os.environ, FAKE_FORGE_MODEL=str(self.model_path)):
             self.server = FakeForgejo(path_prefix=path_prefix)
+        self.server.server.git_env = self.env
 
     def close(self) -> None:
         self.server.close()

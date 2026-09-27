@@ -502,6 +502,9 @@ class GitHub:
             (self.approvals(number)
              if self.repository.configuration.identity_mode == "single"
              else ()),
+            tuple(r.evidence.id for r in reviews
+                  if r.state == ReviewState.PENDING
+                  and r.evidence.author.casefold() == self.account.casefold()),
         )
 
     def thread_states(self, number: int) -> tuple[ThreadState, ...]:
@@ -610,6 +613,37 @@ class GitHub:
             raise ForgeError(message, 405)
         return {"sha": oid(data.get("sha"), "merge.sha"), "message": message}
 
+    def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None:
+        # Common validation already refuses duplicate end-line anchors.
+        pass
+
+    def branch_head(self, branch: str) -> str | None:
+        try:
+            data = object_value(self.api(
+                f"{self.prefix}/git/ref/heads/{quote(branch, safe='')}",
+            ), "branch ref")
+        except ForgeError as error:
+            if error.status == 404:
+                return None
+            raise
+        if data.get("ref") != f"refs/heads/{branch}":
+            raise ForgeError("branch response has another identity")
+        target = object_value(data.get("object"), "branch object")
+        return oid(target.get("sha"), "branch SHA")
+
+    def delete_branch(self, branch: str, expected_head: str) -> None:
+        head = self.branch_head(branch)
+        if head is None:
+            return
+        if head != expected_head:
+            raise ForgeError("remote branch no longer matches approved head")
+        self.api(
+            f"{self.prefix}/git/refs/heads/{quote(branch, safe='')}",
+            method="DELETE",
+        )
+        if self.branch_head(branch) is not None:
+            raise ForgeError(f"remote branch remains: {branch}")
+
     def branch_prs(self, branch: str) -> list[dict[str, object]]:
         config = self.repository.configuration
         query = urlencode(
@@ -628,7 +662,10 @@ class GitHub:
 
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
+        discard_draft: int | None = None,
     ) -> None:
+        if discard_draft is not None:
+            raise ForgeError("--discard-draft is not supported on this forge")
         # Preserve stranded drafts and replies before publishing a new review.
         # Reuse the command's snapshot to preserve the existing read sequence.
         for review in reviews:

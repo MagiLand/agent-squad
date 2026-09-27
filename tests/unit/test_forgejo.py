@@ -590,3 +590,110 @@ class RecordedParserTests(unittest.TestCase):
             self.assertEqual(
                 api.call_args.args[0], "/repos/org/repo/issues/1/comments"
             )
+
+
+class MutationContractTests(unittest.TestCase):
+    def forge(self):
+        forge = object.__new__(Forgejo)
+        forge.account = "reviewer"
+        forge.prefix = "/repos/owner/repo"
+        forge.api = Mock()
+        return forge
+
+    def test_single_line_and_range_payload_and_duplicate_starts(self):
+        from agent_squad.forge import Anchor
+        from agent_squad.forgejo import anchor_payload
+
+        self.assertEqual(anchor_payload(Anchor("a.py", 4)), {
+            "path": "a.py", "new_position": 4, "extra_lines_count": 0,
+        })
+        self.assertEqual(anchor_payload(Anchor("a.py", 4, 2)), {
+            "path": "a.py", "new_position": 2, "extra_lines_count": 2,
+        })
+        forge = self.forge()
+        with self.assertRaisesRegex(ForgeError, "duplicate"):
+            forge.validate_anchors((Anchor("a.py", 2), Anchor("a.py", 4, 2)))
+        forge.api.assert_not_called()
+
+    def test_review_readback_requires_state_author_head_body_and_identity(self):
+        from agent_squad.forge import ReviewPublication, ReviewState
+
+        wire = recording("022-e2-body-first.json")
+        publication = ReviewPublication(
+            wire["commit_id"], ReviewState.COMMENTED, "body", "durable", (),
+            "b" * 40,
+        )
+        wire.update(user={"login": "reviewer"}, body="durable")
+        forge = self.forge()
+        for override in ({"state": "PENDING"}, {"user": {"login": "other"}},
+                         {"commit_id": "a" * 40}, {"body": "changed"},
+                         {"id": wire["id"] + 1}, {"dismissed": True}):
+            with self.subTest(override=override):
+                forge.api.side_effect = [wire, wire | override]
+                with self.assertRaisesRegex(ForgeError,
+                                            f"review {wire['id']} published"):
+                    forge.post_review(1, publication)
+        forge.api.side_effect = [wire, wire]
+        self.assertEqual(forge.post_review(1, publication).state,
+                         ReviewState.COMMENTED)
+        payload = forge.api.call_args_list[-2].kwargs["body"]
+        self.assertNotIn("comments", payload)
+        self.assertEqual(payload["event"], "COMMENT")
+        self.assertEqual(payload["body"], "durable")
+
+    def test_pending_gate_and_named_discard_recheck(self):
+        from agent_squad.forge import Evidence, Review, ReviewState
+        from agent_squad.initialization import GateError
+
+        forge = self.forge()
+        pending = Review(Evidence(20, "REVIEWER", "time", "draft"),
+                         "a" * 40, ReviewState.PENDING)
+        forge.reviews = Mock(return_value=(pending,))
+        with self.assertRaisesRegex(GateError, "pending_draft.*20"):
+            forge.prepare_review(1, reviews=())
+        forge.api.assert_not_called()
+        with self.assertRaisesRegex(ForgeError, "not a PENDING"):
+            forge.prepare_review(1, reviews=(), discard_draft=21)
+        forge.api.assert_not_called()
+        forge.reviews.side_effect = [(pending,), (replace(
+            pending, evidence=replace(pending.evidence, id=21)),)]
+        with self.assertRaisesRegex(GateError, "pending_draft.*21"):
+            forge.prepare_review(1, reviews=(), discard_draft=20)
+        forge.api.assert_called_once_with(
+            "/repos/owner/repo/pulls/1/reviews/20", method="DELETE",
+        )
+
+    def test_branch_identity_guard_absence_and_refusal_statuses(self):
+        forge = self.forge()
+        forge.api.side_effect = ForgeError("absent", 404)
+        forge.delete_branch("feat/topic", "a" * 40)
+        self.assertEqual(forge.api.call_count, 1)
+        self.assertIn("feat%2Ftopic", forge.api.call_args.args[0])
+        for data in ({"name": "wrong", "commit": {"id": "a" * 40}},
+                     {"name": "feat/topic", "commit": {"id": "b" * 40}}):
+            forge.api.reset_mock()
+            forge.api.side_effect = None
+            forge.api.return_value = data
+            with self.assertRaises(ForgeError):
+                forge.delete_branch("feat/topic", "a" * 40)
+            self.assertEqual(forge.api.call_count, 1)
+        for status in (403, 405, 409, 422):
+            forge.api.reset_mock()
+            forge.api.side_effect = ForgeError("refused", status)
+            with self.assertRaises(ForgeError) as caught:
+                forge.merge(1, "a" * 40, "merge")
+            self.assertEqual(caught.exception.status, status)
+            self.assertEqual(forge.api.call_count, 1)
+
+    def test_usable_recovery_root_keeps_original_unanchored_evidence(self):
+        rows = recording("026-e2-comments.json")
+        original = dict(rows[0], id=10, body="[REV-1] original",
+                        diff_hunk="")
+        recovered = dict(original, id=11, diff_hunk="@@ -0,0 +2 @@\n+line")
+        reply = dict(recovered, id=12, body="DISPOSITION rejected\nEvidence")
+        comments, _ = parse_comments([reply, recovered, original],
+                                    original["pull_request_review_id"])
+        self.assertEqual([c.evidence.id for c in comments], [10, 11, 12])
+        self.assertIsNone(comments[0].line)
+        self.assertEqual(comments[1].line, 2)
+        self.assertEqual(comments[2].in_reply_to_id, 11)

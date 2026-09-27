@@ -188,4 +188,6 @@ class SingleIdentitySkillTests(unittest.TestCase):
         self.assertIn("Never post a human approval yourself", implementer)
         self.assertIn("single-identity mode every tagged verdict", reviewer)
         self.assertIn("do not\nblock this agent review", reviewer)
-        self.assertNotIn("GitHub", implementer + reviewer)
+        self.assertNotIn("GitHub", reviewer)
+        self.assertIn("For a GitHub repository", implementer)
+        self.assertIn("capabilities.can_resolve_threads", reviewer)

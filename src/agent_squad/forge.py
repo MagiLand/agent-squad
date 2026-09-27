@@ -146,6 +146,8 @@ class Snapshot:
     can_read_branch_rules: bool = False
     approved_state_label: str = "approved"
     human_approvals: tuple[Approval, ...] = ()
+    pending_drafts: tuple[int, ...] = ()
+    protects_pending_drafts: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,6 +242,9 @@ class Forge(Protocol):
     def snapshot(self, number: int) -> Snapshot: ...
     def thread_states(self, number: int) -> tuple[ThreadState, ...]: ...
     def branch_rules(self, branch: str) -> dict[str, object]: ...
+    def branch_head(self, branch: str) -> str | None: ...
+    def delete_branch(self, branch: str, expected_head: str) -> None: ...
+    def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None: ...
     def branch_prs(self, branch: str) -> list[dict[str, object]]: ...
 
     def create_pr(
@@ -250,6 +255,7 @@ class Forge(Protocol):
 
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
+        discard_draft: int | None = None,
     ) -> None: ...
 
     def post_review(

@@ -19,7 +19,8 @@ state through
 Filter `--json` output to read what is needed instead of saving whole responses
 to disk. A saved response is never authority.
 
-For CI evidence and required-check metadata these commands do not expose,
+For a GitHub repository, for CI evidence and required-check metadata these
+commands do not expose,
 use read-only `gh run list`, `gh run view` (including logs),
 `gh run watch <run-id> --exit-status`, `gh pr checks`,
 or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
@@ -33,7 +34,8 @@ This allowance does not permit `gh` mutations, other `gh` reads, or using
 `gh` for Task, PR, review, decision, stop, or budget authority. Never retrieve
 credentials, read a token, switch forge identities, or reconstruct authority
 from local files. Use existing authenticated access; if it is insufficient,
-report the limitation.
+report the limitation. On another forge, report inaccessible CI evidence and
+wait for the Developer to supply evidence or authorize a read path.
 Git commands and local code inspection remain part of implementation.
 Every forge mutation below uses `--as implementer`; the CLI handles identity.
 

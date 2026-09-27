@@ -238,6 +238,23 @@ if kind == "collaborators" and parts[5:] == ["permission"]:
         "role_name": settings.get("role_name", "write"),
         "user": {"login": number},
     }))
+if kind == "git" and parts[4] in ("ref", "refs"):
+    branch = "/".join(parts[6:])
+    ref = f"refs/heads/{branch}"
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", ref], cwd=model["origin"],
+        text=True, capture_output=True, shell=False,
+    )
+    if result.returncode:
+        fail("branch not found", 404)
+    head = result.stdout.split()[0]
+    if method == "DELETE":
+        if settings.get("branch_delete_403"):
+            fail("branch deletion forbidden", 403)
+        subprocess.run(["git", "update-ref", "-d", ref, head],
+                       cwd=model["origin"], check=True, shell=False)
+        output(None)
+    output({"ref": ref, "object": {"sha": head}})
 if kind in ("branches", "rules"):
     if settings.get("rules_status"):
         fail(settings.get("rules_message", "rules unavailable"),

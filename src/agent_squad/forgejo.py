@@ -1,4 +1,4 @@
-"""Forgejo REST reads and credentials; writes arrive in Increment 4."""
+"""Forgejo REST transport, evidence, and guarded mutations."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from .forge import (
     text_value,
 )
 from .initialization import (
+    GateError,
     Repository,
     decode_json,
     list_worktrees,
@@ -61,6 +62,14 @@ TIMESTAMP = re.compile(
 )
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
 FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
+
+
+def anchor_payload(anchor: Anchor) -> dict[str, object]:
+    start = anchor.start_line or anchor.line
+    return {
+        "path": anchor.path, "new_position": start,
+        "extra_lines_count": anchor.line - start,
+    }
 
 
 def parse_evidence(value: object, *, review: bool = False) -> Evidence:
@@ -219,12 +228,13 @@ def parse_comments(
     for entries in groups.values():
         roots = [c for c, _ in entries if FINDING.match(c.evidence.body)]
         # Ambiguous roots must never acquire somebody else's dispositions.
-        root = roots[0] if len(roots) == 1 else None
+        usable = [c for c in roots if c.line is not None]
+        root = usable[0] if len(usable) == 1 else None
         for comment, row in entries:
             is_root = any(c.evidence.id == comment.evidence.id for c in roots)
             if root is not None and not is_root:
                 comment = replace(comment, in_reply_to_id=root.evidence.id)
-            elif len(roots) > 1:
+            elif len(usable) > 1:
                 comment = replace(
                     comment, line=None, start_line=None, side=None
                 )
@@ -323,8 +333,8 @@ class Forgejo:
     can_resolve_threads = False
     can_read_thread_resolution = True
     can_read_branch_rules = True
-    can_mutate = False
-    mutation_unavailable_message = "not implemented until Increment 4"
+    can_mutate = True
+    mutation_unavailable_message = ""
 
     def __init__(
         self,
@@ -631,6 +641,10 @@ class Forgejo:
             self.can_read_branch_rules,
             "approved",
             approvals,
+            tuple(r.evidence.id for r in reviews
+                  if r.state == ReviewState.PENDING
+                  and r.evidence.author.casefold() == self.account.casefold()),
+            True,
         )
 
     def thread_states(self, number: int) -> tuple[ThreadState, ...]:
@@ -660,34 +674,239 @@ class Forgejo:
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str
     ) -> PullRequest:
-        raise ForgeError(self.mutation_unavailable_message)
+        data = object_value(self.api(
+            f"{self.prefix}/pulls", method="POST",
+            body={"title": title, "head": head_branch,
+                  "base": base_branch, "body": body},
+        ), "created pull request")
+        number = positive(data.get("number"), "PR number")
+        pr = self.pr(number)
+        if (
+            pr.head_branch != head_branch or pr.base_branch != base_branch
+            or pr.evidence.author.casefold() != self.account.casefold()
+            or pr.evidence.body != body.replace("\r\n", "\n")
+            or pr.title != title
+        ):
+            raise ForgeError(f"PR {number} created; read-back mismatch")
+        return pr
 
     def update_body(self, number: int, body: str) -> PullRequest:
-        raise ForgeError(self.mutation_unavailable_message)
+        self.api(
+            f"{self.prefix}/pulls/{number}", method="PATCH",
+            body={"body": body},
+        )
+        pr = self.pr(number)
+        if pr.evidence.body != body.replace("\r\n", "\n"):
+            raise ForgeError(f"PR {number} body read-back mismatch")
+        return pr
+
+    def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None:
+        seen = set()
+        for anchor in anchors:
+            location = (anchor.path, anchor.start_line or anchor.line)
+            if location in seen:
+                raise ForgeError("duplicate finding conversation anchor")
+            seen.add(location)
 
     def prepare_review(
-        self, number: int, *, reviews: tuple[Review, ...]
+        self, number: int, *, reviews: tuple[Review, ...],
+        discard_draft: int | None = None,
     ) -> None:
-        raise ForgeError(self.mutation_unavailable_message)
+        # Refresh immediately before publication; snapshot reads may be old.
+        current = self.reviews(number)
+        pending = [
+            r for r in current if r.state == ReviewState.PENDING
+            and r.evidence.author.casefold() == self.account.casefold()
+        ]
+        if discard_draft is not None:
+            if not any(r.evidence.id == discard_draft for r in pending):
+                raise ForgeError(
+                    f"review {discard_draft} is not a PENDING review of the"
+                    " acting account on this PR"
+                )
+            self.api(
+                f"{self.prefix}/pulls/{number}/reviews/{discard_draft}",
+                method="DELETE",
+            )
+            pending = [
+                r for r in self.reviews(number)
+                if r.state == ReviewState.PENDING
+                and r.evidence.author.casefold() == self.account.casefold()
+            ]
+        if pending:
+            ids = ", ".join(str(r.evidence.id) for r in pending)
+            raise GateError(f"pending_draft: protected review IDs: {ids}")
 
     def post_review(
         self, number: int, publication: ReviewPublication
     ) -> Review:
-        raise ForgeError(self.mutation_unavailable_message)
+        event = {
+            ReviewState.APPROVED: "APPROVED",
+            ReviewState.CHANGES_REQUESTED: "REQUEST_CHANGES",
+            ReviewState.COMMENTED: "COMMENT",
+        }[publication.state]
+        endpoint = f"{self.prefix}/pulls/{number}/reviews"
+        # E2/E6: body first, with durable full finding text, never comments.
+        data = object_value(self.api(
+            endpoint, method="POST", body={
+                "commit_id": publication.head, "event": event,
+                "body": publication.fallback_body,
+            },
+        ), "posted review")
+        review_id = positive(data.get("id"), "review ID")
+        try:
+            review = parse_review(self.api(f"{endpoint}/{review_id}"))
+            if (
+                review is None or review.evidence.id != review_id
+                or review.state != publication.state or review.dismissed
+                or review.commit_id != publication.head
+                or review.evidence.author.casefold() != self.account.casefold()
+                or review.evidence.body
+                != publication.fallback_body.replace("\r\n", "\n")
+            ):
+                raise ForgeError(f"expected {event}, author, head and body")
+        except ForgeError as error:
+            raise ForgeError(
+                f"review {review_id} published; read-back failed: {error}"
+            ) from None
+        return review
+
+    def _review_comments(self, number: int, review_id: int) -> list[dict]:
+        rows = array(self.api(
+            f"{self.prefix}/pulls/{number}/reviews/{review_id}/comments",
+        ), "review comments")
+        # Parsing validates identities and grouping; retain wire positions
+        # privately because they cannot be reconstructed from head-side lines.
+        parse_comments(rows, review_id)
+        return sorted(rows, key=lambda row: row["id"])
 
     def post_root(
         self, number: int, head: str, review_id: int, anchor: Anchor, body: str
     ) -> Comment:
-        raise ForgeError(self.mutation_unavailable_message)
+        endpoint = f"{self.prefix}/pulls/{number}/reviews/{review_id}/comments"
+        existing = self._review_comments(number, review_id)
+        comments, _ = parse_comments(existing, review_id)
+        usable = {c.evidence.id for c in comments
+                  if c.line is not None and FINDING.match(c.evidence.body)}
+        if any(r["id"] in usable and r["path"] == anchor.path
+               and r["position"] == (anchor.start_line or anchor.line)
+               for r in existing):
+            raise ForgeError("finding conversation anchor already has a root")
+        written = object_value(self.api(
+            endpoint, method="POST", body={**anchor_payload(anchor),
+                                           "body": body},
+        ), "posted root")
+        comment_id = positive(written.get("id"), "root ID")
+        comments, _ = parse_comments(
+            self._review_comments(number, review_id), review_id,
+        )
+        tag = FINDING.match(body)
+        matches = [c for c in comments if c.evidence.id == comment_id]
+        root = matches[0] if len(matches) == 1 else None
+        if (
+            root is None or tag is None
+            or not root.evidence.body.startswith(tag[0])
+            or root.evidence.body != body.replace("\r\n", "\n")
+            or root.evidence.author.casefold() != self.account.casefold()
+            or root.path != anchor.path or root.line != anchor.line
+            or root.start_line != (
+                anchor.start_line if anchor.start_line != anchor.line else None
+            )
+            or root.in_reply_to_id is not None
+        ):
+            raise ForgeError(
+                f"root {comment_id} in review {review_id} is missing,"
+                " unanchored or has a read-back mismatch"
+            )
+        return root
 
     def reply(self, number: int, root: int, body: str) -> Comment:
-        raise ForgeError(self.mutation_unavailable_message)
+        for review in self.reviews(number):
+            review_id = review.evidence.id
+            rows = self._review_comments(number, review_id)
+            found = next((r for r in rows if r["id"] == root), None)
+            if found is None:
+                continue
+            comments, _ = parse_comments(rows, review_id)
+            comment = next(c for c in comments if c.evidence.id == root)
+            if (not FINDING.match(comment.evidence.body)
+                    or comment.line is None or comment.in_reply_to_id):
+                raise ForgeError("reply target is not a usable finding root")
+            endpoint = (
+                f"{self.prefix}/pulls/{number}/reviews/{review_id}/comments"
+            )
+            written = object_value(self.api(
+                endpoint, method="POST", body={
+                    "path": found["path"], "new_position": found["position"],
+                    "body": body,
+                },
+            ), "posted reply")
+            reply_id = positive(written.get("id"), "reply ID")
+            comments, _ = parse_comments(
+                self._review_comments(number, review_id), review_id,
+            )
+            reply = next(
+                (c for c in comments if c.evidence.id == reply_id), None,
+            )
+            if (
+                reply is None or reply.in_reply_to_id != root
+                or reply.evidence.author.casefold() != self.account.casefold()
+                or reply.evidence.body != body.replace("\r\n", "\n")
+            ):
+                raise ForgeError(f"reply {reply_id} read-back mismatch")
+            return reply
+        raise ForgeError(f"finding root {root} is missing")
 
     def comment(self, number: int, body: str) -> Evidence:
-        raise ForgeError(self.mutation_unavailable_message)
+        data = self.api(
+            f"{self.prefix}/issues/{number}/comments", method="POST",
+            body={"body": body},
+        )
+        evidence = parse_evidence(data)
+        if (evidence.author.casefold() != self.account.casefold()
+                or evidence.body != body.replace("\r\n", "\n")):
+            raise ForgeError(f"comment {evidence.id} response mismatch")
+        return evidence
 
     def resolve(self, node_id: str) -> dict[str, object]:
         raise ForgeError("not supported on this forge")
 
     def merge(self, number: int, head: str, method: str) -> MergeResult:
-        raise ForgeError(self.mutation_unavailable_message)
+        self.api(
+            f"{self.prefix}/pulls/{number}/merge", method="POST",
+            body={"Do": method, "head_commit_id": head,
+                  "delete_branch_after_merge": True},
+        )
+        # A successful POST may have no body. The merged PR's head can change
+        # after branch deletion (E9); only its merge commit is used here.
+        pr = self.pr(number)
+        if not pr.merged or pr.merge_commit is None:
+            raise ForgeError("merge not confirmed; re-read the PR")
+        return {"sha": pr.merge_commit, "message": "merge confirmed"}
+
+    def branch_head(self, branch: str) -> str | None:
+        try:
+            data = object_value(self.api(
+                f"{self.prefix}/branches/{quote(branch, safe='')}",
+            ), "branch")
+        except ForgeError as error:
+            if error.status == 404:
+                return None
+            raise
+        if data.get("name") != branch:
+            raise ForgeError("branch response has another identity")
+        commit = object_value(data.get("commit"), "branch.commit")
+        return oid(commit.get("id"), "branch commit ID")
+
+    def delete_branch(self, branch: str, expected_head: str) -> None:
+        head = self.branch_head(branch)
+        if head is None:
+            return
+        if head != expected_head:
+            raise ForgeError("remote branch no longer matches approved head")
+        self.api(
+            f"{self.prefix}/branches/{quote(branch, safe='')}",
+            method="DELETE",
+        )
+        if self.branch_head(branch) is not None:
+            raise ForgeError(f"remote branch remains: {branch}")

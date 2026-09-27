@@ -113,3 +113,47 @@ class MergeRulesTests(unittest.TestCase):
                 verify_integration(None, "merge", H, A, A, moved_base=True),
                 "verified by ancestry",
             )
+
+
+class TrackingCleanupTests(unittest.TestCase):
+    def test_remote_recreation_refuses_before_local_ref_removal(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from agent_squad.merging import cleanup_merge
+
+        repository = SimpleNamespace(primary=Path("/primary"))
+        forge = Mock()
+        forge.branch_head.return_value = H
+        with patch("agent_squad.merging.owned_implementation",
+                   return_value=(Path("/owned"), 1)), patch(
+                       "agent_squad.merging.run_git") as git:
+            result = cleanup_merge(repository, 1, H, "feature", forge)
+        self.assertEqual(result[-1]["step"], "remote-tracking ref")
+        self.assertFalse(result[-1]["ok"])
+        self.assertIn("remote branch remains", result[-1]["detail"])
+        git.assert_not_called()
+
+    def test_compare_and_delete_uses_approved_sha_and_stops_on_a_race(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from agent_squad.merging import cleanup_merge
+
+        repository = SimpleNamespace(primary=Path("/primary"))
+        forge = Mock()
+        forge.branch_head.return_value = None
+        with patch("agent_squad.merging.owned_implementation",
+                   return_value=(Path("/owned"), 1)), patch(
+                       "agent_squad.merging.run_git",
+                       return_value=SimpleNamespace(returncode=0)), patch(
+                           "agent_squad.merging.git_output",
+                           side_effect=AgentSquadError("ref moved")) as git:
+            result = cleanup_merge(repository, 1, H, "feature", forge)
+        git.assert_called_once_with(
+            Path("/primary"), "update-ref", "--no-deref", "-d",
+            "refs/remotes/origin/feature", H,
+        )
+        self.assertEqual(result[-1]["step"], "remote-tracking ref")
+        self.assertFalse(result[-1]["ok"])
+        self.assertEqual(result[-1]["detail"], "ref moved")

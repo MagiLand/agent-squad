@@ -334,6 +334,7 @@ def post_review(
     body: str,
     threads: object,
     resume: int | None = None,
+    discard_draft: int | None = None,
 ) -> dict:
     header = render_line(
         "review", pr=number, head=head, base=base, verdict=verdict
@@ -343,6 +344,13 @@ def post_review(
     # All anchors are checked before even token resolution or a forge read.
     for item in inputs:
         validate_anchor(item.anchor, lines)
+    seen = set()
+    for item in inputs:
+        key = (item.anchor.path, item.anchor.line)
+        if key in seen:
+            raise AgentSquadError("duplicate finding anchor")
+        seen.add(key)
+    forge.validate_anchors(tuple(item.anchor for item in inputs))
     compose_review(body, inputs, [f"REV-{i + 1}" for i in range(len(inputs))])
     snapshot = forge.snapshot(number)
     state = state_for(repository, snapshot)
@@ -403,7 +411,9 @@ def post_review(
                     "changes_requested requires a blocking finding or NOT"
                     " FIXED during this pass"
                 )
-        forge.prepare_review(number, reviews=snapshot.reviews)
+        forge.prepare_review(
+            number, reviews=snapshot.reviews, discard_draft=discard_draft,
+        )
         comments = tuple(
             ReviewComment(item.anchor, item.root(fid))
             for item, fid in zip(inputs, ids)
@@ -419,6 +429,9 @@ def post_review(
         review = forge.post_review(number, publication)
         review_id = review.evidence.id
     else:
+        forge.prepare_review(
+            number, reviews=snapshot.reviews, discard_draft=discard_draft,
+        )
         review_id = existing["id"]
     # Read after publication: partial success is recoverable by this exact
     # review ID.
@@ -541,7 +554,7 @@ def resolve_thread(
     repository: Repository, forge: Forge, number: int, fid: str
 ) -> dict:
     if not forge.can_resolve_threads:
-        raise ForgeError("not supported on this forge")
+        raise ForgeError("thread resolve is not supported on this forge")
     state = state_for(repository, forge.snapshot(number))
     finding = find_finding(state, fid)
     if finding["severity"] == "blocking" and not finding["settled"]:

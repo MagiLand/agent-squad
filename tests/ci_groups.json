@@ -6,7 +6,8 @@
     "tests/integration/test_reviewer.py"
   ],
   "forge-commands": [
-    "tests/integration/test_forge_commands.py"
+    "tests/integration/test_forge_commands.py",
+    "tests/integration/test_forgejo_mutations.py"
   ],
   "smoke": [
     "tests/integration/test_smoke_workflow.py"
