@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 from tests._support import PROJECT_ROOT, SRC_ROOT, add_src_to_path
 
@@ -212,6 +213,30 @@ class ForgeFixture:
         model["settings"].update(values)
         self.save_model(model)
 
+    def seed_read_scenario(self) -> None:
+        """Load the same scripted evidence for either transport."""
+        values = {
+            "$HEAD": self.git("rev-parse", "HEAD", cwd=self.worktree),
+            "$BASE": self.base, "$TASK": TASK.strip(),
+            "$REPORT": REPORT.strip(), "$REVIEW": REVIEW.strip(),
+            "$FINDING_BODY": FINDING_BODY,
+        }
+
+        def substitute(value):
+            if isinstance(value, dict):
+                return {k: substitute(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [substitute(v) for v in value]
+            if isinstance(value, str):
+                for key, replacement in values.items():
+                    value = value.replace(key, replacement)
+            return value
+
+        source = PROJECT_ROOT / "tests/fixtures/forge_read_scenario.json"
+        model = self.read_model()
+        model["prs"]["1"] = substitute(json.loads(source.read_text()))
+        self.save_model(model)
+
     def herdr_model(self) -> dict:
         path = Path(self.env["FAKE_HERDR_MODEL"])
         return (
@@ -410,3 +435,72 @@ class ForgeFixture:
         if task is not None:
             args += ["--task", self.write("amended-task.md", task)]
         return self.cli(*args, expected=expected)
+
+
+class ForgejoFixture(ForgeFixture):
+    def __init__(self, *, path_prefix: str = "") -> None:
+        super().__init__()
+        from tests.fixtures.fake_forgejo import FakeForgejo
+
+        with patch.dict(os.environ, FAKE_FORGE_MODEL=str(self.model_path)):
+            self.server = FakeForgejo(path_prefix=path_prefix)
+
+    def close(self) -> None:
+        self.server.close()
+        super().close()
+
+    def initialize(self) -> None:
+        # Forgejo init belongs to Increment 5. The fixture supplies a valid
+        # configuration directly, without invoking even the fake gh.
+        self.configure()
+
+    def single_identity(self) -> None:
+        self.configure(single=True)
+
+    def configure(self, *, single: bool = False) -> None:
+        from agent_squad.initialization import Configuration
+
+        tokens = {}
+        for role, account in (
+            ("implementer", "developer"),
+            ("reviewer", "developer" if single else "reviewer"),
+        ):
+            path = self.root / f"{account}.token"
+            path.write_text(f"fake-token-{account}\n")
+            path.chmod(0o600)
+            tokens[role] = str(path)
+        config = Configuration.from_dict(
+            {
+                "schema_version": 2,
+                "forge": {
+                    "kind": "forgejo",
+                    "owner": "MagiLand",
+                    "repo": "trial",
+                    "base_url": self.server.base_url,
+                },
+                "implementer": {
+                    "agent_name": "implementer",
+                    "kind": "codex",
+                    "forge_account": "developer",
+                    "token_file": tokens["implementer"],
+                },
+                "reviewer": {
+                    "kind": "claude",
+                    "start_args": [],
+                    "forge_account": "developer" if single else "reviewer",
+                    "token_file": tokens["reviewer"],
+                },
+                "identity_mode": "single" if single else "dual",
+                "approver_accounts": ["human"] if single else [],
+                "base_branch": "main",
+                "max_review_passes": 3,
+                "merge_method": "merge",
+                "worktree_root": ".agent-squad/worktrees",
+                "scratch_root": ".agent-squad/review-scratch",
+            }
+        )
+        control = self.repo / ".agent-squad"
+        control.mkdir(exist_ok=True)
+        (control / "config.json").write_text(json.dumps(config.to_dict()))
+        with (self.repo / ".git/info/exclude").open("a") as stream:
+            stream.write("\n.agent-squad/\n.agent-squad-review/\n")

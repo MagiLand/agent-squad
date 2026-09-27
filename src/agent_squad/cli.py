@@ -68,6 +68,7 @@ def parser() -> argparse.ArgumentParser:
         number: str = "pr",
         mutation: bool = False,
     ) -> None:
+        p.set_defaults(forge_mutation=mutation)
         p.add_argument(
             "--as",
             dest="role",
@@ -164,6 +165,10 @@ def execute(args: argparse.Namespace) -> dict:
     role = args.role or repository.default_role()
     forge = make_forge(repository, role)
     key = (args.group, getattr(args, "command", None))
+    if key == ("thread", "resolve") and not forge.can_resolve_threads:
+        raise AgentSquadError("not supported on this forge")
+    if getattr(args, "forge_mutation", False) and not forge.can_mutate:
+        raise AgentSquadError(forge.mutation_unavailable_message)
     if args.group == "review-worktree":
         worktree = reviewer.ReviewWorktree.for_pr(
             repository, args.pr, args.head

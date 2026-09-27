@@ -1,0 +1,693 @@
+"""Forgejo REST reads and credentials; writes arrive in Increment 4."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime
+from email.message import Message
+from http.client import HTTPException
+import json
+import os
+from pathlib import Path
+import re
+import stat
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import (
+    HTTPRedirectHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
+
+from .forge import (
+    Anchor,
+    Approval,
+    Comment,
+    Evidence,
+    ForgeError,
+    IssueRecord,
+    MergeResult,
+    PullRequest,
+    Review,
+    ReviewPublication,
+    ReviewState,
+    Role,
+    Snapshot,
+    ThreadState,
+    V,
+    array,
+    boolean,
+    object_value,
+    oid,
+    positive,
+    text_value,
+)
+from .initialization import (
+    Repository,
+    decode_json,
+    list_worktrees,
+    validate_base_url,
+)
+
+STATES = {
+    "APPROVED": ReviewState.APPROVED,
+    "REQUEST_CHANGES": ReviewState.CHANGES_REQUESTED,
+    "COMMENT": ReviewState.COMMENTED,
+    "PENDING": ReviewState.PENDING,
+}
+TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+)
+HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
+FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
+
+
+def parse_evidence(value: object, *, review: bool = False) -> Evidence:
+    data = object_value(value, "evidence")
+    user = object_value(data.get("user"), "evidence.user")
+    timestamp = text_value(
+        data.get("submitted_at" if review else "created_at"),
+        "evidence.timestamp",
+    )
+    try:
+        if not TIMESTAMP.fullmatch(timestamp):
+            raise ValueError
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise ForgeError(
+            "evidence.timestamp must be ISO 8601 with an offset"
+        ) from None
+    return Evidence(
+        positive(data.get("id"), "evidence.id"),
+        V.require_string(user.get("login"), "evidence.user.login"),
+        timestamp,
+        text_value(
+            "" if data.get("body") is None else data["body"],
+            "evidence.body",
+        ).replace("\r\n", "\n"),
+    )
+
+
+def evidence_order(evidence: Evidence) -> tuple[datetime, int]:
+    return (
+        datetime.fromisoformat(evidence.created_at.replace("Z", "+00:00")),
+        evidence.id,
+    )
+
+
+def parse_review(value: object) -> Review | None:
+    data = object_value(value, "review")
+    state = text_value(data.get("state"), "review.state")
+    # Requested reviewers can have an empty commit and are not reviews.
+    if state == "REQUEST_REVIEW":
+        return None
+    if state not in STATES:
+        raise ForgeError("unknown review state")
+    return Review(
+        parse_evidence(data, review=True),
+        oid(data.get("commit_id"), "review.commit_id"),
+        STATES[state],
+        boolean(data.get("dismissed"), "review.dismissed"),
+    )
+
+
+def parse_pullrequest(value: object) -> PullRequest:
+    data = object_value(value, "pull request")
+    head = object_value(data.get("head"), "pull request head")
+    base = object_value(data.get("base"), "pull request base")
+    if data.get("state") not in ("open", "closed"):
+        raise ForgeError("pull request state must be open or closed")
+    # Both are informational. The review merge-base is computed with Git.
+    oid(data.get("merge_base"), "merge_base")
+    merge_commit = data.get("merge_commit_sha")
+    if merge_commit is not None:
+        merge_commit = oid(merge_commit, "merge_commit_sha")
+    return PullRequest(
+        parse_evidence(data),
+        positive(data.get("number"), "PR number"),
+        text_value(data.get("title"), "PR title"),
+        oid(head.get("sha"), "head.sha"),
+        V.require_string(head.get("ref"), "head.ref"),
+        oid(base.get("sha"), "base.sha"),
+        V.require_string(base.get("ref"), "base.ref"),
+        data["state"],
+        boolean(data.get("merged"), "merged"),
+        merge_commit,
+        None,
+    )
+
+
+def hunk_anchor(hunk: str, extra: int) -> tuple[int | None, int | None]:
+    """Decode the displayed head-side range, never the wire position."""
+    current = None
+    displayed: list[int] = []
+    ends_on_head = False
+    remaining_old = remaining_new = 0
+    for line in hunk.splitlines():
+        header = HUNK.fullmatch(line)
+        if header:
+            current = int(header[3])
+            remaining_old = int(header[2] or 1)
+            remaining_new = int(header[4] or 1)
+            displayed = []
+            ends_on_head = False
+        elif line.startswith("\\ No newline at end of file"):
+            continue
+        elif current is None or not line or line[0] not in " +-":
+            return None, None
+        else:
+            ends_on_head = line[0] in " +"
+            if line[0] in " -":
+                remaining_old -= 1
+            if line[0] in " +":
+                remaining_new -= 1
+                displayed.append(current)
+                current += 1
+            if remaining_old < 0 or remaining_new < 0:
+                return None, None
+    if (
+        not ends_on_head or not displayed
+        or displayed[-1] < 1 or len(displayed) <= extra
+    ):
+        return None, None
+    end = displayed[-1]
+    start = end - extra
+    if start < 1 or start not in displayed:
+        return None, None
+    return end, start if extra else None
+
+
+def parse_comments(
+    values: object,
+    review_id: int,
+) -> tuple[tuple[Comment, ...], tuple[ThreadState, ...]]:
+    rows = [
+        object_value(v, "review comment") for v in array(values, "comments")
+    ]
+    rows.sort(key=lambda r: positive(r.get("id"), "comment.id"))
+    groups: dict[tuple[str, int], list[tuple[Comment, dict]]] = {}
+    for row in rows:
+        if (
+            positive(row.get("pull_request_review_id"), "review ID")
+            != review_id
+        ):
+            raise ForgeError("comment returned another review ID")
+        path = text_value(row.get("path"), "comment.path")
+        position = V.require_int(row.get("position"), "comment.position")
+        extra = V.require_int(
+            row.get("extra_lines_count"), "extra_lines_count"
+        )
+        if extra < 0:
+            raise ForgeError("extra_lines_count must not be negative")
+        line, start = hunk_anchor(
+            text_value(row.get("diff_hunk"), "diff_hunk"),
+            extra,
+        )
+        comment = Comment(
+            parse_evidence(row),
+            review_id,
+            None,
+            path,
+            line,
+            start,
+            "RIGHT" if line is not None else None,
+        )
+        groups.setdefault((path, position), []).append((comment, row))
+    comments = []
+    threads = []
+    for entries in groups.values():
+        roots = [c for c, _ in entries if FINDING.match(c.evidence.body)]
+        # Ambiguous roots must never acquire somebody else's dispositions.
+        root = roots[0] if len(roots) == 1 else None
+        for comment, row in entries:
+            is_root = any(c.evidence.id == comment.evidence.id for c in roots)
+            if root is not None and not is_root:
+                comment = replace(comment, in_reply_to_id=root.evidence.id)
+            elif len(roots) > 1:
+                comment = replace(
+                    comment, line=None, start_line=None, side=None
+                )
+            comments.append(comment)
+            if is_root:
+                resolved = None
+                if "resolver" in row:
+                    resolved = row["resolver"] is not None
+                    if resolved:
+                        resolver = object_value(row["resolver"], "resolver")
+                        V.require_string(
+                            resolver.get("login"), "resolver.login"
+                        )
+                threads.append(
+                    ThreadState(comment.evidence.id, None, resolved)
+                )
+    return (
+        tuple(sorted(comments, key=lambda c: c.evidence.id)),
+        tuple(sorted(threads, key=lambda t: t.root_id)),
+    )
+
+
+def read_token(repository: Repository, role: Role) -> str:
+    """Validate the file's live identity and permissions on every read."""
+    assert repository.configuration is not None
+    value = getattr(repository.configuration, role).token_file
+    location_error = (
+        f"{role} token_file must be an absolute regular file outside"
+        " repository worktrees (no symlink)"
+    )
+    if value is None or not Path(value).is_absolute():
+        raise ForgeError(location_error)
+    path = Path(value)
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ForgeError(location_error)
+        resolved = path.resolve(strict=True)
+        for tree in list_worktrees(repository.root):
+            # samefile covers case-insensitive aliases as well as symlinks
+            # in ancestor paths. No lexical prefix is trusted on its own.
+            if resolved.is_relative_to(tree.root) or any(
+                parent.exists()
+                and tree.root.exists()
+                and parent.samefile(tree.root)
+                for parent in resolved.parents
+            ):
+                raise ForgeError(location_error)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (
+                opened.st_dev,
+                opened.st_ino,
+            ) != (info.st_dev, info.st_ino):
+                raise ForgeError(location_error)
+            if opened.st_mode & 0o077:
+                raise ForgeError(
+                    f"{role} token_file must have no group or other"
+                    " permissions"
+                )
+            content = stream.read(65537)
+    except (OSError, ValueError):
+        raise ForgeError(location_error) from None
+    try:
+        lines = content.decode("utf-8").splitlines()
+        if len(content) > 65536 or len(lines) != 1 or not lines[0].strip():
+            raise ValueError
+        token = lines[0].strip()
+        if any(ord(c) < 33 or ord(c) > 126 for c in token):
+            raise ValueError
+    except (UnicodeError, ValueError):
+        raise ForgeError(
+            f"{role} token_file must contain one non-empty line"
+        ) from None
+    return token
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> None:
+        # Even same-origin redirects are unnecessary for the fixed API routes.
+        return None
+
+
+class Forgejo:
+    version_label = "Forgejo version"
+    credential_label = "token file"
+    can_resolve_threads = False
+    can_read_thread_resolution = True
+    can_read_branch_rules = True
+    can_mutate = False
+    mutation_unavailable_message = "not implemented until Increment 4"
+
+    def __init__(
+        self,
+        repository: Repository,
+        role: Role,
+        *,
+        timeout: float = 45,
+    ) -> None:
+        assert repository.configuration is not None
+        config = repository.configuration
+        self.repository = repository
+        self.role = role
+        self.account = config.account(role)
+        self.base_url = validate_base_url(config.forge.base_url).rstrip("/")
+        self.prefix = (
+            f'/repos/{quote(config.forge.owner, safe="")}'
+            f'/{quote(config.forge.repo, safe="")}'
+        )
+        self.timeout = timeout
+        self._opener = build_opener(ProxyHandler({}), NoRedirect())
+        self._verified_token: str | None = None
+        self._version: str | None = None
+
+    def verify_credentials(self) -> None:
+        read_token(self.repository, self.role)
+
+    def _request(
+        self,
+        endpoint: str,
+        token: str,
+        *,
+        method: str = "GET",
+        body: object = None,
+    ) -> object:
+        if not endpoint.startswith("/") or endpoint.startswith("//"):
+            raise ForgeError("API endpoint must be an origin-relative path")
+        request = Request(
+            self.base_url + "/api/v1" + endpoint,
+            data=None if body is None else json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": "token " + token,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method=method,
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                content = response.read()
+        except HTTPError as error:
+            detail = f"HTTP {error.code}"
+            try:
+                payload = decode_json(error.read().decode("utf-8"))
+                if isinstance(payload, dict) and isinstance(
+                    payload.get("message"), str
+                ):
+                    detail = payload["message"]
+            except (OSError, ValueError, HTTPException):
+                pass
+            finally:
+                error.close()
+            detail = detail.replace(token, "[redacted]")
+            if self._verified_token:
+                detail = detail.replace(self._verified_token, "[redacted]")
+            raise ForgeError(
+                " ".join(detail.splitlines()), error.code
+            ) from None
+        except (TimeoutError, URLError, OSError, ValueError, HTTPException):
+            raise ForgeError(
+                "forge request failed or timed out; re-read the PR before"
+                " repeating a mutation"
+            ) from None
+        try:
+            return (
+                decode_json(content.decode("utf-8"))
+                if content.strip()
+                else None
+            )
+        except (UnicodeError, ValueError):
+            raise ForgeError("forge returned invalid JSON") from None
+
+    def _check_version(self, token: str) -> str:
+        try:
+            data = object_value(self._request("/version", token), "version")
+            value = text_value(data.get("version"), "version.version")
+            match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", value)
+            if match is None:
+                raise ForgeError("cannot read forge version")
+            try:
+                numeric = tuple(map(int, match.group(1, 2, 3)))
+            except ValueError:
+                raise ForgeError("cannot read forge version") from None
+        except ForgeError as error:
+            raise ForgeError(
+                "cannot read forge version", error.status
+            ) from None
+        if numeric < (16, 0, 0):
+            raise ForgeError("Forgejo version must be at least 16.0.0")
+        self._version = value
+        return value.replace(token, "[redacted]")
+
+    def version(self) -> str:
+        return self._check_version(read_token(self.repository, self.role))
+
+    def _verify_identity(self, token: str) -> None:
+        if token != self._verified_token:
+            data = object_value(self._request("/user", token), "user")
+            login = V.require_string(data.get("login"), "user.login")
+            if login.casefold() != self.account.casefold():
+                raise ForgeError(
+                    f"GET /user does not match configured {self.role} account"
+                )
+            self._verified_token = token
+
+    def verify_identity(self) -> None:
+        self._verify_identity(read_token(self.repository, self.role))
+
+    def api(
+        self,
+        endpoint: str,
+        *,
+        method: str = "GET",
+        body: object = None,
+    ) -> object:
+        token = read_token(self.repository, self.role)
+        if method != "GET":
+            self._verify_identity(token)
+            if self._version is None:
+                self._check_version(token)
+        return self._request(endpoint, token, method=method, body=body)
+
+    def listing(self, endpoint: str) -> list:
+        result = []
+        page = 1
+        while True:
+            separator = "&" if "?" in endpoint else "?"
+            entries = array(
+                self.api(f"{endpoint}{separator}limit=50&page={page}"),
+                "list",
+            )
+            result.extend(entries)
+            if len(entries) < 50:
+                return result
+            page += 1
+
+    def repository_record(self) -> dict[str, object]:
+        data = object_value(self.api(self.prefix), "repository")
+        positive(data.get("id"), "repository.id")
+        actual = V.require_string(
+            data.get("full_name"), "repository.full_name"
+        )
+        config = self.repository.configuration.forge
+        if actual.casefold() != f"{config.owner}/{config.repo}".casefold():
+            raise ForgeError("repository response has another identity")
+        return data
+
+    def repository_permission(self) -> str:
+        permissions = object_value(
+            self.repository_record().get("permissions"),
+            "permissions",
+        )
+        admin = boolean(permissions.get("admin"), "permissions.admin")
+        push = boolean(permissions.get("push"), "permissions.push")
+        pull = boolean(permissions.get("pull"), "permissions.pull")
+        if admin:
+            return "admin"
+        if push:
+            return "write"
+        return "read" if pull else "none"
+
+    def user_exists(self, login: str) -> bool:
+        try:
+            data = object_value(
+                self.api(f'/users/{quote(login, safe="")}'),
+                "user",
+            )
+        except ForgeError as error:
+            if error.status == 404:
+                return False
+            raise
+        if (
+            V.require_string(data.get("login"), "user.login").casefold()
+            != login.casefold()
+        ):
+            raise ForgeError("user lookup returned another login")
+        return True
+
+    def _conversation(self, number: int) -> tuple[Evidence, ...]:
+        # This endpoint returns the complete list; do not apply review paging.
+        values = array(
+            self.api(f"{self.prefix}/issues/{number}/comments"), "comments"
+        )
+        return tuple(sorted(map(parse_evidence, values), key=lambda c: c.id))
+
+    def issue(self, number: int) -> IssueRecord:
+        data = object_value(
+            self.api(f"{self.prefix}/issues/{number}"), "issue"
+        )
+        evidence = parse_evidence(data)
+        if positive(data.get("number"), "issue.number") != number:
+            raise ForgeError("issue response has another number")
+        if data.get("state") not in ("open", "closed"):
+            raise ForgeError("issue.state must be open or closed")
+        return {
+            "number": number,
+            "title": text_value(data.get("title"), "issue.title"),
+            "state": data["state"],
+            "is_pull_request": data.get("pull_request") is not None,
+            "body": evidence.body,
+            "labels": [
+                V.require_string(
+                    object_value(label, "label").get("name"),
+                    "label.name",
+                )
+                for label in array(data.get("labels"), "labels")
+            ],
+            "comments": self._conversation(number),
+        }
+
+    def pr(self, number: int) -> PullRequest:
+        data = self.api(f"{self.prefix}/pulls/{number}")
+        result = parse_pullrequest(data)
+        if result.number != number:
+            raise ForgeError("pull request response has another number")
+        config = self.repository.configuration.forge
+        base = object_value(data.get("base"), "base")
+        base_repo = object_value(base.get("repo"), "base.repo")
+        name = V.require_string(
+            base_repo.get("full_name"), "base.repo.full_name"
+        )
+        if name.casefold() != f"{config.owner}/{config.repo}".casefold():
+            raise ForgeError("pull request response has another repository")
+        return result
+
+    def reviews(self, number: int) -> tuple[Review, ...]:
+        result = [
+            parse_review(r)
+            for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
+        ]
+        return tuple(
+            sorted(
+                (r for r in result if r is not None),
+                key=lambda r: evidence_order(r.evidence),
+            )
+        )
+
+    @staticmethod
+    def _approvals(reviews: tuple[Review, ...]) -> tuple[Approval, ...]:
+        return tuple(
+            Approval(
+                r.evidence.author,
+                r.state,
+                r.commit_id,
+                r.dismissed,
+                r.evidence.created_at,
+                r.evidence.id,
+            )
+            for r in reviews
+            if r.state in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED)
+        )
+
+    def approvals(self, number: int) -> tuple[Approval, ...]:
+        return self._approvals(self.reviews(number))
+
+    def _comments(
+        self,
+        number: int,
+        reviews: tuple[Review, ...],
+    ) -> tuple[tuple[Comment, ...], tuple[ThreadState, ...]]:
+        comments = []
+        threads = []
+        for review in reviews:
+            parsed, states = parse_comments(
+                self.api(
+                    f"{self.prefix}/pulls/{number}/reviews/"
+                    f"{review.evidence.id}/comments",
+                ),
+                review.evidence.id,
+            )
+            comments.extend(parsed)
+            threads.extend(states)
+        return (
+            tuple(sorted(comments, key=lambda c: c.evidence.id)),
+            tuple(threads),
+        )
+
+    def snapshot(self, number: int) -> Snapshot:
+        pr = self.pr(number)
+        reviews = self.reviews(number)
+        comments, threads = self._comments(number, reviews)
+        approvals = (
+            self._approvals(reviews)
+            if self.repository.configuration.identity_mode == "single"
+            else ()
+        )
+        return Snapshot(
+            pr,
+            reviews,
+            comments,
+            self._conversation(number),
+            threads,
+            self.can_resolve_threads,
+            self.can_read_thread_resolution,
+            self.can_read_branch_rules,
+            "approved",
+            approvals,
+        )
+
+    def thread_states(self, number: int) -> tuple[ThreadState, ...]:
+        return self._comments(number, self.reviews(number))[1]
+
+    def branch_rules(self, branch: str) -> dict[str, object]:
+        branch_path = quote(branch, safe="")
+        try:
+            return object_value(
+                self.api(
+                    f"{self.prefix}/branch_protections/{branch_path}",
+                ),
+                "branch protection",
+            )
+        except ForgeError as error:
+            if error.status in (403, 404):
+                return {"visibility": "not visible"}
+            raise
+
+    def branch_prs(self, branch: str) -> list[dict[str, object]]:
+        return [
+            row
+            for row in self.listing(f"{self.prefix}/pulls?state=all")
+            if parse_pullrequest(row).head_branch == branch
+        ]
+
+    def create_pr(
+        self, title: str, head_branch: str, base_branch: str, body: str
+    ) -> PullRequest:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def update_body(self, number: int, body: str) -> PullRequest:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def prepare_review(
+        self, number: int, *, reviews: tuple[Review, ...]
+    ) -> None:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def post_review(
+        self, number: int, publication: ReviewPublication
+    ) -> Review:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def post_root(
+        self, number: int, head: str, review_id: int, anchor: Anchor, body: str
+    ) -> Comment:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def reply(self, number: int, root: int, body: str) -> Comment:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def comment(self, number: int, body: str) -> Evidence:
+        raise ForgeError(self.mutation_unavailable_message)
+
+    def resolve(self, node_id: str) -> dict[str, object]:
+        raise ForgeError("not supported on this forge")
+
+    def merge(self, number: int, head: str, method: str) -> MergeResult:
+        raise ForgeError(self.mutation_unavailable_message)

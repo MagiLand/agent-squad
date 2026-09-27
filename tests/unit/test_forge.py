@@ -14,7 +14,7 @@ from agent_squad.forge import (  # noqa: E402
     oid,
 )
 from agent_squad.github import (  # noqa: E402
-    GitHub, parse_evidence, parse_pullrequest, parse_review,
+    GitHub, parse_comment, parse_evidence, parse_pullrequest, parse_review,
 )
 from agent_squad.initialization import Repository  # noqa: E402
 from tests.unit.test_conventions import (  # noqa: E402
@@ -38,6 +38,29 @@ def forge_evidence(body: object = "") -> dict:
 
 
 class ForgeValidationTests(unittest.TestCase):
+    def test_outdated_comments_preserve_original_anchors(self) -> None:
+        record = dict(
+            forge_evidence(), pull_request_review_id=20,
+            path="example.py", side="RIGHT", line=None, start_line=None,
+            original_line=4, original_start_line=2,
+        )
+        for fields, expected in (
+            ({}, (4, 2)),
+            ({"original_start_line": None}, (4, None)),
+            ({"line": 8, "start_line": 6}, (8, 6)),
+            ({"original_line": None, "original_start_line": None},
+             (None, None)),
+        ):
+            with self.subTest(fields=fields):
+                parsed = parse_comment(record | fields)
+                self.assertEqual((parsed.line, parsed.start_line), expected)
+                self.assertEqual(parsed.side, "RIGHT")
+        for field in ("original_line", "original_start_line"):
+            for invalid in (0, -1, True, "4"):
+                with self.subTest(field=field, value=invalid):
+                    with self.assertRaises(ForgeError):
+                        parse_comment(record | {field: invalid})
+
     def test_null_body_is_empty_but_other_non_strings_are_refused(
         self,
     ) -> None:
@@ -178,33 +201,27 @@ class ForgeBoundaryTests(unittest.TestCase):
                 self.assertTrue(forge.can_read_branch_rules)
             transport.assert_not_called()
 
-    def test_factory_refuses_validated_interim_kind_with_exit_one(
-        self,
-    ) -> None:
-        from contextlib import redirect_stderr
+    def test_factory_selects_forgejo_without_reading_credentials(self) -> None:
         from dataclasses import replace
-        from io import StringIO
-        from agent_squad.cli import main
+        from agent_squad.forge import Forge, make_forge
+        from agent_squad.forgejo import Forgejo
         from agent_squad.initialization import Configuration
 
         data = config().to_dict()
-        data['forge']['kind'] = 'forgejo'
+        data["forge"].update(kind="forgejo", base_url="https://forge.example")
+        for role in ("implementer", "reviewer"):
+            data[role]["token_file"] = "/outside/" + role + ".token"
         repository = replace(
             self.repo, configuration=Configuration.from_dict(data),
         )
-        errors = StringIO()
-        with (
-            patch('agent_squad.cli.load_initialized_repository',
-                  return_value=repository),
-            patch.object(GitHub, '_run') as transport,
-            redirect_stderr(errors),
-        ):
-            result = main(['status', '--pr', '1', '--as', 'implementer'])
-        self.assertEqual(result, 1)
-        self.assertEqual(errors.getvalue(),
-                         'error: forge.kind forgejo is not implemented until '
-                         'Increment 3\n')
-        transport.assert_not_called()
+        with patch("agent_squad.forgejo.read_token") as credential:
+            forge = make_forge(repository, "implementer")
+            self.assertIsInstance(forge, Forge)
+            self.assertIsInstance(forge, Forgejo)
+            self.assertFalse(forge.can_resolve_threads)
+            self.assertTrue(forge.can_read_thread_resolution)
+            self.assertTrue(forge.can_read_branch_rules)
+            credential.assert_not_called()
 
     def test_response_states_and_publication_events_are_adapter_owned(
         self,

@@ -87,10 +87,13 @@ def parse_review(value: object) -> Review:
 
 def parse_comment(value: object) -> Comment:
     data = object_value(value, "review comment")
-    numbers = {
-        key: None if data.get(key) is None else positive(data[key], key)
-        for key in ("in_reply_to_id", "line", "start_line")
-    }
+    numbers = {}
+    for key in ("in_reply_to_id", "line", "start_line"):
+        value = data.get(key)
+        # Outdated roots retain their anchor at the opening review's head.
+        if value is None and key in ("line", "start_line"):
+            value = data.get(f"original_{key}")
+        numbers[key] = None if value is None else positive(value, key)
     strings = {
         key: (
             None
@@ -160,6 +163,9 @@ class GitHub:
     """One process-local forge identity. Mutation calls are never retried."""
 
     version_label = "GitHub CLI"
+    credential_label = None
+    can_mutate = True
+    mutation_unavailable_message = "not supported on this forge"
     can_resolve_threads = True
     can_read_thread_resolution = True
     can_read_branch_rules = True
@@ -252,6 +258,9 @@ class GitHub:
         if not value:
             raise ForgeError("gh --version returned no version text")
         return value
+
+    def verify_credentials(self) -> None:
+        self.token()
 
     def verify_identity(self) -> None:
         if not self._verified:

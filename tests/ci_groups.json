@@ -26,7 +26,8 @@
     "tests/unit/test_skills.py",
     "tests/unit/test_validation.py",
     "tests/integration/test_merge.py",
-    "tests/integration/test_init_doctor.py"
+    "tests/integration/test_init_doctor.py",
+    "tests/unit/test_forgejo.py"
   ],
   "main-only": [
     "tests/integration/test_source_export.py",

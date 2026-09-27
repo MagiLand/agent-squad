@@ -1,0 +1,104 @@
+{
+  "id": 101,
+  "body": "$TASK\n\n$REPORT",
+  "user": {
+    "login": "developer"
+  },
+  "created_at": "2026-01-01T00:00:01Z",
+  "number": 1,
+  "title": "Shared read scenario",
+  "head": {
+    "ref": "issue-1",
+    "sha": "$HEAD"
+  },
+  "base": {
+    "ref": "main",
+    "sha": "$BASE"
+  },
+  "state": "open",
+  "merged": false,
+  "merge_commit_sha": null,
+  "mergeable_state": "clean",
+  "reviews": [
+    {
+      "id": 102,
+      "body": "AGENT_SQUAD/0.5.0 REVIEW pr=1 head=$HEAD base=$BASE verdict=changes_requested\n\n## Summary\n\nScripted review.\n\n## Verified dispositions\n\nnone\n\n## Findings\n\nREV-1 [blocking] Scripted finding\n",
+      "user": {
+        "login": "reviewer"
+      },
+      "created_at": "2026-01-01T00:00:02Z",
+      "submitted_at": "2026-01-01T00:00:02Z",
+      "commit_id": "$HEAD",
+      "state": "CHANGES_REQUESTED"
+    },
+    {
+      "id": 106,
+      "body": "AGENT_SQUAD/0.5.0 REVIEW pr=1 head=$HEAD base=$BASE verdict=approved\n\n$REVIEW",
+      "user": {
+        "login": "reviewer"
+      },
+      "created_at": "2026-01-01T00:00:06Z",
+      "submitted_at": "2026-01-01T00:00:06Z",
+      "commit_id": "$HEAD",
+      "state": "APPROVED"
+    }
+  ],
+  "comments": [
+    {
+      "id": 105,
+      "body": "VERIFIED rejection accepted\n\nExecuted the test successfully.",
+      "user": {
+        "login": "reviewer"
+      },
+      "created_at": "2026-01-01T00:00:05Z",
+      "pull_request_review_id": 102,
+      "path": "example.py",
+      "line": null,
+      "start_line": null,
+      "side": null,
+      "in_reply_to_id": 103
+    },
+    {
+      "id": 103,
+      "body": "[REV-1][blocking][tests] Scripted finding\n\n$FINDING_BODY",
+      "user": {
+        "login": "reviewer"
+      },
+      "created_at": "2026-01-01T00:00:03Z",
+      "pull_request_review_id": 102,
+      "path": "example.py",
+      "line": 2,
+      "start_line": null,
+      "side": "RIGHT",
+      "in_reply_to_id": null
+    },
+    {
+      "id": 104,
+      "body": "DISPOSITION rejected\n\nExisting test proves this behaviour.",
+      "user": {
+        "login": "developer"
+      },
+      "created_at": "2026-01-01T00:00:04Z",
+      "pull_request_review_id": 102,
+      "path": "example.py",
+      "line": null,
+      "start_line": null,
+      "side": null,
+      "in_reply_to_id": 103
+    }
+  ],
+  "threads": [
+    {
+      "id": "T-103",
+      "isResolved": true,
+      "comments": {
+        "nodes": [
+          {
+            "databaseId": 103
+          }
+        ]
+      }
+    }
+  ],
+  "conversation": []
+}

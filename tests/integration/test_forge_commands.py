@@ -21,6 +21,32 @@ class ForgeCommandTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
 
+    def test_outdated_github_root_preserves_settlement_and_approval(
+        self,
+    ) -> None:
+        f = self.f
+        f.seed_read_scenario()
+        self.assertEqual(f.status()["next_action"], "approved")
+        model = f.read_model()
+        root = next(c for c in model["prs"]["1"]["comments"]
+                    if c["id"] == 103)
+        root.update(line=None, original_line=2)
+        for start in (None, 1):
+            with self.subTest(original_start_line=start):
+                root["original_start_line"] = start
+                f.save_model(model)
+                state = f.status()
+                self.assertEqual(state["next_action"], "approved")
+                self.assertTrue(state["approval"]["approved"])
+                finding_state = state["findings"][0]
+                self.assertEqual(finding_state["root"]["id"], 103)
+                self.assertEqual(
+                    [r["id"] for r in finding_state["replies"]], [104, 105]
+                )
+                self.assertTrue(finding_state["settled"])
+                self.assertEqual(finding_state["anchor"]["start_line"], start)
+                self.assertFalse(state["gates"]["unanchored_findings"])
+
     def test_automatic_task_and_issue_refusals(self) -> None:
         f = ForgeFixture()
         self.addCleanup(f.close)
@@ -914,3 +940,355 @@ class SingleForgeCommandTests(unittest.TestCase):
                          ['COMMENTED', 'COMMENTED'])
         f.review('needs_human')
         self.assertEqual(f.status()['next_action'], 'needs_decision')
+
+
+class ForgejoReadCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.forge_support import ForgejoFixture
+
+        self.f = ForgejoFixture(path_prefix="/instance/prefix")
+        self.addCleanup(self.f.close)
+        self.f.initialize()
+        self.head = self.f.candidate()
+        self.f.seed_read_scenario()
+
+    def test_read_commands_select_role_tokens_without_user_version_or_gh(
+        self,
+    ) -> None:
+        f = self.f
+        for args in (
+            ("issue", "view", "--issue", "1"),
+            ("pr", "head", "--pr", "1"),
+            ("pr", "reviews", "--pr", "1"),
+            ("status", "--pr", "1"),
+        ):
+            with self.subTest(command=args):
+                before = len(f.read_model()["calls"])
+                result = f.cli(*args)
+                calls = f.read_model()["calls"][before:]
+                self.assertTrue(calls)
+                self.assertTrue(
+                    all(
+                        c["Authorization"] == "token fake-token-developer"
+                        for c in calls
+                    )
+                )
+                self.assertNotIn("fake-token-", json.dumps(result))
+        reviewer = (
+            f.repo / f".agent-squad/worktrees/reviewer-pr1-{self.head[:7]}"
+        )
+        f.git("worktree", "add", "--detach", str(reviewer), self.head)
+        for cwd, extra in ((reviewer, ()), (f.repo, ("--as", "reviewer"))):
+            before = len(f.read_model()["calls"])
+            f.cli("status", "--pr", "1", *extra, cwd=cwd)
+            self.assertTrue(
+                all(
+                    c["Authorization"] == "token fake-token-reviewer"
+                    for c in f.read_model()["calls"][before:]
+                )
+            )
+        calls = f.read_model()["calls"]
+        self.assertTrue(all(c["method"] == "GET" for c in calls))
+        self.assertFalse(any("arguments" in c for c in calls))
+        self.assertFalse(
+            any(c["path"].endswith(("/user", "/version")) for c in calls)
+        )
+
+    def test_shared_scenario_matches_github_derived_state_and_resolution(
+        self,
+    ) -> None:
+        from agent_squad.conventions import derive
+        from agent_squad.forge import make_forge
+
+        other = ForgeFixture()
+        self.addCleanup(other.close)
+        other.initialize()
+        other.candidate()
+        # The shared scenario uses this fixture's real Git identities. Reusing
+        # its PR model removes unrelated commit-time variation from comparison.
+        model = other.read_model()
+        model["prs"] = self.f.read_model()["prs"]
+        model.pop("origin")
+        other.save_model(model)
+        first_repo = load_initialized_repository(self.f.repo)
+        second_repo = load_initialized_repository(other.repo)
+        first = make_forge(first_repo, "implementer").snapshot(1)
+        with patch.dict("os.environ", other.env, clear=True):
+            second = make_forge(second_repo, "implementer").snapshot(1)
+        # Neutral snapshots deliberately have different display labels and
+        # transport-specific opaque node IDs. Compare the derived decisions.
+        from agent_squad.initialization import Worktree
+
+        kwargs = dict(
+            worktrees=(
+                Worktree(self.f.worktree, self.head, "refs/heads/issue-1"),
+            ),
+            base=self.f.base,
+            base_tip=self.f.base,
+            ancestor=lambda old, new: old in (self.f.base, new),
+        )
+        first_state = derive(first, first_repo.configuration, **kwargs)
+        second_state = derive(second, second_repo.configuration, **kwargs)
+        for key in (
+            "next_action",
+            "approval",
+            "task",
+            "gates",
+            "budget",
+            "diagnostics",
+        ):
+            self.assertEqual(first_state[key], second_state[key], key)
+        self.assertTrue(first_state["findings"][0]["resolved"])
+        self.assertEqual(
+            first_state["findings"][0]["settled"],
+            second_state["findings"][0]["settled"],
+        )
+        state = self.f.status()
+        self.assertEqual(
+            {
+                k: state[k]
+                for k in (
+                    "can_resolve_threads",
+                    "can_read_thread_resolution",
+                    "can_read_branch_rules",
+                )
+            },
+            {
+                "can_resolve_threads": False,
+                "can_read_thread_resolution": True,
+                "can_read_branch_rules": True,
+            },
+        )
+
+    def test_every_mutation_is_refused_before_protocol_or_http_work(
+        self,
+    ) -> None:
+        f = self.f
+        before = f.read_model()["calls"]
+        commands = [
+            ("pr", "create", "--issue", "1", "--report", f.report),
+            ("pr", "report", "--pr", "1", "--report", f.report),
+            ("pr", "merge", "--pr", "1"),
+            (
+                "thread",
+                "reply",
+                "--pr",
+                "1",
+                "--finding",
+                "REV-1",
+                "--body",
+                f.report,
+            ),
+            (
+                "thread",
+                "open",
+                "--pr",
+                "1",
+                "--finding",
+                "REV-1",
+                "--path",
+                "example.py",
+                "--line",
+                "2",
+            ),
+            (
+                "decision",
+                "post",
+                "--pr",
+                "1",
+                "--finding",
+                "none",
+                "--body",
+                f.report,
+            ),
+            (
+                "stop",
+                "post",
+                "--pr",
+                "1",
+                "--head",
+                self.head,
+                "--reason",
+                "manual",
+                "--body",
+                f.report,
+            ),
+        ]
+        for args in commands:
+            with self.subTest(command=args):
+                result = f.cli(*args, "--as", "implementer", expected=1)
+                self.assertIn(
+                    "not implemented until Increment 4", result["error"]
+                )
+        result = f.review("approved", expected=1)
+        self.assertIn("not implemented until Increment 4", result["error"])
+        result = f.cli(
+            "thread",
+            "resolve",
+            "--as",
+            "reviewer",
+            "--pr",
+            "1",
+            "--finding",
+            "REV-1",
+            expected=1,
+        )
+        self.assertIn("not supported on this forge", result["error"])
+        self.assertEqual(f.read_model()["calls"], before)
+
+    def test_faults_pending_requested_rows_shuffling_and_empty_hunks(
+        self,
+    ) -> None:
+        f = self.f
+        f.settings(
+            pending_draft=True, request_review_rows=True, shuffle_comments=True
+        )
+        for _ in range(3):
+            state = f.cli("status", "--pr", "1", "--as", "reviewer")
+            self.assertEqual(state["findings"][0]["root"]["id"], 103)
+            self.assertEqual(
+                [r["id"] for r in state["findings"][0]["replies"]], [104, 105]
+            )
+        from agent_squad.forge import make_forge
+
+        forge = make_forge(load_initialized_repository(f.repo), "reviewer")
+        self.assertTrue(any(r.state == "pending" for r in forge.reviews(1)))
+        self.assertFalse(any(r.evidence.id == 1 for r in forge.reviews(1)))
+        f.settings(empty_hunk_paths=["example.py"])
+        self.assertTrue(f.status()["findings"][0]["unanchored"])
+        for call in f.read_model()["calls"]:
+            if "/comments" in call["path"]:
+                self.assertNotIn("?", call["path"])
+
+    def test_fake_faults_for_recorded_mutation_responses_and_identity_gates(
+        self,
+    ) -> None:
+        from agent_squad.forge import make_forge
+        from tests.fixtures.fake_forgejo import recording
+
+        f = self.f
+        repo = load_initialized_repository(f.repo)
+        prefix = "/repos/MagiLand/trial/pulls/1"
+        f.settings(author_approval_422=True)
+        forge = make_forge(repo, "implementer")
+        for event, name in (
+            ("APPROVED", "042-e8-approved.json"),
+            ("REQUEST_CHANGES", "043-e8-request_changes.json"),
+        ):
+            with self.assertRaises(ForgeError) as caught:
+                forge.api(
+                    prefix + "/reviews", method="POST", body={"event": event}
+                )
+            self.assertEqual(caught.exception.status, 422)
+            self.assertEqual(str(caught.exception), recording(name)["message"])
+        f.settings(head_out_of_date_409=True)
+        with self.assertRaises(ForgeError) as caught:
+            forge.api(prefix + "/merge", method="POST", body={})
+        self.assertEqual(caught.exception.status, 409)
+        f.settings(unknown_event_pending=True)
+        value = forge.api(
+            prefix + "/reviews",
+            method="POST",
+            body={"event": "UNKNOWN", "commit_id": self.head},
+        )
+        self.assertEqual(value["state"], "PENDING")
+        for settings, message in (
+            ({"login_mismatch": "wrong"}, "does not match"),
+            ({"version": "15.0.9"}, "16.0.0"),
+        ):
+            f.settings(login_mismatch="developer", version="16.0.3")
+            f.settings(**settings)
+            before = len(f.read_model()["calls"])
+            forge = make_forge(repo, "implementer")
+            with self.assertRaisesRegex(ForgeError, message):
+                forge.api(prefix + "/merge", method="POST", body={})
+            self.assertTrue(
+                all(
+                    c["method"] == "GET"
+                    for c in f.read_model()["calls"][before:]
+                )
+            )
+
+    def test_read_token_failure_and_identity_failure_do_not_leak_tokens(
+        self,
+    ) -> None:
+        from agent_squad.forge import make_forge
+
+        f = self.f
+        repo = load_initialized_repository(f.repo)
+        for setting in ("token_failure", "user_failure"):
+            f.settings(token_failure=[], user_failure=[])
+            f.settings(**{setting: ["developer"]})
+            with self.assertRaises(ForgeError) as caught:
+                make_forge(repo, "implementer").verify_identity()
+            self.assertEqual(caught.exception.status, 401)
+            self.assertNotIn("fake-token-developer", str(caught.exception))
+        result = f.cli("doctor", expected=1)
+        self.assertNotIn("fake-token-", json.dumps(result))
+
+    def test_review_pagination_and_unpaginated_comments_over_fifty(
+        self,
+    ) -> None:
+        f = self.f
+        model = f.read_model()
+        pr = model["prs"]["1"]
+        review = pr["reviews"][0]
+        pr["reviews"] = [
+            dict(review, id=200 + i, body="untagged") for i in range(51)
+        ]
+        pr["comments"] = []
+        comment = dict(model["issues"]["1"], body="conversation")
+        pr["conversation"] = [
+            dict(comment, id=300 + i) for i in reversed(range(51))
+        ]
+        f.save_model(model)
+        from agent_squad.forge import make_forge
+
+        forge = make_forge(load_initialized_repository(f.repo), "implementer")
+        snapshot = forge.snapshot(1)
+        self.assertEqual(len(snapshot.reviews), 51)
+        self.assertEqual(
+            [c.id for c in snapshot.conversation], list(range(300, 351))
+        )
+        review_paths = [
+            c["path"]
+            for c in f.read_model()["calls"]
+            if "/reviews?" in c["path"]
+        ]
+        self.assertEqual(len(review_paths), 2)
+        self.assertTrue(review_paths[0].endswith("limit=50&page=1"))
+        self.assertTrue(review_paths[1].endswith("limit=50&page=2"))
+
+    def test_server_uses_loopback_and_close_removes_listening_socket(
+        self,
+    ) -> None:
+        import socket
+
+        server = self.f.server
+        address = server.server.server_address
+        self.assertEqual(address[0], "127.0.0.1")
+        server.close()
+        self.assertFalse(server.thread.is_alive())
+        with self.assertRaises(OSError):
+            socket.create_connection(address, timeout=0.2)
+
+    def test_redirect_never_forwards_the_authorization_header(self) -> None:
+        from agent_squad.forge import make_forge
+        from tests.forge_support import ForgejoFixture
+
+        target = ForgejoFixture()
+        self.addCleanup(target.close)
+        target.initialize()
+        repo = load_initialized_repository(self.f.repo)
+        for destination in (
+            target.server.base_url + "/api/v1/user",
+            self.f.server.base_url + "/api/v1/user",
+        ):
+            with self.subTest(destination=destination):
+                self.f.settings(redirect_to=destination)
+                before = len(self.f.read_model()["calls"])
+                with self.assertRaises(ForgeError) as caught:
+                    make_forge(repo, "implementer").repository_record()
+                self.assertEqual(caught.exception.status, 302)
+                self.assertEqual(len(self.f.read_model()["calls"]), before + 1)
+                self.assertEqual(target.read_model()["calls"], [])
