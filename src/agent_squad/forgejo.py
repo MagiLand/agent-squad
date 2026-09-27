@@ -142,6 +142,7 @@ def hunk_anchor(hunk: str, extra: int) -> tuple[int | None, int | None]:
     """Decode the displayed head-side range, never the wire position."""
     current = None
     displayed: list[int] = []
+    ends_on_head = False
     remaining_old = remaining_new = 0
     for line in hunk.splitlines():
         header = HUNK.fullmatch(line)
@@ -150,11 +151,13 @@ def hunk_anchor(hunk: str, extra: int) -> tuple[int | None, int | None]:
             remaining_old = int(header[2] or 1)
             remaining_new = int(header[4] or 1)
             displayed = []
+            ends_on_head = False
         elif line.startswith("\\ No newline at end of file"):
             continue
         elif current is None or not line or line[0] not in " +-":
             return None, None
         else:
+            ends_on_head = line[0] in " +"
             if line[0] in " -":
                 remaining_old -= 1
             if line[0] in " +":
@@ -163,7 +166,10 @@ def hunk_anchor(hunk: str, extra: int) -> tuple[int | None, int | None]:
                 current += 1
             if remaining_old < 0 or remaining_new < 0:
                 return None, None
-    if not displayed or displayed[-1] < 1 or len(displayed) <= extra:
+    if (
+        not ends_on_head or not displayed
+        or displayed[-1] < 1 or len(displayed) <= extra
+    ):
         return None, None
     end = displayed[-1]
     start = end - extra

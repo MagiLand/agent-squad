@@ -520,8 +520,21 @@ class RecordedParserTests(unittest.TestCase):
         rows = recording("034-e5-comments.json")
         parsed, _ = parse_comments(rows, 7)
         self.assertEqual((parsed[0].start_line, parsed[0].line), (2, 4))
-        for hunk in ("", "invalid", "@@ -0,0 +1,1 @@\n+one\n+too many"):
-            self.assertEqual(hunk_anchor(hunk, 0), (None, None))
+        for hunk in (
+            "", "invalid", "@@ -0,0 +1,1 @@\n+one\n+too many",
+            "@@ -23,3 +23,2 @@\n a\n b\n-c",
+            "@@ -23,3 +23,2 @@\n a\n b\n-c\n"
+            "\\ No newline at end of file",
+        ):
+            with self.subTest(hunk=hunk):
+                self.assertEqual(hunk_anchor(hunk, 0), (None, None))
+        for hunk in (
+            "@@ -23,3 +23,2 @@\n a\n-c\n b",
+            "@@ -23,3 +23,2 @@\n a\n-c\n b\n"
+            "\\ No newline at end of file",
+        ):
+            with self.subTest(hunk=hunk):
+                self.assertEqual(hunk_anchor(hunk, 0), (24, None))
 
     def test_live_base_is_accepted_and_merge_base_is_validated(self) -> None:
         row = recording("017-setup-pr-after-base-push.json")

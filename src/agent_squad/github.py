@@ -87,10 +87,13 @@ def parse_review(value: object) -> Review:
 
 def parse_comment(value: object) -> Comment:
     data = object_value(value, "review comment")
-    numbers = {
-        key: None if data.get(key) is None else positive(data[key], key)
-        for key in ("in_reply_to_id", "line", "start_line")
-    }
+    numbers = {}
+    for key in ("in_reply_to_id", "line", "start_line"):
+        value = data.get(key)
+        # Outdated roots retain their anchor at the opening review's head.
+        if value is None and key in ("line", "start_line"):
+            value = data.get(f"original_{key}")
+        numbers[key] = None if value is None else positive(value, key)
     strings = {
         key: (
             None

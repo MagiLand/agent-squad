@@ -21,6 +21,32 @@ class ForgeCommandTests(unittest.TestCase):
         self.head = self.f.candidate()
         self.f.create_pr()
 
+    def test_outdated_github_root_preserves_settlement_and_approval(
+        self,
+    ) -> None:
+        f = self.f
+        f.seed_read_scenario()
+        self.assertEqual(f.status()["next_action"], "approved")
+        model = f.read_model()
+        root = next(c for c in model["prs"]["1"]["comments"]
+                    if c["id"] == 103)
+        root.update(line=None, original_line=2)
+        for start in (None, 1):
+            with self.subTest(original_start_line=start):
+                root["original_start_line"] = start
+                f.save_model(model)
+                state = f.status()
+                self.assertEqual(state["next_action"], "approved")
+                self.assertTrue(state["approval"]["approved"])
+                finding_state = state["findings"][0]
+                self.assertEqual(finding_state["root"]["id"], 103)
+                self.assertEqual(
+                    [r["id"] for r in finding_state["replies"]], [104, 105]
+                )
+                self.assertTrue(finding_state["settled"])
+                self.assertEqual(finding_state["anchor"]["start_line"], start)
+                self.assertFalse(state["gates"]["unanchored_findings"])
+
     def test_automatic_task_and_issue_refusals(self) -> None:
         f = ForgeFixture()
         self.addCleanup(f.close)

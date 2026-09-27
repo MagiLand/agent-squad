@@ -14,7 +14,7 @@ from agent_squad.forge import (  # noqa: E402
     oid,
 )
 from agent_squad.github import (  # noqa: E402
-    GitHub, parse_evidence, parse_pullrequest, parse_review,
+    GitHub, parse_comment, parse_evidence, parse_pullrequest, parse_review,
 )
 from agent_squad.initialization import Repository  # noqa: E402
 from tests.unit.test_conventions import (  # noqa: E402
@@ -38,6 +38,29 @@ def forge_evidence(body: object = "") -> dict:
 
 
 class ForgeValidationTests(unittest.TestCase):
+    def test_outdated_comments_preserve_original_anchors(self) -> None:
+        record = dict(
+            forge_evidence(), pull_request_review_id=20,
+            path="example.py", side="RIGHT", line=None, start_line=None,
+            original_line=4, original_start_line=2,
+        )
+        for fields, expected in (
+            ({}, (4, 2)),
+            ({"original_start_line": None}, (4, None)),
+            ({"line": 8, "start_line": 6}, (8, 6)),
+            ({"original_line": None, "original_start_line": None},
+             (None, None)),
+        ):
+            with self.subTest(fields=fields):
+                parsed = parse_comment(record | fields)
+                self.assertEqual((parsed.line, parsed.start_line), expected)
+                self.assertEqual(parsed.side, "RIGHT")
+        for field in ("original_line", "original_start_line"):
+            for invalid in (0, -1, True, "4"):
+                with self.subTest(field=field, value=invalid):
+                    with self.assertRaises(ForgeError):
+                        parse_comment(record | {field: invalid})
+
     def test_null_body_is_empty_but_other_non_strings_are_refused(
         self,
     ) -> None:
