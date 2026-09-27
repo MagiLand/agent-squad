@@ -193,7 +193,7 @@ def verify_integration(
 
 
 def cleanup_merge(
-    repository: Repository, pr: int, head: str, branch: str
+    repository: Repository, pr: int, head: str, branch: str, forge: Forge
 ) -> list[dict]:
     """Stop on a failed step; preserve unrelated or replaced resources."""
     steps: list[dict] = []
@@ -214,26 +214,35 @@ def cleanup_merge(
         return steps
 
     def remove_remote() -> str:
-        ref = f"refs/heads/{branch}"
-        present = git_output(
-            repository.primary, "ls-remote", "--heads", "origin", ref
-        )
-        if not present:
-            return "already removed by forge"
-        if present.split()[0] != head:
-            raise RetainedError(
-                "remote branch no longer matches approved head")
-        git_output(
-            repository.primary, "push", "origin",
-            f"--force-with-lease={ref}:{head}", f":{ref}",
-        )
-        if git_output(
-            repository.primary, "ls-remote", "--heads", "origin", ref
-        ):
-            raise RetainedError(f"remote branch remains: {branch}")
-        return branch
+        forge.delete_branch(branch, head)
+        return f"confirmed absent: {branch}"
 
     if not step("remote branch", remove_remote):
+        return steps
+
+    def remove_tracking() -> str:
+        # Recheck absence before the local compare-and-delete. A moved local
+        # ref or a recreated remote branch must retain the remaining resources.
+        if forge.branch_head(branch) is not None:
+            raise RetainedError(f"remote branch remains: {branch}")
+        ref = f"refs/remotes/origin/{branch}"
+        current = run_git(
+            repository.primary, "show-ref", "--verify", "--quiet", ref
+        )
+        if current.returncode == 1:
+            return "already absent"
+        if current.returncode:
+            raise RetainedError(current.stderr.strip())
+        git_output(
+            repository.primary, "update-ref", "--no-deref", "-d", ref, head
+        )
+        if not run_git(
+            repository.primary, "show-ref", "--verify", "--quiet", ref
+        ).returncode:
+            raise RetainedError(f"remote-tracking ref remains: {ref}")
+        return ref
+
+    if not step("remote-tracking ref", remove_tracking):
         return steps
 
     issue: int
@@ -442,7 +451,7 @@ def merge_pr(
         }
     try:
         result["cleanup"] = cleanup_merge(
-            repository, pr, target["head"], target["head_branch"]
+            repository, pr, target["head"], target["head_branch"], forge
         )
     except (AgentSquadError, OSError, ValueError) as error:
         result["cleanup"] = [{

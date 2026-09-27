@@ -537,7 +537,8 @@ class ForgeCommandTests(unittest.TestCase):
         f.save_model(model)
         f.settings(omit_flat_replies=True, thread_page_size=1)
         f.review(
-            "changes_requested", [finding(), finding("optional", "Optional")]
+            "changes_requested",
+            [finding(), finding("optional", "Optional", line=3)],
         )
         f.reply(
             "REV-1",
@@ -563,7 +564,7 @@ class ForgeCommandTests(unittest.TestCase):
     ) -> None:
         f = self.f
         f.settings(reject_batch=True, fail_roots=["REV-1"])
-        inputs = [finding(), finding("optional", "Optional")]
+        inputs = [finding(), finding("optional", "Optional", line=3)]
         result = f.review("changes_requested", inputs, expected=1)
         self.assertIn("REV-1", result["error"])
         state = f.status()
@@ -601,7 +602,7 @@ class ForgeCommandTests(unittest.TestCase):
     ) -> None:
         f = self.f
         f.settings(reject_batch=True, interrupt_after_body=True)
-        inputs = [finding(), finding("optional", "Optional")]
+        inputs = [finding(), finding("optional", "Optional", line=3)]
         f.review("changes_requested", inputs, expected=1)
         state = f.status()
         self.assertEqual(state["next_action"], "open_threads")
@@ -1060,68 +1061,9 @@ class ForgejoReadCommandTests(unittest.TestCase):
             },
         )
 
-    def test_every_mutation_is_refused_before_protocol_or_http_work(
-        self,
-    ) -> None:
+    def test_unsupported_resolution_refuses_before_any_request(self) -> None:
         f = self.f
         before = f.read_model()["calls"]
-        commands = [
-            ("pr", "create", "--issue", "1", "--report", f.report),
-            ("pr", "report", "--pr", "1", "--report", f.report),
-            ("pr", "merge", "--pr", "1"),
-            (
-                "thread",
-                "reply",
-                "--pr",
-                "1",
-                "--finding",
-                "REV-1",
-                "--body",
-                f.report,
-            ),
-            (
-                "thread",
-                "open",
-                "--pr",
-                "1",
-                "--finding",
-                "REV-1",
-                "--path",
-                "example.py",
-                "--line",
-                "2",
-            ),
-            (
-                "decision",
-                "post",
-                "--pr",
-                "1",
-                "--finding",
-                "none",
-                "--body",
-                f.report,
-            ),
-            (
-                "stop",
-                "post",
-                "--pr",
-                "1",
-                "--head",
-                self.head,
-                "--reason",
-                "manual",
-                "--body",
-                f.report,
-            ),
-        ]
-        for args in commands:
-            with self.subTest(command=args):
-                result = f.cli(*args, "--as", "implementer", expected=1)
-                self.assertIn(
-                    "not implemented until Increment 4", result["error"]
-                )
-        result = f.review("approved", expected=1)
-        self.assertIn("not implemented until Increment 4", result["error"])
         result = f.cli(
             "thread",
             "resolve",

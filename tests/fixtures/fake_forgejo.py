@@ -3,17 +3,19 @@
 
 The JSON model is shared with fake gh. Its tokens are exclusively synthetic.
 Issue GET and injected offset/shuffle/resolver cases are synthetic,
-source-backed cases, not claims about a live trial. Writes model recorded
-faults;
-production mutation commands remain disabled until Increment 4.
+source-backed cases, not claims about a live trial. Squash, branch deletion,
+and PR-body PATCH are synthetic cases based on the pinned API contracts.
 """
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import threading
+import subprocess
+import tempfile
 from urllib.parse import parse_qs, unquote, urlsplit
 
 RECORDINGS = Path(__file__).parent / "forgejo/recordings"
@@ -134,6 +136,74 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def git(self, model: dict, *args: str, cwd: str | None = None) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd or model["origin"],
+            env=self.server.git_env, text=True, capture_output=True,
+            check=True, timeout=30, shell=False,
+        )
+        return result.stdout.strip()
+
+    def branch(self, model: dict, branch: str) -> str | None:
+        rows = self.git(
+            model, "for-each-ref", "--format=%(refname) %(objectname)",
+            f"refs/heads/{branch}",
+        ).splitlines()
+        return next((r.split()[1] for r in rows
+                     if r.split()[0] == f"refs/heads/{branch}"), None)
+
+    @staticmethod
+    def record(model: dict, account: str, body: str) -> dict:
+        model["next_id"] = model.get("next_id", 100) + 1
+        ident = model["next_id"]
+        date = (
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            + timedelta(seconds=ident)
+        )
+        return {"id": ident, "body": body, "user": {"login": account},
+                "created_at": date.isoformat().replace("+00:00", "Z")}
+
+    def merge_pr(
+        self, model: dict, pr: dict, body: dict,
+    ) -> tuple[int, object]:
+        settings = model["settings"]
+        if (settings.get("head_out_of_date_409")
+                or settings.get("head_race_409")):
+            return 409, recording("guard/007-e7-wrong-approved-head.json")
+        if settings.get("merge_405"):
+            return 405, recording("049-e7-no-approval.json")
+        if settings.get("merge_422"):
+            return 422, {"message": "injected merge refusal"}
+        if body.get("head_commit_id") != pr["head"]["sha"]:
+            return 409, {"message": "head out of date"}
+        with tempfile.TemporaryDirectory(prefix="fake-forgejo-merge-") as tmp:
+            def git(*args):
+                return self.git(model, *args, cwd=tmp)
+            git("clone", "--quiet", "--shared", "--no-checkout",
+                model["origin"], ".")
+            git("checkout", "--detach", self.branch(model, pr["base"]["ref"]))
+            if body["Do"] == "merge":
+                git("merge", "--no-ff", "--no-edit", pr["head"]["sha"])
+            elif body["Do"] == "squash":
+                git("merge", "--squash", pr["head"]["sha"])
+                git("commit", "-m", "Squash fixture PR")
+            else:
+                return 422, {"message": "unsupported merge method"}
+            if settings.get("wrong_merge_tree"):
+                (Path(tmp) / "unreviewed.txt").write_text("unreviewed\n")
+                git("add", "unreviewed.txt")
+                git("commit", "--amend", "--no-edit")
+            sha = git("rev-parse", "HEAD")
+            git("push", "origin", f"HEAD:refs/heads/{pr['base']['ref']}")
+            if (body["delete_branch_after_merge"]
+                    and not settings.get("leave_branch")):
+                git("push", "origin", f":refs/heads/{pr['head']['ref']}")
+        pr.update(merged=True, state="closed", merge_commit_sha=sha)
+        if settings.get("post_merge_head_discrepancy"):
+            pr["head"]["sha"] = pr["base"]["sha"]
+            pr["head"]["ref"] = "synthetic-pull-ref"
+        return 200, None
+
     def dispatch(
         self, model: dict, auth: str | None, body: object
     ) -> tuple[int, object]:
@@ -181,7 +251,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             return 200, result
         if parts[3] == "branch_protections":
-            status = settings.get("rules_status", 403)
+            status = (403 if settings.get("protection_403")
+                      else settings.get("rules_status", 403))
             return (
                 (200, settings.get("protection", {}))
                 if status == 200
@@ -190,6 +261,22 @@ class Handler(BaseHTTPRequestHandler):
                     {"message": "rules unavailable"},
                 )
             )
+        if parts[3] == "branches":
+            branch = parts[4]
+            if settings.get("branch_read_403"):
+                return 403, {"message": "branch unreadable"}
+            head = self.branch(model, branch)
+            if self.command == "DELETE":
+                if settings.get("branch_delete_403"):
+                    return 403, {"message": "branch deletion forbidden"}
+                if head is None:
+                    return 500, {"message": "absent branch deletion"}
+                if not settings.get("branch_delete_ignored"):
+                    self.git(model, "update-ref", "-d", f"refs/heads/{branch}")
+                return 204, None
+            if head is None:
+                return 404, {"message": "branch not found"}
+            return 200, {"name": branch, "commit": {"id": head}}
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "issues":
@@ -197,77 +284,145 @@ class Handler(BaseHTTPRequestHandler):
             pr = prs.get(number)
             if parts[5:] == ["comments"]:
                 target = pr or issue
-                return (
-                    (200, target.get("conversation", []))
-                    if target
-                    else (404, {"message": "issue not found"})
-                )
-            return (
-                (200, issue)
-                if issue
-                else (404, {"message": "issue not found"})
-            )
+                if target is None:
+                    return 404, {"message": "issue not found"}
+                if self.command == "POST":
+                    row = self.record(model, account, body["body"])
+                    target.setdefault("conversation", []).append(row)
+                    return 201, row
+                return 200, target.get("conversation", [])
+            return ((200, issue) if issue
+                    else (404, {"message": "issue not found"}))
         if parts[3] != "pulls":
             return 404, {"message": "unknown endpoint"}
         if number is None:
-            return 200, self.paged([pr_wire(p) for p in prs.values()], query)
+            if self.command == "POST":
+                number = str(max([int(k) for k in prs] + [0]) + 1)
+                row = self.record(model, account, body["body"])
+                row.update(
+                    number=int(number), title=body["title"],
+                    head={"ref": body["head"],
+                          "sha": self.branch(model, body["head"])},
+                    base={"ref": body["base"],
+                          "sha": self.branch(model, body["base"])},
+                    state="open", merged=False, merge_commit_sha=None,
+                    reviews=[], comments=[], conversation=[], threads=[],
+                )
+                prs[number] = row
+                return 201, pr_wire(row)
+            rows = [pr_wire(p) for p in prs.values()
+                    if query.get("state", ["all"])[0] in ("all", p["state"])]
+            return 200, self.paged(rows, query)
         if number not in prs:
             return 404, {"message": "pull request not found"}
         pr = prs[number]
+        if pr["state"] == "open":
+            pr["head"]["sha"] = self.branch(model, pr["head"]["ref"])
+            pr.setdefault("merge_base", pr["base"]["sha"])
+            pr["base"]["sha"] = self.branch(model, pr["base"]["ref"])
         if len(parts) == 5:
+            if pr["merged"] and settings.get("merge_confirmation_403"):
+                return 403, {"message": "merge confirmation unreadable"}
+            if self.command == "PATCH":
+                if settings.get("fail_mirror"):
+                    return 503, {"message": "injected Task mirror failure"}
+                if not settings.get("body_update_ignored"):
+                    pr["body"] = body["body"]
+                return 201, pr_wire(pr)
             return 200, pr_wire(pr)
         if parts[5:] == ["merge"] and self.command == "POST":
-            if settings.get("head_out_of_date_409"):
-                return 409, recording("guard/007-e7-wrong-approved-head.json")
-            return 405, recording("049-e7-no-approval.json")
+            return self.merge_pr(model, pr, body)
         if parts[5] != "reviews":
             return 404, {"message": "unknown endpoint"}
+        reviews = pr.setdefault("reviews", [])
+        if settings.get("pending_draft") and account == "reviewer":
+            if not any(r["id"] == 9999 for r in reviews):
+                draft = recording("035-e6-draft-before-submit.json")[-1]
+                draft.update(id=9999, user={"login": account},
+                             commit_id=pr["head"]["sha"])
+                reviews.append(draft)
         if len(parts) == 6:
             if self.command == "POST":
-                if (
-                    settings.get("author_approval_422")
-                    and account == pr["user"]["login"]
-                    and body.get("event") in ("APPROVED", "REQUEST_CHANGES")
-                ):
+                if settings.get("interrupt_before_review"):
+                    return 503, {"message": "interrupted before review"}
+                if (settings.get("author_approval_422")
+                        and account == pr["user"]["login"]
+                        and body.get("event") in (
+                            "APPROVED", "REQUEST_CHANGES",
+                        )):
                     name = (
-                        "042-e8-approved.json"
-                        if body["event"] == "APPROVED"
+                        "042-e8-approved.json" if body["event"] == "APPROVED"
                         else "043-e8-request_changes.json"
                     )
                     return 422, recording(name)
-                if settings.get("unknown_event_pending"):
-                    result = recording("044-e8-unknown_event.json")
-                    result.update(
-                        user={"login": account}, commit_id=body["commit_id"]
-                    )
-                    pr.setdefault("reviews", []).append(result)
-                    return 200, result
-                return 501, {"message": "fixture write not implemented"}
+                row = self.record(model, account, body.get("body", ""))
+                row.update(
+                    commit_id=body["commit_id"], dismissed=False,
+                    state=("PENDING" if settings.get("unknown_event_pending")
+                           else body["event"]), submitted_at=row["created_at"],
+                )
+                pending = next((r for r in reviews if r["state"] == "PENDING"
+                                and r["user"]["login"] == account), None)
+                if pending and settings.get("absorb_pending_draft"):
+                    row["id"] = pending["id"]
+                    pending.update(row)
+                else:
+                    reviews.append(row)
+                if settings.get("interrupt_after_body"):
+                    return 503, {
+                        "message": f"review {row['id']} stored; interrupted",
+                    }
+                return 200, review_wire(row)
             rows = [
-                review_wire(r)
-                for r in pr.get("reviews", [])
+                review_wire(r) for r in reviews
                 if r["state"] != "PENDING" or r["user"]["login"] == account
             ]
             if settings.get("request_review_rows"):
                 rows.insert(
-                    0, recording("015-setup-requested-reviews.json")[0]
+                    0, recording("015-setup-requested-reviews.json")[0],
                 )
-            if settings.get("pending_draft") and account == "reviewer":
-                draft = recording("035-e6-draft-before-submit.json")[-1]
-                draft.update(
-                    id=9999,
-                    user={"login": account},
-                    commit_id=pr["head"]["sha"],
-                )
-                rows.append(draft)
             return 200, self.paged(rows, query)
+        review_id = int(parts[6])
+        review = next((r for r in reviews if r["id"] == review_id), None)
+        if review is None:
+            return 404, {"message": "review not found"}
+        if len(parts) == 7:
+            if self.command == "DELETE":
+                if (review["state"] != "PENDING"
+                        or review["user"]["login"] != account):
+                    return 403, {"message": "draft not owned"}
+                reviews.remove(review)
+                pr["comments"] = [c for c in pr.get("comments", [])
+                                  if c["pull_request_review_id"] != review_id]
+                if review_id == 9999:
+                    settings["pending_draft"] = False
+                return 204, None
+            return 200, review_wire(review)
         if parts[7:] == ["comments"]:
-            rows = [
-                comment_wire(c, pr, settings)
-                for c in pr.get("comments", [])
-                if c["pull_request_review_id"] == int(parts[6])
-            ]
-            if settings.get("shuffle_comments") and rows:
+            if self.command == "POST":
+                fid = body["body"].split("]")[0].removeprefix("[")
+                if fid in settings.get("fail_roots", []):
+                    return 422, {"message": "injected root failure"}
+                start = body["new_position"]
+                row = self.record(model, account, body["body"])
+                row.update(
+                    pull_request_review_id=review_id, path=body["path"],
+                    position=start,
+                    line=start + body.get("extra_lines_count", 0),
+                    start_line=(
+                        start if body.get("extra_lines_count") else None
+                    ),
+                )
+                if settings.get("out_of_diff_accepted"):
+                    row["diff_hunk"] = ""
+                if not settings.get("drop_root"):
+                    pr.setdefault("comments", []).append(row)
+                return 200, comment_wire(row, pr, settings)
+            rows = [comment_wire(c, pr, settings)
+                    for c in pr.get("comments", [])
+                    if c["pull_request_review_id"] == review_id]
+            if (settings.get("shuffle_comments")
+                    or settings.get("random_comment_order")) and rows:
                 offset = len(model["calls"]) % len(rows)
                 rows = list(reversed(rows[offset:] + rows[:offset]))
             return 200, rows

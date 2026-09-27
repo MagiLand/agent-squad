@@ -100,6 +100,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("head", "base", "verdict", "body", "threads"):
         review.add_argument("--" + name, required=True)
     review.add_argument("--resume", type=positive_argument)
+    review.add_argument("--discard-draft", type=positive_argument)
     threads = command("thread", ("reply", "open", "resolve"))
     for name, p in threads.items():
         common(
@@ -166,7 +167,7 @@ def execute(args: argparse.Namespace) -> dict:
     forge = make_forge(repository, role)
     key = (args.group, getattr(args, "command", None))
     if key == ("thread", "resolve") and not forge.can_resolve_threads:
-        raise AgentSquadError("not supported on this forge")
+        raise AgentSquadError("thread resolve is not supported on this forge")
     if getattr(args, "forge_mutation", False) and not forge.can_mutate:
         raise AgentSquadError(forge.mutation_unavailable_message)
     if args.group == "review-worktree":
@@ -235,6 +236,7 @@ def execute(args: argparse.Namespace) -> dict:
             commands.read_file(args.body),
             decode_json(commands.read_file(args.threads)),
             args.resume,
+            args.discard_draft,
         )
     if key == ("thread", "reply"):
         return commands.reply_thread(

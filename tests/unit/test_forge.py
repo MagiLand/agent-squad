@@ -406,8 +406,10 @@ class ForgeBoundaryTests(unittest.TestCase):
                 '--finding', 'REV-1',
             ])
         self.assertEqual(result, 1)
-        self.assertEqual(errors.getvalue(),
-                         'error: not supported on this forge\n')
+        self.assertEqual(
+            errors.getvalue(),
+            'error: thread resolve is not supported on this forge\n',
+        )
 
     def test_unknown_resolution_is_null_and_never_settles_findings(
         self,
