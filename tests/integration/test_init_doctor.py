@@ -46,6 +46,20 @@ class InitDoctorTests(unittest.TestCase):
                            cwd=f.root, expected=1)
             self.assertEqual(result["error"], "error: " + expected.stderr.strip())
 
+    def test_discovery_preserves_newlines_in_repository_paths(self) -> None:
+        with ForgeFixture() as f:
+            renamed = f.repo.with_name("repository\ncontinued")
+            f.repo.rename(renamed)
+            f.repo = f.worktree = renamed
+            f.initialize()
+            f.candidate()
+            with patch.dict(os.environ, f.env, clear=True):
+                for start in (f.repo, f.worktree):
+                    with self.subTest(start=start):
+                        repository = load_initialized_repository(start)
+                        self.assertEqual(repository.root, start)
+                        self.assertEqual(repository.common, f.repo / ".git")
+
     def test_bare_repository_is_refused_before_configuration_writes(
         self,
     ) -> None:

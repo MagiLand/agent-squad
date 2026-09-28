@@ -410,8 +410,8 @@ class Repository:
 
 def discover_git_worktree(start: Path) -> Repository:
     result = run_git(
-        start, "rev-parse", "--is-bare-repository", "--show-toplevel",
-        "--git-common-dir",
+        start, "rev-parse", "--path-format=relative", "--is-bare-repository",
+        "--show-toplevel", "--git-common-dir",
     )
     # Git emits the bare flag before --show-toplevel fails in a bare repo.
     if result.stdout.split("\n", 1)[0] == "true":
@@ -419,7 +419,9 @@ def discover_git_worktree(start: Path) -> Repository:
     if result.returncode:
         raise AgentSquadError(result.stderr.strip() or result.stdout.strip())
     _, root_text, common_text = result.stdout.rstrip("\n").split("\n", 2)
-    root = Path(root_text).resolve()
+    # The top-level path is ./ or a sequence of ../ components, so a newline
+    # in the directory's name cannot be mistaken for a field separator.
+    root = (start / root_text).resolve()
     common = (start / common_text).resolve()
     worktrees = list_worktrees(root)
     if not worktrees:
