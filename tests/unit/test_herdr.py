@@ -31,9 +31,8 @@ class HandoffTemplateTests(unittest.TestCase):
     def test_result_sentences_are_verbatim(self) -> None:
         expected = {
             "approved": (
-                "Run agent-squad status --pr 43, report the approval to the"
-                " Developer, and do not merge without the Developer's"
-                " instruction."
+                "Run agent-squad status --pr 43 --json and follow its derived"
+                " next_action under the squad-implementer skill."
             ),
             "changes_requested": (
                 "Run agent-squad status --pr 43, evaluate every blocking"
@@ -51,6 +50,9 @@ class HandoffTemplateTests(unittest.TestCase):
                 f"AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=43 head={H}"
                 f" verdict={verdict}\n{sentence}",
             )
+        approved = result_message(43, H, "approved")
+        self.assertNotIn("do not merge", approved)
+        self.assertNotIn("Developer's instruction", approved)
 
     def test_stop_sentences_are_verbatim(self) -> None:
         for reason in (

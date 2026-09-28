@@ -438,6 +438,52 @@ class ReviewerTests(unittest.TestCase):
         )
         self.assertIn("Automated review has stopped;", stopped["message"])
 
+    def test_approved_handoff_defers_to_current_status(self) -> None:
+        from agent_squad.conventions import MERGE_INSTRUCTION
+
+        cases = (
+            ("optional findings", "address_findings", False, True, False, False),
+            ("standing instruction", "merge", False, False, True, False),
+            ("no instruction", "approved", False, False, False, False),
+            ("merge hold", "approved", False, False, True, True),
+            ("single identity", "await_human_approval", True, False, False, False),
+        )
+        for name, action, single, optional, standing, hold in cases:
+            with self.subTest(case=name), ForgeFixture() as f:
+                if single:
+                    f.single_identity()
+                else:
+                    f.initialize()
+                head = f.candidate()
+                f.create_pr()
+                if hold:
+                    review = Path(f.review_body).read_text()
+                    f.review_body = f.write(
+                        "review-with-hold.md",
+                        review + "\n## Merge hold\n\nItem 3: workflow authority.\n",
+                    )
+                f.review("approved", [finding("optional")] if optional else None)
+                if standing:
+                    f.decision(body=MERGE_INSTRUCTION)
+                message = f.cli(
+                    "handoff",
+                    "review-result",
+                    "--pr",
+                    "1",
+                    "--head",
+                    head,
+                    "--verdict",
+                    "approved",
+                )["message"]
+                self.assertEqual(
+                    message,
+                    f"AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=1 head={head}"
+                    " verdict=approved\n"
+                    "Run agent-squad status --pr 1 --json and follow its"
+                    " derived next_action under the squad-implementer skill.",
+                )
+                self.assertEqual(f.status()["next_action"], action)
+
     def test_live_probe_cleans_and_retains_unsafe_resources(self) -> None:
         f = self.f
         for blocked in (False, True):
