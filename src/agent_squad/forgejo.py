@@ -328,7 +328,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Forgejo:
-    version_label = "Forgejo version"
+    version_label = "forge client"
     credential_label = "token file"
     can_resolve_threads = False
     can_read_thread_resolution = True

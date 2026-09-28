@@ -162,7 +162,7 @@ RESOLVE_MUTATION = """mutation SquadResolve($id:ID!) {
 class GitHub:
     """One process-local forge identity. Mutation calls are never retried."""
 
-    version_label = "GitHub CLI"
+    version_label = "forge client"
     credential_label = None
     can_mutate = True
     mutation_unavailable_message = "not supported on this forge"

@@ -1,22 +1,23 @@
 # Agent Squad
 
 Agent Squad coordinates an Implementer and an independent Reviewer through
-Herdr. The GitHub pull request carries the Task, reviews, findings, dispositions,
+Herdr. The forge pull request carries the Task, reviews, findings, dispositions,
 Developer decisions, and approval. Each review identifies an exact commit and
 runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
 for the Developer's review before merging.
 
 The implementation follows the [v0.6.0 specification delta](docs/agent-squad-v0.6.0-spec.md)
-through Increment 2: GitHub supports dual and single identity; the Forgejo
-adapter belongs to later increments.
+through Increment 5: GitHub and Forgejo support repository setup and dual and
+single identity. The release trials remain part of Increment 6.
 See [workflow verification](docs/workflow-verification.md) for deterministic
 coverage and the live-trial evidence required before releasing v0.5.0.
 
 ## Install and prepare a repository
 
-Requirements: Python 3.11 or later, Git, GitHub CLI (`gh`), Herdr, Codex CLI,
+Requirements: Python 3.11 or later, Git, Herdr, Codex CLI,
 Claude Code, and the installed `code-review` skill. Both agent integrations in
-Herdr must be current. In the default dual-identity mode, authenticate `gh` as
+Herdr must be current. GitHub repositories also require GitHub CLI (`gh`).
+In the default dual-identity mode on GitHub, authenticate `gh` as
 two different GitHub accounts; the Reviewer account needs write permission on
 the consuming repository. Single-identity mode uses one shared agent account
 with push permission and a separate, person-operated approver account.
@@ -46,7 +47,7 @@ agent-squad doctor
 agent-squad doctor --live-reviewer
 ```
 
-`init` derives the GitHub repository and default branch from `origin`, creates
+`init` derives the repository and default branch from `origin`, creates
 schema 2 configuration at `.agent-squad/config.json`, and adds `.agent-squad/`
 and `.agent-squad-review/` to Git's local exclusions. It leaves the committed
 `.gitignore` alone. Existing configuration is validated and kept. Schema 1 is
@@ -65,6 +66,60 @@ Implementer is a warning. `--live-reviewer` additionally starts a disposable
 Reviewer, checks readiness and trust behavior, and closes it; it sends no
 review request. If startup needs a human answer, follow the reported pane and
 resource information. Never have an agent answer a trust or permission dialog.
+
+### Forgejo setup
+
+Use Forgejo 16.0.0 or later; the local setup checks were exercised on 16.0.3.
+Forgejo uses the standard-library HTTP client and does not require `gh` or `fj`.
+Prepare ordinary Git access to `origin` separately. An SSH alias supplies the
+repository path, not the API host: always pass the instance's explicit base URL.
+HTTPS is required except for `http://127.0.0.1`, `http://[::1]`, or
+`http://localhost` in local tests. Instance path prefixes are preserved;
+queries, fragments, and embedded credentials are refused.
+
+Create each role's token in Forgejo with exactly `write:repository`,
+`write:issue`, and `read:user`. Store it as one non-empty line in a regular
+`0600` file outside every worktree and the `.agent-squad` control directory.
+Do not use a symlink. The CLI stores only the path, checks the file on each
+configuration load and token read, and never creates or repairs token files.
+
+For two distinct agent accounts, grant the Reviewer repository write access:
+
+```bash
+agent-squad init --forge forgejo --base-url https://forge.example/instance \
+  --implementer-account <implementer-login> --reviewer-account <reviewer-login> \
+  --implementer-token-file /private/agent-squad/implementer.token \
+  --reviewer-token-file /private/agent-squad/reviewer.token
+agent-squad doctor
+```
+
+For one shared agent account with push access and an independent human approver,
+both roles may use the same file:
+
+```bash
+agent-squad init --forge forgejo --base-url https://forge.example/instance \
+  --implementer-account <agent-login> --reviewer-account <agent-login> \
+  --implementer-token-file /private/agent-squad/agent.token \
+  --reviewer-token-file /private/agent-squad/agent.token \
+  --identity-mode single --approver-account <human-login>
+agent-squad doctor
+```
+
+Repeat `--approver-account` for additional independent approvers. Dual mode
+requires an empty approver list. Existing configuration is validated and kept;
+rerunning `init` reports differences, including the forge and identity fields.
+After local validation, Forgejo initialization makes one API read of the
+repository with the Implementer token. API requests stay at the configured
+base URL; Git continues to use `origin`.
+
+Doctor reports `forge client` with the observed server version, verifies both
+token files and logins, reads repository access, and checks Reviewer write
+permission. In single mode it prints `single identity mode` for the skipped
+distinct-login and Reviewer-write checks, checks the shared account's push
+permission, and verifies every approver exists. Approver existence does not
+prove a review will count under branch protection. Herdr, skills, Git and
+orphan-resource checks apply to both forges. Doctor reports problems without
+repairing configuration or removing orphaned resources.
 
 ## Single identity with human approval
 

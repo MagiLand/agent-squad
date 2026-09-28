@@ -45,6 +45,16 @@ def forgejo_config():
 
 
 class URLConfigurationTests(unittest.TestCase):
+    def test_trailing_slash_normalized_without_losing_instance_prefix(
+        self,
+    ) -> None:
+        data = forgejo_config().to_dict()
+        data["forge"]["base_url"] = "https://forge.example/sub/path///"
+        self.assertEqual(Configuration.from_dict(data).forge.base_url,
+                         "https://forge.example/sub/path")
+        self.assertEqual(data["forge"]["base_url"],
+                         "https://forge.example/sub/path///")
+
     def test_valid_urls_and_kind_specific_fields(self) -> None:
         for url in (
             "https://forge.example/sub/path",

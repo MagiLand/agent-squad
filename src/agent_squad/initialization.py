@@ -5,7 +5,7 @@ no review state is stored locally.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 import json
 import os
@@ -160,7 +160,9 @@ class Configuration:
             path="reviewer",
         )
         if forge["kind"] == "forgejo":
-            validate_base_url(forge.get("base_url"))
+            forge = {
+                **forge, "base_url": validate_base_url(forge.get("base_url")),
+            }
             for label, role in (
                 ("implementer", implementer), ("reviewer", reviewer),
             ):
@@ -313,7 +315,7 @@ def validate_base_url(value: object) -> str:
         raise ConfigurationError(
             message + "HTTPS is required except on loopback"
         )
-    return value
+    return value.rstrip("/")
 
 
 def string_list(value: object, label: str) -> tuple[str, ...]:
@@ -462,9 +464,24 @@ def load_initialized_repository(start: Path) -> Repository:
             repository.root, repository.primary, repository.common, config
         )
         validate_roots(repository)
+        validate_token_files(repository)
         return repository
     except (OSError, ValueError, ConfigurationError) as error:
         raise ConfigurationError(f"{error}; run agent-squad init") from None
+
+
+def validate_token_files(repository: Repository) -> None:
+    """Validate both configured files locally before allowing any request."""
+    assert repository.configuration is not None
+    if repository.configuration.forge.kind == "forgejo":
+        from .forge import ForgeError
+        from .forgejo import read_token
+
+        for role in ("implementer", "reviewer"):
+            try:
+                read_token(repository, role)
+            except ForgeError as error:
+                raise ConfigurationError(str(error)) from None
 
 
 def remote_coordinates(url: str) -> tuple[str, str]:
@@ -507,6 +524,10 @@ def initialize_repository(
     base_branch: str | None = None,
     identity_mode: str = "dual",
     approver_accounts: tuple[str, ...] = (),
+    forge: str = "github",
+    base_url: str | None = None,
+    implementer_token_file: str | None = None,
+    reviewer_token_file: str | None = None,
 ) -> dict[str, object]:
     from .forge import make_forge
 
@@ -515,34 +536,33 @@ def initialize_repository(
     derived_owner, derived_repo = (
         (owner, repo) if owner and repo else remote_coordinates(url)
     )
-    # ls-remote reads the real default, even when origin/HEAD is not installed.
-    refs = git_output(
-        repository.root, "ls-remote", "--symref", "origin", "HEAD"
-    )
-    match = re.search(r"^ref: refs/heads/(.+)\tHEAD$", refs, re.MULTILINE)
-    branch = base_branch or (match.group(1) if match else "main")
     defaults = Configuration.from_dict(
         {
             "schema_version": 2,
             "forge": {
-                "kind": "github",
+                "kind": forge,
                 "owner": owner or derived_owner,
                 "repo": (repo or derived_repo).removesuffix(".git"),
+                **({"base_url": base_url} if base_url is not None else {}),
             },
             "implementer": {
                 "agent_name": "implementer",
                 "kind": "codex",
                 "forge_account": implementer_account,
+                **({"token_file": implementer_token_file}
+                   if implementer_token_file is not None else {}),
             },
             "reviewer": {
                 "kind": "claude",
                 "start_args": [],
                 "forge_account": reviewer_account,
+                **({"token_file": reviewer_token_file}
+                   if reviewer_token_file is not None else {}),
             },
             "developer_accounts": [],
             "identity_mode": identity_mode,
             "approver_accounts": list(approver_accounts),
-            "base_branch": branch,
+            "base_branch": base_branch or "main",
             "max_review_passes": 3,
             "merge_method": "merge",
             "worktree_root": ".agent-squad/worktrees",
@@ -563,6 +583,20 @@ def initialize_repository(
         )
     config = repository.configuration
     assert config is not None
+    validate_roots(repository)
+    validate_token_files(repository)
+    # No network operation precedes configuration and token-file validation.
+    # Git uses the configured origin; API reads use only the explicit API URL.
+    refs = git_output(
+        repository.root, "ls-remote", "--symref", "origin", "HEAD"
+    )
+    match = re.search(r"^ref: refs/heads/(.+)\tHEAD$", refs, re.MULTILINE)
+    defaults = replace(
+        defaults, base_branch=base_branch or (match[1] if match else "main"),
+    )
+    if not exists:
+        config = defaults
+        repository = replace(repository, configuration=config)
     remote_branch = git_output(
         repository.root,
         "ls-remote",

@@ -240,6 +240,8 @@ class Handler(BaseHTTPRequestHandler):
             return 404, {"message": "repository not found"}
         if account in settings.get("repository_denied", []):
             return 403, {"message": "repository unreadable: " + auth}
+        if settings.get("repository_missing"):
+            return 404, {"message": "repository not found"}
         if len(parts) == 3:
             result = recording("009-setup-repository-author.json")
             permission = settings.get("permission", "write")
