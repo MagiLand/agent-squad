@@ -1,5 +1,6 @@
 """Every deterministic prerequisite, including recorded trial failures."""
 
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -10,8 +11,8 @@ from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
 from agent_squad.doctor import diagnose
-from agent_squad.herdr import HerdrClient
-from agent_squad.initialization import git_output
+from agent_squad.herdr import HerdrClient, HerdrError
+from agent_squad.initialization import AgentKind, git_output
 
 
 class DoctorTests(unittest.TestCase):
@@ -32,6 +33,69 @@ class DoctorTests(unittest.TestCase):
         config = json.loads(path.read_text())
         config.update(values)
         path.write_text(json.dumps(config))
+
+    def test_discovery_probes_run_once_and_integration_runs_per_role(
+        self,
+    ) -> None:
+        self.assertTrue(self.f.cli("doctor")["ok"])
+        calls = Counter(tuple(call) for call in self.f.herdr_model()["calls"])
+        for command in (
+            ("--version",), ("api", "schema", "--json"),
+            *(args for args, _ in HerdrClient._HELP_CHECKS),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(calls[command], 1)
+        self.assertEqual(calls[("integration", "status")], 2)
+        # One discovery snapshot and the separate, fresh orphan inventory.
+        self.assertEqual(calls[("api", "snapshot")], 2)
+
+    def test_shared_contract_failure_preserves_both_role_rows(self) -> None:
+        self.f.env["FAKE_HERDR_SCHEMA_MISSING"] = "agent.get"
+        result = self.f.cli("doctor", expected=1)
+        for role in ("Reviewer", "Implementer"):
+            self.assertEqual(
+                self.diagnostic(
+                    result, f"Herdr {role} discovery and integration",
+                )["detail"],
+                "installed Herdr schema is missing required method "
+                "contract agent.get -> AgentTarget",
+            )
+        calls = Counter(tuple(call) for call in self.f.herdr_model()["calls"])
+        self.assertEqual(calls[("--version",)], 1)
+        self.assertEqual(calls[("api", "schema", "--json")], 1)
+        self.assertEqual(calls[("integration", "status")], 0)
+
+    def test_shared_discovery_preserves_per_role_failure_precedence(
+        self,
+    ) -> None:
+        roles = {"Reviewer": AgentKind.CLAUDE, "Implementer": AgentKind.CODEX}
+        with patch.dict(os.environ, self.f.env, clear=True):
+            client = HerdrClient(self.f.repo)
+            original = client._run
+
+            def run(arguments, **kwargs):
+                result = original(arguments, **kwargs)
+                if arguments == ("agent", "start", "--help"):
+                    result.stdout = result.stdout.replace(
+                        "codex, claude", "codex",
+                    )
+                if arguments == ("worktree", "--help"):
+                    result.stdout = ""
+                return result
+
+            with patch.object(client, "_run", side_effect=run):
+                shared = client.discover_roles(roles)
+                for role, kind in roles.items():
+                    with self.subTest(role=role):
+                        with self.assertRaises(HerdrError) as single:
+                            client.discover(kind, role=role)
+                        self.assertEqual(
+                            str(shared[role]), str(single.exception),
+                        )
+            self.assertIn(
+                "does not advertise Reviewer kind", str(shared["Reviewer"]),
+            )
+            self.assertIn("required syntax", str(shared["Implementer"]))
 
     def test_all_checks_pass_without_mutating_user_resources(self) -> None:
         f = self.f

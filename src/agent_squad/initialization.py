@@ -384,6 +384,8 @@ class Repository:
     primary: Path
     common: Path
     configuration: Configuration | None = None
+    # Startup facts only; later decisions must call list_worktrees afresh.
+    discovered_worktrees: tuple[Worktree, ...] = ()
 
     @property
     def control_root(self) -> Path:
@@ -407,18 +409,32 @@ class Repository:
 
 
 def discover_git_worktree(start: Path) -> Repository:
-    if git_output(start, "rev-parse", "--is-bare-repository") != "false":
+    result = run_git(
+        start, "rev-parse", "--path-format=relative", "--is-bare-repository",
+        "--show-toplevel", "--git-common-dir",
+    )
+    # Git emits the bare flag before --show-toplevel fails in a bare repo.
+    if result.stdout.split("\n", 1)[0] == "true":
         raise AgentSquadError("a non-bare Git worktree is required")
-    root = Path(git_output(start, "rev-parse", "--show-toplevel")).resolve()
-    common = Path(git_output(root, "rev-parse", "--git-common-dir"))
-    common = (root / common).resolve()
+    if result.returncode:
+        raise AgentSquadError(result.stderr.strip() or result.stdout.strip())
+    _, root_text, common_text = result.stdout.rstrip("\n").split("\n", 2)
+    # The top-level path is ./ or a sequence of ../ components, so a newline
+    # in the directory's name cannot be mistaken for a field separator.
+    root = (start / root_text).resolve()
+    common = (start / common_text).resolve()
     worktrees = list_worktrees(root)
     if not worktrees:
         raise AgentSquadError("cannot discover the primary worktree")
-    return Repository(root, worktrees[0].root, common)
+    return Repository(
+        root, worktrees[0].root, common, discovered_worktrees=worktrees,
+    )
 
 
-def validate_roots(repository: Repository, *, writable: bool = False) -> None:
+def validate_roots(
+    repository: Repository, *, writable: bool = False,
+    worktrees: tuple[Worktree, ...] | None = None,
+) -> None:
     config = repository.configuration
     assert config is not None
     roots = [
@@ -430,7 +446,9 @@ def validate_roots(repository: Repository, *, writable: bool = False) -> None:
             "worktree_root and scratch_root must not overlap"
         )
     for root in roots:
-        for worktree in list_worktrees(repository.root):
+        for worktree in (
+            list_worktrees(repository.root) if worktrees is None else worktrees
+        ):
             if root.is_relative_to(worktree.root) and not root.is_relative_to(
                 worktree.root / CONTROL_DIRECTORY_NAME
             ):
@@ -460,10 +478,8 @@ def load_initialized_repository(start: Path) -> Repository:
                 repository.configuration_path.read_text(encoding="utf-8")
             )
         )
-        repository = Repository(
-            repository.root, repository.primary, repository.common, config
-        )
-        validate_roots(repository)
+        repository = replace(repository, configuration=config)
+        validate_roots(repository, worktrees=repository.discovered_worktrees)
         validate_token_files(repository)
         return repository
     except (OSError, ValueError, ConfigurationError) as error:
