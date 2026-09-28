@@ -398,18 +398,25 @@ def diagnose(
         add("approver accounts", "pass", "empty as required in dual mode")
 
     client = herdr_client or HerdrClient(repository.root)
+    discoveries = client.discover_roles({
+        "Reviewer": config.reviewer.kind,
+        "Implementer": config.implementer.kind,
+    })
+
+    def discovery(role: str) -> object:
+        value = discoveries[role]
+        if isinstance(value, HerdrError):
+            raise value
+        return value
+
     herdr_ok = check(
         "Herdr Reviewer discovery and integration",
-        lambda: client.discover(
-            config.reviewer.kind,
-            role="Reviewer",
-        ))
+        lambda: discovery("Reviewer"),
+    )
     herdr_ok &= check(
         "Herdr Implementer discovery and integration",
-        lambda: client.discover(
-            config.implementer.kind,
-            role="Implementer",
-        ))
+        lambda: discovery("Implementer"),
+    )
     if herdr_ok:
         try:
             client.inspect_agent(config.implementer.agent_name,

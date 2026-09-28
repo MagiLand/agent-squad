@@ -184,73 +184,117 @@ class HerdrClient:
     ) -> HerdrInstallation:
         """Validate schema, live protocol, commands, and agent integration."""
 
-        executable = self._resolve_executable()
-        version_result = self._run(("--version",))
-        version = version_result.stdout.strip()
-        if not version:
-            raise HerdrError("herdr --version returned no version text")
+        result = self.discover_roles({role: agent_kind})[role]
+        if isinstance(result, HerdrError):
+            raise result
+        return result
 
-        schema_result = self._run(("api", "schema", "--json"))
-        schema = self._decode_object(
-            schema_result.stdout,
-            "Herdr API schema",
-        )
-        schema_version = schema.get("schema_version")
-        protocol = schema.get("protocol")
-        if type(schema_version) is not int or schema_version < 1:
-            raise HerdrError(
-                "Herdr API schema has no supported schema_version"
+    def discover_roles(
+        self, roles: dict[str, AgentKind],
+    ) -> dict[str, HerdrInstallation | HerdrError]:
+        """Check one live contract, retaining each role's first failure.
+
+        Results belong to this discovery only. No later operation reuses them.
+        """
+        results: dict[str, HerdrInstallation | HerdrError] = {}
+        if not roles:
+            return results
+        try:
+            executable = self._resolve_executable()
+            version_result = self._run(("--version",))
+            version = version_result.stdout.strip()
+            if not version:
+                raise HerdrError("herdr --version returned no version text")
+
+            schema_result = self._run(("api", "schema", "--json"))
+            schema = self._decode_object(
+                schema_result.stdout,
+                "Herdr API schema",
             )
-        if type(protocol) is not int or protocol < 1:
-            raise HerdrError("Herdr API schema has no valid protocol number")
-        self._validate_schema_contract(schema)
-
-        for arguments, expected_fragments in self._HELP_CHECKS:
-            output = self._run(arguments).stdout
-            if arguments == ("agent", "start", "--help"):
-                kinds = re.search(
-                    r"--kind\b.*?\[possible values:\s*([^]]+)\]",
-                    output,
-                    re.DOTALL,
-                )
-                supported = (
-                    {value.strip() for value in kinds.group(1).split(",")}
-                    if kinds
-                    else set()
-                )
-                if agent_kind.value not in supported:
-                    raise HerdrError(
-                        f"installed Herdr does not advertise {role} kind "
-                        f"{agent_kind.value!r} in agent start help"
-                    )
-            absent = [
-                fragment
-                for fragment in expected_fragments
-                if fragment not in output
-            ]
-            if absent:
-                command = " ".join(("herdr", *arguments))
+            schema_version = schema.get("schema_version")
+            protocol = schema.get("protocol")
+            if type(schema_version) is not int or schema_version < 1:
                 raise HerdrError(
-                    f"{command} does not expose required syntax: "
-                    f"{', '.join(absent)}"
+                    "Herdr API schema has no supported schema_version"
+                )
+            if type(protocol) is not int or protocol < 1:
+                raise HerdrError(
+                    "Herdr API schema has no valid protocol number"
+                )
+            self._validate_schema_contract(schema)
+
+            for arguments, expected_fragments in self._HELP_CHECKS:
+                output = self._run(arguments).stdout
+                if arguments == ("agent", "start", "--help"):
+                    kinds = re.search(
+                        r"--kind\b.*?\[possible values:\s*([^]]+)\]",
+                        output,
+                        re.DOTALL,
+                    )
+                    supported = (
+                        {value.strip() for value in kinds.group(1).split(",")}
+                        if kinds
+                        else set()
+                    )
+                    for role, agent_kind in roles.items():
+                        if agent_kind.value not in supported:
+                            results[role] = HerdrError(
+                                "installed Herdr does not advertise "
+                                f"{role} kind "
+                                f"{agent_kind.value!r} in agent start help"
+                            )
+                    if len(results) == len(roles):
+                        return results
+                absent = [
+                    fragment
+                    for fragment in expected_fragments
+                    if fragment not in output
+                ]
+                if absent:
+                    command = " ".join(("herdr", *arguments))
+                    raise HerdrError(
+                        f"{command} does not expose required syntax: "
+                        f"{', '.join(absent)}"
+                    )
+
+            snapshot = self._response_result(
+                self._run(("api", "snapshot")),
+                expected_type="session_snapshot",
+            )
+            snapshot_value = snapshot.get("snapshot")
+            if not isinstance(snapshot_value, dict):
+                raise HerdrError(
+                    "Herdr session snapshot has no snapshot object"
+                )
+            live_protocol = snapshot_value.get("protocol")
+            if live_protocol != protocol:
+                raise HerdrError(
+                    "installed Herdr schema protocol does not match the live "
+                    f"session: schema {protocol}, live {live_protocol!r}"
+                )
+            if not isinstance(snapshot_value.get("version"), str):
+                raise HerdrError(
+                    "Herdr session snapshot has no version string"
                 )
 
-        snapshot = self._response_result(
-            self._run(("api", "snapshot")),
-            expected_type="session_snapshot",
-        )
-        snapshot_value = snapshot.get("snapshot")
-        if not isinstance(snapshot_value, dict):
-            raise HerdrError("Herdr session snapshot has no snapshot object")
-        live_protocol = snapshot_value.get("protocol")
-        if live_protocol != protocol:
-            raise HerdrError(
-                "installed Herdr schema protocol does not match the live "
-                f"session: schema {protocol}, live {live_protocol!r}"
-            )
-        if not isinstance(snapshot_value.get("version"), str):
-            raise HerdrError("Herdr session snapshot has no version string")
+        except HerdrError as error:
+            for role in roles:
+                results.setdefault(role, error)
+            return results
 
+        installation = HerdrInstallation(executable, version, protocol)
+        for role, agent_kind in roles.items():
+            if role in results:
+                continue
+            try:
+                self._check_integration(agent_kind, role=role)
+            except HerdrError as error:
+                results[role] = error
+            else:
+                results[role] = installation
+        return results
+
+    def _check_integration(self, agent_kind: AgentKind, *, role: str) -> None:
         integration = self._run(("integration", "status")).stdout
         role_line = next(
             (
@@ -268,12 +312,6 @@ class HerdrClient:
                 f"Herdr integration for {role} kind "
                 f"{agent_kind.value!r} is not current"
             )
-
-        return HerdrInstallation(
-            executable=executable,
-            version=version,
-            protocol=protocol,
-        )
 
     def _validate_schema_contract(self, schema: dict[str, object]) -> None:
         schemas = schema.get("schemas")

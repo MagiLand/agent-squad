@@ -1,12 +1,51 @@
 """Prerequisite checks and configuration discovery across worktrees."""
 
 import json
+import os
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
+from agent_squad.initialization import load_initialized_repository
 
 
 class InitDoctorTests(unittest.TestCase):
+    def test_loading_repository_reads_git_startup_facts_once(self) -> None:
+        with ForgeFixture() as f:
+            f.initialize()
+            f.candidate()
+            nested = f.worktree / "nested directory"
+            nested.mkdir()
+            for start in (f.repo, f.worktree, nested):
+                with (
+                    self.subTest(start=start),
+                    patch.dict(os.environ, f.env, clear=True),
+                    patch("subprocess.Popen", wraps=subprocess.Popen) as popen,
+                ):
+                    repository = load_initialized_repository(start)
+                git_calls = [
+                    call.args[0] for call in popen.call_args_list
+                    if call.args[0][0] == "git"
+                ]
+                self.assertEqual(
+                    [args[1] for args in git_calls], ["rev-parse", "worktree"],
+                )
+                self.assertEqual(repository.primary, f.repo)
+                self.assertEqual(repository.common, f.repo / ".git")
+                self.assertEqual(
+                    repository.root, f.repo if start == f.repo else f.worktree,
+                )
+
+    def test_outside_git_preserves_discovery_error(self) -> None:
+        with ForgeFixture() as f:
+            expected = f.run([
+                "git", "rev-parse", "--is-bare-repository",
+            ], cwd=f.root)
+            result = f.cli("issue", "view", "--issue", "1",
+                           cwd=f.root, expected=1)
+            self.assertEqual(result["error"], "error: " + expected.stderr.strip())
+
     def test_bare_repository_is_refused_before_configuration_writes(
         self,
     ) -> None:
