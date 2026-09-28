@@ -145,12 +145,13 @@ class Handler(BaseHTTPRequestHandler):
         return result.stdout.strip()
 
     def branch(self, model: dict, branch: str) -> str | None:
-        rows = self.git(
-            model, "for-each-ref", "--format=%(refname) %(objectname)",
-            f"refs/heads/{branch}",
-        ).splitlines()
-        return next((r.split()[1] for r in rows
-                     if r.split()[0] == f"refs/heads/{branch}"), None)
+        if self._branch_refs is None:
+            rows = self.git(
+                model, "for-each-ref", "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ).splitlines()
+            self._branch_refs = dict(row.split() for row in rows)
+        return self._branch_refs.get(f"refs/heads/{branch}")
 
     @staticmethod
     def record(model: dict, account: str, body: str) -> dict:
@@ -195,9 +196,11 @@ class Handler(BaseHTTPRequestHandler):
                 git("commit", "--amend", "--no-edit")
             sha = git("rev-parse", "HEAD")
             git("push", "origin", f"HEAD:refs/heads/{pr['base']['ref']}")
+            self._branch_refs = None
             if (body["delete_branch_after_merge"]
                     and not settings.get("leave_branch")):
                 git("push", "origin", f":refs/heads/{pr['head']['ref']}")
+                self._branch_refs = None
         pr.update(merged=True, state="closed", merge_commit_sha=sha)
         if settings.get("post_merge_head_discrepancy"):
             pr["head"]["sha"] = pr["base"]["sha"]
@@ -207,6 +210,8 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(
         self, model: dict, auth: str | None, body: object
     ) -> tuple[int, object]:
+        # A handler can serve multiple requests on a persistent connection.
+        self._branch_refs: dict[str, str] | None = None
         settings = model.get("settings", {})
         if settings.get("redirect_to"):
             return 302, {"message": "redirect refused"}
@@ -275,6 +280,7 @@ class Handler(BaseHTTPRequestHandler):
                     return 500, {"message": "absent branch deletion"}
                 if not settings.get("branch_delete_ignored"):
                     self.git(model, "update-ref", "-d", f"refs/heads/{branch}")
+                    self._branch_refs = None
                 return 204, None
             if head is None:
                 return 404, {"message": "branch not found"}
