@@ -49,7 +49,8 @@ class CIGroupingTests(unittest.TestCase):
     ) -> None:
         workflow = (PROJECT_ROOT / ".github/workflows/test.yml").read_text(
             encoding="utf-8")
-        # This guard deliberately requires explicit jobs and one-line commands,
+        # This guard requires explicit jobs, an inline macOS group matrix,
+        # and one-line commands,
         # rather than attempting to parse general YAML or GitHub expressions.
         jobs_text = workflow.split("\njobs:\n", 1)[1]
         blocks = re.split(r"^  ([\w-]+):\n", jobs_text, flags=re.MULTILINE)
@@ -73,10 +74,13 @@ class CIGroupingTests(unittest.TestCase):
                     else [],
                 )
                 groups = re.findall(
-                    r"^      - run: python scripts/run-test-group ([\w-]+)$",
+                    r"^      - run: python scripts/run-test-group (.+)$",
                     block, re.MULTILINE,
                 )
-                self.assertEqual(groups, [] if name == "macos" else [name])
+                self.assertEqual(
+                    groups,
+                    ["${{ matrix.group }}"] if name == "macos" else [name],
+                )
                 self.assertIn(
                     "    runs-on: " + (
                         "macos-latest" if name == "macos" else "ubuntu-26.04"
@@ -94,7 +98,19 @@ class CIGroupingTests(unittest.TestCase):
                     "      - run: python -m pip install 'setuptools>=77' .\n",
                     block,
                 )
-        self.assertIn("      - run: make test PYTHON=python\n", jobs["macos"])
+        macos = jobs["macos"]
+        matrices = re.findall(
+            r"^    strategy:\n      fail-fast: false\n      matrix:\n"
+            r"        group: \[([^\]\n]+)\]$",
+            macos, re.MULTILINE,
+        )
+        self.assertEqual(len(matrices), 1, "Expected one macOS group matrix")
+        self.assertEqual(
+            Counter(group.strip() for group in matrices[0].split(",")),
+            Counter(self.groups.keys()),
+            "The macOS matrix must run every group exactly once",
+        )
+        self.assertIn("    timeout-minutes: 15\n", macos)
         self.assertIn("  pull_request:\n", workflow)
         self.assertIn("  push:\n    branches: [main]\n", workflow)
         self.assertRegex(workflow, r"(?m)^  schedule:\n    - cron: '.+'$")

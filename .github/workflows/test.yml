@@ -73,10 +73,14 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: macos-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [doctor, reviewer, forge-commands, smoke, rest, main-only]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install 'setuptools>=77' .
-      - run: make test PYTHON=python
+      - run: python scripts/run-test-group ${{ matrix.group }}
