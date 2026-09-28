@@ -44,7 +44,10 @@ class InitDoctorTests(unittest.TestCase):
             ], cwd=f.root)
             result = f.cli("issue", "view", "--issue", "1",
                            cwd=f.root, expected=1)
-            self.assertEqual(result["error"], "error: " + expected.stderr.strip())
+            self.assertEqual(
+                result["error"],
+                "error: " + " ".join(expected.stderr.strip().splitlines()),
+            )
 
     def test_discovery_preserves_newlines_in_repository_paths(self) -> None:
         with ForgeFixture() as f:
