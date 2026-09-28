@@ -3,8 +3,6 @@
 
 import json
 import os
-from pathlib import Path
-import subprocess
 import sys
 
 args = sys.argv[1:]
@@ -40,10 +38,11 @@ results = [
 ]
 missing = os.environ.get("FAKE_HERDR_SCHEMA_MISSING")
 model_path = os.environ.get("FAKE_HERDR_MODEL")
-model = (
-    json.loads(Path(model_path).read_text())
-    if model_path and Path(model_path).exists()
-    else {
+if model_path and os.path.exists(model_path):
+    with open(model_path) as stream:
+        model = json.load(stream)
+else:
+    model = {
         "workspaces": [],
         "tabs": [],
         "panes": [],
@@ -52,14 +51,14 @@ model = (
         "next_id": 1,
         "settings": {},
     }
-)
 settings = model["settings"]
 model["calls"].append(args)
 
 
 def save():
     if model_path:
-        Path(model_path).write_text(json.dumps(model))
+        with open(model_path, "w") as stream:
+            stream.write(json.dumps(model))
 
 
 def output(value):
@@ -284,6 +283,8 @@ elif args[:2] == ["workspace", "close"]:
     forget(args[2])
     response("ok")
 elif args[:2] == ["worktree", "remove"]:
+    import subprocess
+
     if settings.get("remove_failure"):
         failure("remove_failed", "fixture remove failed")
     ident = option("--workspace")

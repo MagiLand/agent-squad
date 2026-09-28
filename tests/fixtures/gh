@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """Scriptable GitHub fixture. Tokens in this model are exclusively fake."""
 
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
-import subprocess
 import sys
-import tempfile
-from urllib.parse import parse_qs, unquote, urlsplit
 
-model_path = Path(os.environ["FAKE_FORGE_MODEL"])
-model = json.loads(model_path.read_text())
+model_path = os.environ["FAKE_FORGE_MODEL"]
+with open(model_path) as stream:
+    model = json.load(stream)
 settings = model.setdefault("settings", {})
 arguments = sys.argv[1:]
 token = os.environ.get("GH_TOKEN")
@@ -28,7 +24,8 @@ model.setdefault("calls", []).append(
 
 
 def save():
-    model_path.write_text(json.dumps(model, indent=2) + "\n")
+    with open(model_path, "w") as stream:
+        stream.write(json.dumps(model, indent=2) + "\n")
 
 
 def output(value):
@@ -44,6 +41,8 @@ def fail(message, status=422):
 
 
 def record(body, author=None):
+    from datetime import datetime, timedelta, timezone
+
     model["next_id"] = model.get("next_id", 100) + 1
     ident = model["next_id"]
     date = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=ident)
@@ -56,6 +55,8 @@ def record(body, author=None):
 
 
 def remote_sha(branch):
+    import subprocess
+
     result = subprocess.run(
         ["git", "rev-parse", f"refs/heads/{branch}"],
         cwd=model["origin"],
@@ -208,6 +209,8 @@ if endpoint == "graphql":
             }
         }
     )
+from urllib.parse import parse_qs, unquote, urlsplit
+
 parsed = urlsplit(endpoint)
 query = parse_qs(parsed.query)
 parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
@@ -239,6 +242,8 @@ if kind == "collaborators" and parts[5:] == ["permission"]:
         "user": {"login": number},
     }))
 if kind == "git" and parts[4] in ("ref", "refs"):
+    import subprocess
+
     if method == "GET" and settings.get("branch_read_403"):
         fail("branch unreadable", 403)
     branch = "/".join(parts[6:])
@@ -315,6 +320,9 @@ if len(parts) == 5:
         pr["body"] = payload["body"]
     output(pr)
 if parts[5] == "merge":
+    import subprocess
+    import tempfile
+
     if method != "PUT":
         fail("merge requires PUT", 400)
     if settings.get("merge_refusal"):
@@ -347,7 +355,8 @@ if parts[5] == "merge":
             git("merge", "--squash", pr["head"]["sha"])
             git("commit", "-m", "Squash fixture PR")
         if settings.get("wrong_merge_tree"):
-            (Path(temporary) / "unreviewed.txt").write_text("unreviewed\n")
+            with open(os.path.join(temporary, "unreviewed.txt"), "w") as stream:
+                stream.write("unreviewed\n")
             git("add", "unreviewed.txt")
             git("commit", "--amend", "--no-edit")
         merge_commit = git("rev-parse", "HEAD")

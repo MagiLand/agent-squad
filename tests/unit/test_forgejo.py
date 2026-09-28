@@ -6,6 +6,7 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -15,7 +16,7 @@ from tests.unit.test_conventions import config
 
 add_src_to_path()
 
-from tests.fixtures.fake_forgejo import recording
+from tests.fixtures.fake_forgejo import Handler, recording
 from agent_squad.initialization import (
     Configuration,
     ConfigurationError,
@@ -720,3 +721,99 @@ class MutationContractTests(unittest.TestCase):
         self.assertIsNone(comments[0].line)
         self.assertEqual(comments[1].line, 2)
         self.assertEqual(comments[2].in_reply_to_id, 11)
+
+
+class FixtureBranchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.handler = Handler.__new__(Handler)
+        self.handler.server = SimpleNamespace(path_prefix="")
+        self.handler.path = "/api/v1/repos/MagiLand/trial/pulls/1"
+        self.handler.command = "GET"
+        self.refs = {"main": "a" * 40, "topic": "b" * 40}
+        self.handler.git = Mock(side_effect=self.git)
+        self.model = {
+            "origin": "/synthetic/origin.git",
+            "settings": {},
+            "prs": {"1": {
+                "state": "open", "merged": False,
+                "head": {"ref": "topic", "sha": self.refs["topic"]},
+                "base": {"ref": "main", "sha": self.refs["main"]},
+            }},
+        }
+
+    def git(self, model: dict, *args: str, **kwargs: object) -> str:
+        if args[0] == "for-each-ref":
+            self.assertEqual(args[2], "refs/heads/")
+            return "\n".join(f"refs/heads/{k} {v}"
+                             for k, v in self.refs.items())
+        if args[0] == "update-ref":
+            self.refs.pop(args[2].removeprefix("refs/heads/"))
+        if args[0] == "rev-parse":
+            return "c" * 40
+        if args[0] == "push":
+            source, branch = args[2].split(":")
+            name = branch.removeprefix("refs/heads/")
+            if source:
+                self.refs[name] = "c" * 40
+            else:
+                del self.refs[name]
+        return ""
+
+    def dispatch(self, body: object = None) -> tuple[int, object]:
+        return self.handler.dispatch(
+            self.model, "token fake-token-developer", body,
+        )
+
+    def lookups(self) -> int:
+        return sum(call.args[1] == "for-each-ref"
+                   for call in self.handler.git.call_args_list)
+
+    def test_open_pr_uses_one_lookup_and_next_request_refreshes(self) -> None:
+        status, first = self.dispatch()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.lookups(), 1)
+        self.assertEqual(first["base"]["sha"], "a" * 40)
+        self.refs["main"] = "d" * 40
+        status, second = self.dispatch()
+        self.assertEqual(status, 200)
+        self.assertEqual(second["base"]["sha"], "d" * 40)
+        self.assertEqual(self.lookups(), 2)
+        self.assertIsNone(self.handler.branch(self.model, "missing"))
+        self.assertEqual(self.lookups(), 2)
+
+    def test_branch_delete_invalidates_snapshot(self) -> None:
+        self.handler.path = "/api/v1/repos/MagiLand/trial/branches/topic"
+        self.handler.command = "DELETE"
+        self.assertEqual(self.dispatch(), (204, None))
+        self.assertIsNone(self.handler.branch(self.model, "topic"))
+        self.assertEqual(self.lookups(), 2)
+
+    def test_ignored_delete_preserves_snapshot(self) -> None:
+        self.model["settings"]["branch_delete_ignored"] = True
+        self.handler.path = "/api/v1/repos/MagiLand/trial/branches/topic"
+        self.handler.command = "DELETE"
+        self.assertEqual(self.dispatch(), (204, None))
+        self.assertEqual(self.handler.branch(self.model, "topic"), "b" * 40)
+        self.assertEqual(self.lookups(), 1)
+
+    def test_merge_push_invalidates_snapshot_with_or_without_deletion(
+        self,
+    ) -> None:
+        for delete in (False, True):
+            with self.subTest(delete=delete):
+                self.setUp()
+                self.handler.path += "/merge"
+                self.handler.command = "POST"
+                self.assertEqual(self.dispatch({
+                    "Do": "merge", "head_commit_id": "b" * 40,
+                    "delete_branch_after_merge": delete,
+                }), (200, None))
+                self.assertEqual(self.lookups(), 1)
+                self.assertEqual(
+                    self.handler.branch(self.model, "main"), "c" * 40,
+                )
+                self.assertEqual(
+                    self.handler.branch(self.model, "topic"),
+                    None if delete else "b" * 40,
+                )
+                self.assertEqual(self.lookups(), 2)
