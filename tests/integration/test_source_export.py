@@ -42,5 +42,12 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             evidence = json.loads(result.stdout)
             self.assertTrue(evidence["ok"])
-            self.assertEqual([s["step"] for s in evidence["steps"]],
-                             list(range(1, 14)))
+            self.assertEqual(
+                [(s["forge"], s["identity_mode"]) for s in evidence["scenarios"]],
+                [("github", "dual"), ("forgejo", "single")],
+            )
+            for scenario in evidence["scenarios"]:
+                self.assertTrue(scenario["ok"])
+                self.assertEqual([s["step"] for s in scenario["steps"]],
+                                 list(range(1, 13)))
+            self.assertTrue(evidence["github_single"]["ok"])

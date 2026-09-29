@@ -3,8 +3,8 @@
 import unittest
 from unittest.mock import patch
 
-from tests.smoke_workflow import run_smoke
-from tests.forge_support import ForgeFixture
+from tests.smoke_workflow import run_smoke, run_scenario
+from tests.forge_support import ForgeFixture, ForgejoFixture
 
 
 class SmokeTests(unittest.TestCase):
@@ -12,8 +12,15 @@ class SmokeTests(unittest.TestCase):
         result = run_smoke()
         self.assertTrue(result["ok"])
         self.assertIn("removed", result["cleanup"])
-        self.assertEqual([s["step"] for s in result["steps"]],
-                         list(range(1, 14)))
+        self.assertEqual(
+            [(s["forge"], s["identity_mode"]) for s in result["scenarios"]],
+            [("github", "dual"), ("forgejo", "single")],
+        )
+        for scenario in result["scenarios"]:
+            self.assertTrue(scenario["ok"])
+            self.assertEqual([s["step"] for s in scenario["steps"]],
+                             list(range(1, 13)))
+        self.assertTrue(result["github_single"]["ok"])
 
     def test_failed_command_removes_the_owned_temporary_root(self) -> None:
         fixtures = []
@@ -24,11 +31,14 @@ class SmokeTests(unittest.TestCase):
             self.addCleanup(fixture.temporary.cleanup)
             raise RuntimeError("injected CLI failure")
 
-        with patch.object(ForgeFixture, "cli", fail_command):
-            with self.assertRaisesRegex(RuntimeError, "injected CLI failure"):
-                run_smoke()
-        self.assertEqual(len(fixtures), 1)
-        self.assertFalse(fixtures[0].root.exists())
+        for fixture_type in (ForgeFixture, ForgejoFixture):
+            with self.subTest(forge=fixture_type.__name__):
+                with patch.object(fixture_type, "cli", fail_command):
+                    with self.assertRaisesRegex(RuntimeError,
+                                                "injected CLI failure"):
+                        run_scenario(fixture_type)
+                self.assertFalse(fixtures[-1].root.exists())
+        self.assertEqual(len(fixtures), 2)
 
     def test_failed_cleanup_reports_the_retained_root(self) -> None:
         fixture = ForgeFixture()
