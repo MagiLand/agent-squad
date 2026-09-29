@@ -73,12 +73,12 @@ A parent row governs only the parent's own introductory text; each subsection's 
 | 7.8 Budget | Retained | — |
 | 7.9 Derived state | Superseded | §7.9: capabilities, human decisions, draft gate, ordering |
 | 7.10 Approval validity and merge | Superseded | §7.10: approval conditions and guarded cleanup |
-| 8 Herdr Handoff | Retained | §8: #53 found no basis for a new wait |
+| 8 Herdr Handoff | Amended | §8.5: status-directed approved handoff; no new wait |
 | 8.1 Reviewer name, worktree, and scratch directory | Retained | — |
 | 8.2 Herdr surface | Retained | — |
 | 8.3 Request: `reviewer launch` | Retained | — |
 | 8.4 Blocked detection | Retained | — |
-| 8.5 Result and stop: `handoff review-result` and `handoff stopped` | Retained | — |
+| 8.5 Result and stop: `handoff review-result` and `handoff stopped` | Amended | §8.5: status-directed approved handoff |
 | 8.6 Adopt: `reviewer adopt` | Retained | — |
 | 8.7 Lost notification | Retained | — |
 | 8.8 Asynchronous handoff discipline | Retained | — |
@@ -432,9 +432,36 @@ The `rebase` merge method remains unsupported. A failed integration check retain
 
 ## 8. Herdr Handoff
 
-All of v0.5.0 §8, including §8.3 and §8.4, is **retained**.
+The subsections of v0.5.0 §8, including §8.3 and §8.4, are **retained** except for §8.5, amended below.
 
-*Informative.* The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the fixed handoff lines or the asynchronous discipline.
+*Informative.* The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the tagged handoff lines or the asynchronous discipline. The amended §8.5 changes only the `approved` instruction sentence and directs the Implementer to current status in every approval scenario.
+
+### 8.5 Result and stop: `handoff review-result` and `handoff stopped`
+
+The Reviewer posts on the PR first and sends second.
+
+`agent-squad handoff review-result --pr <N> --head <full-sha> --verdict <verdict>` verifies that a tagged review by the Reviewer identity with that head and verdict exists on the PR, then sends the Implementer agent named in the configuration one line plus one sentence:
+
+```text
+AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=<N> head=<full-sha> verdict=<verdict>
+```
+
+The sentence is fixed per verdict:
+
+- `approved`: `Run agent-squad status --pr <N> --json and follow its derived next_action under the squad-implementer skill.`
+- `changes_requested`: `Run agent-squad status --pr <N>, evaluate every blocking thread on the PR, and record dispositions before requesting another review.`
+- `needs_human`: `Run agent-squad status --pr <N> and relay the decision required to the Developer.`
+
+The notification carries no merge authority: it does not grant, withdraw, or replace an instruction. The Implementer reads current authoritative status at the time of acting and follows its derived `next_action` under the skill; an approved verdict does not bypass findings, CI, human approval, stop, or merge-hold checks.
+
+`agent-squad handoff stopped --pr <N> --head <full-sha> --reason <reason>` verifies that a `STOPPED` comment with that head and reason exists on the PR, then sends:
+
+```text
+AGENT_SQUAD/0.5.0 STOPPED pr=<N> head=<full-sha> reason=<reason>
+Automated review has stopped; run agent-squad status --pr <N> and relay the reason and the remaining problems to the Developer.
+```
+
+Both commands target the Implementer by the configured name through `herdr agent prompt` without `--wait`. If the Implementer agent is not found or the prompt fails, the command fails with the Herdr error; the review or stop already exists on the PR and is discovered through `status` (§8.7). The Reviewer does not retry blindly (§13.2).
 
 ## 9. Configuration (Schema Version 2)
 
