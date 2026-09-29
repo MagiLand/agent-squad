@@ -415,6 +415,38 @@ class StandingMergeTests(unittest.TestCase):
         self.assertEqual(state["next_action"], "address_findings")
         self.assertTrue(state["approval"]["approved"])
 
+    def test_pr92_disposition_then_developer_withdrawal(self) -> None:
+        # Notifications are not Snapshot authority. This history tests the
+        # recorded protocol events, not who actually requested a decision.
+        history = snapshot(
+            reviews=(review(10, findings="REV-1 [optional] Finding"),),
+            comments=(root(severity="optional"),),
+            conversation=(decision(2, body=MERGE_INSTRUCTION),))
+        state = derive_state(history)
+        self.assertEqual(state["next_action"], "address_findings")
+        self.assertTrue(state["approval"]["approved"])
+        self.assertIsNone(state["merge_hold"])
+        instruction = state["merge_instruction"]
+        self.assertIsNotNone(instruction)
+
+        history = replace(history, comments=(*history.comments, reply(
+            12, "DISPOSITION rejected\nNot pursued: optional polish.")))
+        state = derive_state(history)
+        self.assertEqual(state["next_action"], "merge")
+        self.assertTrue(state["approval"]["approved"])
+        self.assertIsNone(state["merge_hold"])
+        self.assertEqual(state["merge_instruction"], instruction)
+
+        # Model a separate Developer request recorded by the Implementer.
+        history = replace(history, conversation=(*history.conversation, decision(
+            13, body=MERGE_WITHDRAWAL +
+            '\n\nThe Developer instructed:\n> Withdraw merge authority.')))
+        state = derive_state(history)
+        self.assertEqual(state["next_action"], "approved")
+        self.assertTrue(state["approval"]["approved"])
+        self.assertIsNone(state["merge_hold"])
+        self.assertIsNone(state["merge_instruction"])
+
     def test_merge_hold_section_requires_content_and_correct_position(
         self,
     ) -> None:
