@@ -69,8 +69,8 @@ def result_message(pr: int, head: str, verdict: str) -> str:
     render_line("review", pr=pr, head=head, base=head, verdict=verdict)
     sentences = {
         "approved": (
-            f"Run agent-squad status --pr {pr}, report the approval to the"
-            " Developer, and do not merge without the Developer's instruction."
+            f"Run agent-squad status --pr {pr} --json and follow its derived"
+            " next_action under the squad-implementer skill."
         ),
         "changes_requested": (
             f"Run agent-squad status --pr {pr}, evaluate every blocking thread"

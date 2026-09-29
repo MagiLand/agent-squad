@@ -356,6 +356,69 @@ class ReviewerTests(unittest.TestCase):
         self.f.herdr_settings(remove_failure=False)
         self.lifecycle("close")
 
+    def test_approved_handoff_defers_to_current_status_in_every_scenario(
+        self,
+    ) -> None:
+        f = self.f
+        original_model = f.read_model()
+        config_path = f.repo / ".agent-squad/config.json"
+        original_config = config_path.read_text()
+        original_review = Path(f.review_body).read_text()
+        expected_message = (
+            f"AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=1 head={self.head}"
+            " verdict=approved\n"
+            "Run agent-squad status --pr 1 --json and follow its derived"
+            " next_action under the squad-implementer skill."
+        )
+        scenarios = (
+            ("optional findings", "address_findings"),
+            ("standing instruction", "merge"),
+            ("no instruction", "approved"),
+            ("merge hold", "approved"),
+            ("single identity", "await_human_approval"),
+        )
+        for scenario, next_action in scenarios:
+            with self.subTest(scenario=scenario):
+                f.save_model(original_model)
+                config_path.write_text(original_config)
+                Path(f.review_body).write_text(original_review)
+                if scenario == "single identity":
+                    config = json.loads(original_config)
+                    config["identity_mode"] = "single"
+                    config["approver_accounts"] = ["human"]
+                    config["reviewer"]["forge_account"] = "developer"
+                    config_path.write_text(json.dumps(config))
+                    f.settings(human_accounts=["human"])
+                if scenario == "merge hold":
+                    body = Path(f.review_body)
+                    body.write_text(
+                        body.read_text()
+                        + "\n## Merge hold\n\nItem 3: merge rules.\n"
+                    )
+                f.review(
+                    "approved",
+                    [finding("optional")]
+                    if scenario == "optional findings" else [],
+                )
+                if scenario != "no instruction":
+                    f.decision(body=(
+                        "Standing merge instruction: merge when approved."
+                    ))
+                before = len(f.herdr_model()["calls"])
+                result = f.cli(
+                    "handoff", "review-result", "--pr", "1",
+                    "--head", self.head, "--verdict", "approved",
+                )
+                self.assertEqual(result["message"], expected_message)
+                prompts = [
+                    call for call in f.herdr_model()["calls"][before:]
+                    if call[:2] == ["agent", "prompt"]
+                ]
+                self.assertEqual(prompts, [
+                    ["agent", "prompt", "implementer", expected_message],
+                ])
+                self.assertEqual(f.status()["next_action"], next_action)
+
     def test_handoffs_require_matching_authoritative_record_and_send_once(
         self,
     ) -> None:
