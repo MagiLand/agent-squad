@@ -83,6 +83,15 @@ review, human action and integration identities recorded:
 | 3: Local Forgejo | Disposable Podman image `codeberg.org/forgejo/forgejo:16.0.3`, digest recorded; single session, fresh Reviewer per pass, human request-changes/fix, interrupted publication killed after the body and resumed once, human-approved merge and independent cleanup checks. |
 | 4: VPS Forgejo | Developer-announced readiness, HTTPS, SSH pushes, opposite agent direction, human colleague approval and branch protection; a forge refusal before human approval and success afterward. No agent receives administrator credentials or changes instance settings. |
 
+For issue #61, the Developer approved temporary provisioning of the disposable
+VPS instance and a split approval test: a separate direct API probe tests
+server protection, while an agent-approved supplemental PR tests the CLI's
+missing-human-approval refusal. Both probes close without merging; the real
+trial requires human approval and an explicit merge instruction. The
+[evidence record](verification/2026-09-29-issue-61.md) records these amendments,
+the original unexecuted negative command, and the completed trial results.
+These trial-specific permissions do not change the default setup rules.
+
 The API experiments in [#54](verification/2026-09-25-issue-54.md) and setup
 checks in [#60](verification/2026-09-27-issue-60.md) use a real 16.0.3 container,
 but do not establish trials 3 or 4. Record the container digest, actual server
@@ -102,6 +111,9 @@ prerequisite misconfiguration found by a trial needs a doctor check and test.
 [Issue #61 evidence](verification/2026-09-29-issue-61.md) tracks v0.6.0
 release readiness. In-progress or missing trials remain explicit blockers;
 a package version or successful deterministic smoke is not release approval.
+Both Forgejo trials completed and their disposable instances were removed.
+The observed Herdr Reviewer startup defect remains unresolved and release
+acceptance is pending its verified remedy or an explicit Developer disposition.
 The committed [#57 record](verification/2026-09-26-issue-57.md#live-trials)
 defers trial 2 to follow-up evidence; it does not claim that trial completed.
 
