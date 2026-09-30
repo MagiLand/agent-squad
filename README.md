@@ -152,8 +152,8 @@ and names the approvers. The Implementer reports “approved by the agent at
 `<sha>`, waiting for approval from `<logins>`” and goes idle without polling.
 Post human reviews by hand, then tell the Implementer to “check the PR”. A human
 request-changes is reported with the human login and reviewed commit to the
-Developer for an instruction; it does not
-become a protocol finding or prevent a fresh agent review. Existing decisions,
+Developer for an instruction; it does not become a protocol finding or prevent
+a fresh agent review. Existing decisions,
 stops, review budgets, CI checks, and merge holds continue to apply. Configure
 branch protection separately if the forge must enforce these requirements.
 
@@ -355,7 +355,7 @@ Herdr; they never call models or a real forge. Source-export smoke runs both
 forges without `.git`; CI reserves that duplicate export run for main/nightly.
 `make doctor` checks your real configured environment. Live reviews, decisions,
 and merges are separate evidence in [workflow verification](docs/workflow-verification.md).
-Agent Squad's own PRs retain the manual review pipeline until the live trials
-pass and the Developer switches the pipeline.
+Agent Squad's own implementation PRs use this review loop. Release acceptance
+remains a separate Developer decision based on the recorded live-trial evidence.
 
 Licensed under [Apache 2.0](LICENSE).

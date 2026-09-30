@@ -35,15 +35,18 @@ class SmokeTests(unittest.TestCase):
                 env={**os.environ, "TMPDIR": str(root)},
                 text=True,
                 capture_output=True,
-                # The twelve-step run exceeded three minutes on a busy host.
-                timeout=300,
+                # Two forge scenarios plus the GitHub single regression need
+                # more time on busy hosts; leave room in the 10-minute CI job
+                # for setup, packaging, and cleanup after this bounded wait.
+                timeout=480,
                 shell=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             evidence = json.loads(result.stdout)
             self.assertTrue(evidence["ok"])
             self.assertEqual(
-                [(s["forge"], s["identity_mode"]) for s in evidence["scenarios"]],
+                [(s["forge"], s["identity_mode"])
+                 for s in evidence["scenarios"]],
                 [("github", "dual"), ("forgejo", "single")],
             )
             for scenario in evidence["scenarios"]:

@@ -81,7 +81,7 @@ review, human action and integration identities recorded:
 | 1: GitHub regression | The merged Increment 1 runtime drives #57 through the normal loop; later PRs continue the regression. |
 | 2: GitHub single identity | Shared agent account and separate person-operated approver; human request-changes, fix, fresh review, replacement approval, verified merge. |
 | 3: Local Forgejo | Disposable Podman image `codeberg.org/forgejo/forgejo:16.0.3`, digest recorded; single session, fresh Reviewer per pass, human request-changes/fix, interrupted publication killed after the body and resumed once, human-approved merge and independent cleanup checks. |
-| 4: VPS Forgejo | Developer-announced readiness, HTTPS, SSH pushes, opposite agent direction, human colleague approval and branch protection; a forge refusal before human approval and success afterward. No agent receives administrator credentials or changes instance settings. |
+| 4: VPS Forgejo | HTTPS, SSH pushes, opposite agent direction, human colleague approval and branch protection; server and CLI refusals before human approval, then the real trial's approved merge. Issue #61 used temporary administration for provisioning under the recorded amendment; review-loop agents used the scoped non-administrator account. |
 
 For issue #61, the Developer approved temporary provisioning of the disposable
 VPS instance and a split approval test: a separate direct API probe tests
@@ -98,8 +98,9 @@ but do not establish trials 3 or 4. Record the container digest, actual server
 version, merge method, whether branch deletion was explicit or already done,
 and whether issue GET and PR-body PATCH were exercised. Keep unexercised
 paths marked unverified. Two-account Forgejo is fake-tested but has no release
-live trial; it needs its own follow-up issue. Specification consolidation also
-needs a separate follow-up issue.
+live trial; [#98](https://github.com/MagiLand/agent-squad/issues/98) tracks that
+trial. [#99](https://github.com/MagiLand/agent-squad/issues/99) tracks standalone
+specification consolidation.
 
 Any deliberately seeded input or failed notification must be identified as
 scripted in the evidence. Human Task approval, decisions, continuation, and
@@ -112,8 +113,9 @@ prerequisite misconfiguration found by a trial needs a doctor check and test.
 release readiness. In-progress or missing trials remain explicit blockers;
 a package version or successful deterministic smoke is not release approval.
 Both Forgejo trials completed and their disposable instances were removed.
-The observed Herdr Reviewer startup defect remains unresolved and release
-acceptance is pending its verified remedy or an explicit Developer disposition.
+The observed Herdr Reviewer startup defect is tracked in
+[#100](https://github.com/MagiLand/agent-squad/issues/100). The Developer chose
+separate tracking and kept release acceptance pending a verified fix.
 The committed [#57 record](verification/2026-09-26-issue-57.md#live-trials)
 defers trial 2 to follow-up evidence; it does not claim that trial completed.
 
@@ -135,5 +137,6 @@ Earlier increment evidence remains useful within its stated scope:
 
 Each dated record follows the seven sections of §16.5 and lists private raw
 evidence archive digests. Preserve unrelated checkouts and resources. Archiving
-the trial repository, closing the milestone, and publishing the release, and scheduling the supervised client pilot are
-Developer actions after the release PR merges.
+the trial repository, closing the milestone, publishing the release, and
+scheduling the supervised client pilot are Developer actions after the release
+PR merges.
