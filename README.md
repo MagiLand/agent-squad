@@ -24,6 +24,13 @@ the consuming repository. Single-identity mode uses one shared agent account
 with push permission and a separate, person-operated approver account.
 The Python package has no runtime dependencies outside the standard library.
 
+Codex Reviewer delivery after startup is [verified on Herdr client and server
+0.9.3 with Codex CLI 0.159.2](docs/verification/2026-09-30-issue-100.md).
+Check the running server with `herdr status server`: updating the client does
+not replace a running server. Resolve first-launch folder trust as a person
+before expecting unattended reviews. This evidence does not establish a
+minimum Herdr version, and `doctor` does not enforce a version cutoff.
+
 Install from this checkout into your Python environment:
 
 ```bash
