@@ -269,6 +269,12 @@ elif args[:2] == ["agent", "start"]:
         w = workspace(pane["workspace_id"])
         w["pane_count"] += 1
         model["panes"].append({**pane, "pane_id": pane["pane_id"] + "-extra"})
+    if settings.get("start_blocked_success"):
+        # Deliberately off contract: exercise launch's defensive guard even
+        # though real Herdr does not report a successful blocked start.
+        value.update(agent_status="blocked", launch_pending=False)
+        pane.update(agent_status="blocked")
+        response("agent_started", agent=value, argv=args)
     if value["agent_status"] == "blocked":
         failure("agent_not_ready", "fixture startup needs a human")
     if value["agent_status"] != "idle":

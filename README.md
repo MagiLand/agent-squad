@@ -248,8 +248,14 @@ the Reviewer in its review worktree and to the Implementer elsewhere.
 
 If the workflow appears stalled, tell the Implementer **“check the PR”**.
 It reconstructs the next action through `status`; terminal recollection is
-not the authority. On blocked Reviewer startup, answer the reported dialog
-in person, then instruct the Implementer to use `reviewer adopt --pr <N>`.
+not the authority. When startup reports `agent_not_ready` (exit 3) and retains
+the Reviewer name, answer the dialog in person, then instruct the Implementer
+to use `reviewer adopt --pr <N>`. In the [issue #100 trial](docs/verification/2026-09-30-issue-100.md),
+Herdr 0.9.3 classified Codex's trust prompt as `unknown`; startup timed out
+and removed the name, so adoption could not recover it. After the person
+answered trust and exited Codex to the shell, guarded `reviewer close`
+succeeded and a fresh launch worked. Retain resources when cleanup refuses;
+do not resend the request or bypass the occupant check.
 
 If GitHub rejects a batch review, the full findings are published before
 individual roots are attempted. `status` reports missing roots and the review

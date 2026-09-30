@@ -306,7 +306,7 @@ class ReviewerTests(unittest.TestCase):
         self,
     ) -> None:
         for kind, settings in product(("codex", "claude"), (
-            {"start_state": "blocked"},
+            {"start_blocked_success": True},
             {"start_not_ready": True},
             {"prompt_state": "blocked"},
         )):
@@ -317,6 +317,7 @@ class ReviewerTests(unittest.TestCase):
                 path.write_text(json.dumps(config))
                 self.f.herdr_settings(
                     start_state="idle",
+                    start_blocked_success=False,
                     start_not_ready=False,
                     prompt_state="working",
                     **{},
@@ -331,6 +332,7 @@ class ReviewerTests(unittest.TestCase):
                 model["agents"][0]["agent_status"] = "idle"
                 model["settings"].update(
                     start_not_ready=False,
+                    start_blocked_success=False,
                     start_state="idle",
                     prompt_state="working",
                 )

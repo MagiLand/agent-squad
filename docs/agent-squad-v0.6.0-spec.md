@@ -438,6 +438,8 @@ The subsections of v0.5.0 §8, including §8.4, are **retained** except for §§
 
 *Informative.* Issue #100 identifies a separate startup contract defect: a Codex request passed as a startup argument can keep the Reviewer working through Herdr's startup deadline, causing timeout and loss of its managed name. Section 8.3 delivers the request after idle startup instead. This does not change the #53 trust behavior, adopt/close ownership checks, or Herdr timeout. Supervised live evidence is required before this fix can close the release-acceptance blocker; only the Developer decides release acceptance.
 
+*Informative.* The #53 observation was a Claude startup. In the [#100 Codex trial](verification/2026-09-30-issue-100.md), Herdr 0.9.3 instead reported a folder-trust prompt as `unknown`, then timed out and removed the Reviewer name; `reviewer adopt` could not recover that unnamed agent. A person answered trust and exited Codex to the shell before guarded `reviewer close` and a fresh launch succeeded. This observed limitation, including `doctor --live-reviewer` recovery for an unnamed agent, remains outside the delivery fix; it does not authorize weaker identity checks or automatic trust handling.
+
 ### 8.3 Request: `reviewer launch`
 
 `agent-squad reviewer launch --pr <N>` performs, in order:
