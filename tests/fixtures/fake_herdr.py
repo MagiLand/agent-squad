@@ -249,11 +249,17 @@ elif args[:2] == ["agent", "start"]:
         settings["start_busy"] -= 1
         failure("agent_pane_busy", "fixture shell is still starting")
     pane = next(p for p in model["panes"] if p["pane_id"] == option("--pane"))
+    if settings.get("start_failure"):
+        failure("agent_start_failed", "fixture agent exited during startup")
+    state = settings.get("start_state", "idle")
+    if any(a.startswith("$squad-reviewer ") for a in args):
+        state = settings.get("initial_request_state", state)
     value = {
         **pane,
         "name": args[2],
         "agent": option("--kind"),
-        "agent_status": settings.get("start_state", "idle"),
+        "agent_status": state,
+        "launch_pending": True,
     }
     if settings.get("start_not_ready"):
         value["agent_status"] = "blocked"
@@ -263,8 +269,14 @@ elif args[:2] == ["agent", "start"]:
         w = workspace(pane["workspace_id"])
         w["pane_count"] += 1
         model["panes"].append({**pane, "pane_id": pane["pane_id"] + "-extra"})
-    if settings.get("start_not_ready"):
+    if value["agent_status"] == "blocked":
         failure("agent_not_ready", "fixture startup needs a human")
+    if value["agent_status"] != "idle":
+        # The selected state persists through the startup deadline. Model the
+        # timeout immediately, without a wall-clock wait or a real agent.
+        value.update(name=None, launch_pending=False)
+        failure("timeout", "timed out waiting for agent startup")
+    value["launch_pending"] = False
     response("agent_started", agent=value, argv=args)
 elif args[:2] == ["agent", "prompt"]:
     if settings.get("prompt_failure"):

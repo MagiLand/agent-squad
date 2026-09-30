@@ -503,20 +503,18 @@ def launch(
             config.implementer.agent_name,
         )
         delivery = REVIEW_DELIVERY[config.reviewer.kind]
-        args = config.reviewer.start_args
-        if delivery == "initial_prompt":
-            args += (line,)
-        elif delivery != "agent_prompt":
+        if delivery != "agent_prompt":
             raise HerdrError(
                 f"unsupported review delivery mechanism: {delivery}"
             )
-        started = start_reviewer(worktree, client, resource, args)
+        started = start_reviewer(
+            worktree, client, resource, config.reviewer.start_args
+        )
         if verify_agent(started.get("agent"), worktree, resource) == "blocked":
             raise RetainedError(
                 "Reviewer is blocked; answer in its pane, then adopt"
             )
-        if delivery == "agent_prompt":
-            client.prompt(worktree.name, line)
+        client.prompt(worktree.name, line)
         agent = client.inspect_agent(
             worktree.name,
             config.reviewer.kind,
