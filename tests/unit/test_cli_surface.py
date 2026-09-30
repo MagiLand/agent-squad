@@ -10,7 +10,7 @@ add_src_to_path()
 
 from agent_squad import __version__
 from agent_squad.cli import parser
-from agent_squad.conventions import TAG
+from agent_squad.conventions import PROTOCOL_VERSION, TAG
 
 
 class CliSurfaceTests(unittest.TestCase):
@@ -41,5 +41,6 @@ class CliSurfaceTests(unittest.TestCase):
         self.assertEqual(leaves(parser()), expected)
 
     def test_release_and_protocol_versions(self) -> None:
-        self.assertEqual(__version__, "0.5.0")
-        self.assertEqual(TAG, "AGENT_SQUAD/0.5.0")
+        self.assertEqual(__version__, "0.6.0")
+        self.assertEqual(PROTOCOL_VERSION, "0.5.0")
+        self.assertEqual(TAG, f"AGENT_SQUAD/{PROTOCOL_VERSION}")

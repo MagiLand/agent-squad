@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the isolated forge scenario from a checkout or a source export."""
+"""Run both isolated forge scenarios from a checkout or a source export."""
 
 import argparse
 import json

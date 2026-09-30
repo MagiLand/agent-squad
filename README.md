@@ -7,10 +7,11 @@ runs in a fresh detached worktree. Starting an issue authorizes routine work thr
 for the Developer's review before merging.
 
 The implementation follows the [v0.6.0 specification delta](docs/agent-squad-v0.6.0-spec.md)
-through Increment 5: GitHub and Forgejo support repository setup and dual and
-single identity. The release trials remain part of Increment 6.
+for GitHub and Forgejo, with dual and single identity modes. The package
+version is `0.6.0`; the protocol tag remains `AGENT_SQUAD/0.5.0`.
+Release readiness depends on the recorded checks and human-operated trials.
 See [workflow verification](docs/workflow-verification.md) for deterministic
-coverage and the live-trial evidence required before releasing v0.5.0.
+coverage and the live-trial evidence required before releasing v0.6.0.
 
 ## Install and prepare a repository
 
@@ -31,7 +32,7 @@ agent-squad --version
 agent-squad skill install
 ```
 
-The version is `0.5.0`. Skill installation copies the two role skills into
+The version is `0.6.0`. Skill installation copies the two role skills into
 `~/.agents/skills` for Codex and links them from `~/.claude/skills` for Claude
 Code. `--codex` selects the copies only; `--claude` selects the links only.
 An existing differing file or link is refused. Inspect the difference before
@@ -83,7 +84,9 @@ Create each role's token in Forgejo with exactly `write:repository`,
 Do not use a symlink. The CLI stores only the path, checks the file on each
 configuration load and token read, and never creates or repairs token files.
 
-For two distinct agent accounts, grant the Reviewer repository write access:
+Dual mode on Forgejo is implemented and covered by the fake server, but its
+live review loop is **unverified**. For two distinct agent accounts, grant the
+Reviewer repository write access:
 
 ```bash
 agent-squad init --forge forgejo --base-url https://forge.example/instance \
@@ -145,10 +148,12 @@ An older approval never becomes valid again after a later dismissed review.
 Agent and human approvals may arrive in either order.
 
 When only human approval is missing, `status` reports `await_human_approval`
-and names the approvers. The Implementer reports and goes idle without polling.
+and names the approvers. The Implementer reports “approved by the agent at
+`<sha>`, waiting for approval from `<logins>`” and goes idle without polling.
 Post human reviews by hand, then tell the Implementer to “check the PR”. A human
-request-changes is reported to the Developer for an instruction; it does not
-become a protocol finding or prevent a fresh agent review. Existing decisions,
+request-changes is reported with the human login and reviewed commit to the
+Developer for an instruction; it does not become a protocol finding or prevent
+a fresh agent review. Existing decisions,
 stops, review budgets, CI checks, and merge holds continue to apply. Configure
 branch protection separately if the forge must enforce these requirements.
 
@@ -173,7 +178,7 @@ say “Let's start on issue #42” (use your issue number).
    remain advisory; each receives a disposition.
 5. Decisions and stops come back to you and your answer is recorded on the PR.
    The Implementer and Reviewer apply the
-   [review-before-merge rule](docs/agent-squad-v0.5.0-spec.md#122-squad-implementer-mandatory-rules)
+   [review-before-merge rule](docs/agent-squad-v0.6.0-spec.md#122-squad-implementer-mandatory-rules)
    to the whole PR: security, irreversible changes, authority changes, new
    dependencies or CI authority, publication or incompatible interfaces, and
    unresolved scope or design choices require your review before merging.
@@ -191,7 +196,7 @@ hold applies. Neither standing instruction nor withdrawal lifts a stop or
 answers a pending human decision.
 
 A successful Herdr handoff ends the sending agent's step. It becomes idle;
-there is no polling of the receiving agent. The Reviewer posts on GitHub
+there is no polling of the receiving agent. The Reviewer posts on the configured forge
 before notifying the Implementer, so a missing notification loses no review.
 The CLI does not orchestrate CI or certify that checks ran; any repository
 review-readiness policy must be satisfied separately for the exact revision.
@@ -213,7 +218,7 @@ followed by the same detailed state.
 
 ## PR conventions and recovery
 
-The [PR conventions](docs/agent-squad-v0.5.0-spec.md#7-pull-request-conventions)
+The [PR conventions](docs/agent-squad-v0.6.0-spec.md#7-pull-request-conventions)
 define the exact grammar. In summary:
 
 - PR bodies contain `## Task` and `## Implementation report`.
@@ -229,8 +234,9 @@ define the exact grammar. In summary:
   instructions and withdrawals cannot provide that continuation. A new commit or Task amendment invalidates the earlier approval.
 
 Forge writes require `--as implementer` or `--as reviewer`, subject to the
-command's role. Tokens are selected only for the child process; the CLI does
-not change `gh`'s active account or expose a token. Read commands default to
+command's role. GitHub tokens are selected only for the child process; Forgejo tokens are
+read from the configured role files for authenticated HTTP requests. The CLI
+does not change `gh`'s active account or expose a token. Read commands default to
 the Reviewer in its review worktree and to the Implementer elsewhere.
 
 If the workflow appears stalled, tell the Implementer **“check the PR”**.
@@ -242,8 +248,23 @@ If GitHub rejects a batch review, the full findings are published before
 individual roots are attempted. `status` reports missing roots and the review
 ID. `thread open` can restore a finding from PR data, and
 `review post --resume <review-id>` completes that publication without creating
-a second review. See the [command table](docs/agent-squad-v0.5.0-spec.md#102-command-table)
+a second review. See the [command table](docs/agent-squad-v0.6.0-spec.md#102-command-table)
 for the required arguments; repeating plain `review post` creates a new review.
+
+Forgejo posts the review body first, followed by each finding root. An empty
+`diff_hunk` in the root read-back leaves the finding unanchored; `thread open`
+recovers it at a valid location. Interrupted publication uses the same
+`review post --resume <review-id>` flow and original body/thread files.
+`thread resolve` is unsupported on Forgejo and returns exit 1. Reviewer
+verification replies settle findings without changing forge thread state.
+
+A pending review draft on the posting account blocks Forgejo `review post`
+with exit 4 and the `pending_draft` gate. Inspect the named draft before
+explicitly discarding it. Reissue the complete publication command with
+`--discard-draft <review-id>` (and `--resume <published-review-id>` when
+recovering an interrupted publication). Only the selected account's exact
+pending draft can be deleted; unrelated or submitted reviews are refused.
+The flag is unsupported on GitHub. Never discard a person's work implicitly.
 
 | Exit | Meaning | Next step |
 | --- | --- | --- |
@@ -252,6 +273,30 @@ for the required arguments; repeating plain `review post` creates a new review.
 | 2 | Command usage error | Correct the arguments. |
 | 3 | Resources retained or a partial step needs attention | Inspect the reported paths/pane; preserve them until resolved. |
 | 4 | Protocol gate refused the action | Address the stated decision, budget, disposition, or approval gate. |
+
+## Command reference
+
+Use `agent-squad <command> --help` for all required arguments. The
+[full command table](docs/agent-squad-v0.6.0-spec.md#102-command-table) defines
+role restrictions and forge-specific behavior; this inventory covers every
+shipped command path.
+
+| Commands | Purpose |
+| --- | --- |
+| `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
+| `issue view` | Read the governing issue, comments, labels, and configured paths. |
+| `pr create`, `pr report` | Publish the Task and implementation report; update the report on an open PR. |
+| `pr head`, `pr reviews`, `status` | Read exact revision identities, reviews, and derived workflow state. |
+| `pr merge` | Merge an approved revision and verify integration and owned cleanup. |
+| `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
+| `reviewer launch`, `reviewer adopt`, `reviewer close` | Start a fresh Reviewer, adopt after a human startup answer, or close owned resources. |
+| `review post` | Publish or resume the formal review and findings. |
+| `thread open`, `thread reply`, `thread resolve` | Recover an anchor, post a disposition or verification, resolve a supported forge thread. |
+| `decision post`, `stop post` | Record Developer authority or stop the review loop. |
+| `handoff review-result`, `handoff stopped` | Deliver fixed notifications after the corresponding forge record exists. |
+
+The [end-to-end example](docs/agent-squad-example.md) shows publication, approval,
+human wait, recovery, and merge in a single-mode repository.
 
 ## Merge and cleanup
 
@@ -277,7 +322,9 @@ check and retains resources when integration cannot be verified.
 
 After verified integration, the command removes only its owned implementation
 branch/worktree, Reviewer resources, and per-PR and per-issue scratch
-directories. After cleanup, even if some resources were retained, it
+directories. It confirms the remote branch is absent, then removes its local
+`refs/remotes/origin/<branch>` only if that ref still equals the approved head.
+A changed ref or uncertain remote result retains resources and is reported. After cleanup, even if some resources were retained, it
 fast-forwards the primary checkout to the exact verified base commit when the
 PR targets the configured base branch, that branch is checked out, and tracked
 files have no staged or unstaged changes. It reports the starting and target
@@ -301,11 +348,14 @@ make smoke
 make doctor
 ```
 
-The automated suite and thirteen-step smoke scenario use temporary repositories,
-a fake GitHub executable, and fake Herdr; they never call models or GitHub.
+The automated suite runs the twelve-step smoke scenario twice: fake GitHub in
+dual mode and a loopback fake Forgejo server in single mode. It also retains
+the GitHub single-mode regression. All use temporary repositories and fake
+Herdr; they never call models or a real forge. Source-export smoke runs both
+forges without `.git`; CI reserves that duplicate export run for main/nightly.
 `make doctor` checks your real configured environment. Live reviews, decisions,
 and merges are separate evidence in [workflow verification](docs/workflow-verification.md).
-Agent Squad's own PRs retain the manual review pipeline until the live trials
-pass and the Developer switches the pipeline.
+Agent Squad's own implementation PRs use this review loop. Release acceptance
+remains a separate Developer decision based on the recorded live-trial evidence.
 
 Licensed under [Apache 2.0](LICENSE).

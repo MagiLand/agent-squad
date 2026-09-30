@@ -6,17 +6,58 @@ import json
 from pathlib import Path
 import time
 
-from tests.forge_support import ForgeFixture, finding
+from tests.forge_support import ForgeFixture, ForgejoFixture, finding
 from agent_squad.conventions import MERGE_INSTRUCTION
 
 
-def run_smoke() -> dict:
+def initialize(f: ForgeFixture) -> None:
+    if not isinstance(f, ForgejoFixture):
+        f.initialize()
+        return
+    token = f.root / "developer.token"
+    token.write_text("fake-token-developer\n")
+    token.chmod(0o600)
+    f.cli(
+        "init", "--forge", "forgejo", "--base-url", f.server.base_url,
+        "--implementer-account", "developer",
+        "--reviewer-account", "developer",
+        "--implementer-token-file", str(token),
+        "--reviewer-token-file", str(token),
+        "--identity-mode", "single", "--approver-account", "human",
+    )
+
+
+def human_review(f: ForgeFixture, event: str, *, pr: int = 1,
+                 login: str = "human") -> dict:
+    """Seed scripted browser evidence only in the disposable fake model."""
+    from tests.fixtures.fake_forgejo import Handler
+
+    model = f.read_model()
+    row = Handler.record(model, login, "Scripted human review.")
+    row.update(state=event, dismissed=False, submitted_at=row["created_at"],
+               commit_id=f.git("rev-parse", "HEAD", cwd=f.worktree))
+    model["prs"][str(pr)]["reviews"].append(row)
+    f.save_model(model)
+    return row
+
+
+def require_human(f: ForgeFixture, *, pr: int = 1) -> None:
+    if not isinstance(f, ForgejoFixture):
+        return
+    state = f.cli("status", "--pr", str(pr))
+    assert state["next_action"] == "await_human_approval"
+    assert f.read_model()["prs"][str(pr)]["reviews"][-1]["state"] == "COMMENT"
+    f.cli("pr", "merge", "--as", "implementer", "--pr", str(pr), expected=4)
+    human_review(f, "APPROVED", pr=pr)
+
+
+def run_scenario(fixture: type[ForgeFixture]) -> dict:
     started = time.monotonic()
     steps = []
     roots = []
-    with ForgeFixture() as f:
+    with fixture() as f:
         roots.append(f.root)
-        f.initialize()
+        initialize(f)
         diagnosed = f.cli("doctor")
         assert diagnosed["ok"]
         checks = {d["check"] for d in diagnosed["diagnostics"]}
@@ -73,7 +114,7 @@ def run_smoke() -> dict:
         )
         refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
         assert "needs_decision" in refused["error"]
-        f.cli(
+        resolution = f.cli(
             "thread",
             "resolve",
             "--as",
@@ -82,8 +123,11 @@ def run_smoke() -> dict:
             "1",
             "--finding",
             "REV-1",
-            expected=4,
+            expected=1 if isinstance(f, ForgejoFixture) else 4,
         )
+        if isinstance(f, ForgejoFixture):
+            assert "not supported on this forge" in resolution["error"]
+            assert not gated["capabilities"]["can_resolve_threads"]
         f.decision(fid="REV-1")
         assert not f.status()["gates"]["needs_decision"]
         previous = head
@@ -150,15 +194,28 @@ def run_smoke() -> dict:
                 "1",
                 "--finding",
                 fid,
+                expected=1 if isinstance(f, ForgejoFixture) else 0,
             )
         f.review("approved")
+        require_human(f)
         approved = f.status()
         assert approved["next_action"] == "approved"
         assert approved["approval"]["approved"]
         assert approved["target"]["head"] == head
         assert all(t["settled"] for t in approved["findings"]
                    if t["severity"] == "blocking")
-        steps.append({"step": 5, "result": "verified, resolved, approved"})
+        if isinstance(f, ForgejoFixture):
+            requested = human_review(f, "REQUEST_CHANGES")
+            vetoed = f.status()
+            assert not vetoed["approval"]["approved"]
+            veto = vetoed["human_request_changes"][0]
+            assert veto["login"] == "human" and veto["commit_id"] == head
+            assert veto["id"] == requested["id"]
+            f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                  expected=4)
+            human_review(f, "APPROVED")
+            assert f.status()["next_action"] == "approved"
+        steps.append({"step": 5, "result": "verified and approved"})
         f.cli("reviewer", "close", "--pr", "1")
         head = f.push("value = 1\nsecond = 20\nthird = 30\n")
         invalidated = f.status()
@@ -211,6 +268,7 @@ def run_smoke() -> dict:
             "reviewer",
         )
         f.review("approved")
+        require_human(f)
         approved = f.status()
         assert approved["next_action"] == "approved"
         assert approved["budget"] == {
@@ -273,6 +331,7 @@ def run_smoke() -> dict:
             "--verdict", "approved", "--body", f.review_body,
             "--threads", f.write("second-threads.json", "[]"),
         )
+        require_human(f, pr=2)
         held = f.cli("status", "--pr", "2")
         assert held["next_action"] == "approved"
         refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "2",
@@ -290,14 +349,15 @@ def run_smoke() -> dict:
         commands = list(f.history)
     assert not roots[-1].exists()
     # Recovery uses independent disposable PRs after the merge exercises.
-    with ForgeFixture() as f:
+    with fixture() as f:
         roots.append(f.root)
-        f.initialize()
+        initialize(f)
         head = f.candidate()
         f.create_pr(issue_task=True)
         f.decision(body=MERGE_INSTRUCTION + '\n\n> Start issue #1.')
         f.cli("reviewer", "launch", "--pr", "1")
         f.review("approved")
+        require_human(f)
         f.herdr_settings(prompt_failure=True)
         f.cli(
             "handoff", "review-result", "--pr", "1", "--head", head,
@@ -319,12 +379,15 @@ def run_smoke() -> dict:
         steps.append({"step": 10,
                       "result": "lost handoff recovered by status"})
     assert not roots[-1].exists()
-    with ForgeFixture() as f:
+    with fixture() as f:
         roots.append(f.root)
-        f.initialize()
+        initialize(f)
         f.candidate()
         f.create_pr()
-        f.settings(reject_batch=True, fail_roots=["REV-1"])
+        if isinstance(f, ForgejoFixture):
+            f.settings(out_of_diff_accepted=True)
+        else:
+            f.settings(reject_batch=True, fail_roots=["REV-1"])
         f.review(
             "changes_requested",
             [
@@ -334,6 +397,10 @@ def run_smoke() -> dict:
             expected=1,
         )
         partial = f.status()
+        if isinstance(f, ForgejoFixture):
+            wire_roots = f.read_model()["prs"]["1"]["comments"]
+            assert len(wire_roots) == 2
+            assert all(root["diff_hunk"] == "" for root in wire_roots)
         assert partial["next_action"] == "open_threads"
         assert partial["budget"]["used"] == 1
         first_review = partial["reviews"][0]
@@ -342,7 +409,7 @@ def run_smoke() -> dict:
         for field in ("Problem", "Evidence", "Impact", "Required change",
                       "Verification"):
             assert first_review["body"].count(f"**{field}**:") == 2
-        f.settings(fail_roots=[])
+        f.settings(fail_roots=[], out_of_diff_accepted=False)
         f.cli(
             "thread",
             "open",
@@ -361,11 +428,27 @@ def run_smoke() -> dict:
         assert opened["next_action"] == "address_findings"
         assert opened["budget"]["used"] == 1
         assert opened["reviews"][0]["id"] == first_review["id"]
+        if isinstance(f, ForgejoFixture):
+            # The unusable optional root also needs a valid recovery anchor.
+            f.cli("thread", "open", "--as", "implementer", "--pr", "1",
+                  "--finding", "REV-2", "--path", "example.py", "--line", "3")
+            draft = human_review(f, "PENDING", login="developer")
+            refused = f.review("changes_requested",
+                               [finding(title="Interrupted blocking")],
+                               expected=4)
+            assert "pending_draft" in refused["error"], refused
+            # Discard and publish the interrupted review in one command.
         f.settings(interrupt_after_body=True)
         inputs = [finding(title="Interrupted blocking")]
-        f.review("changes_requested", inputs, expected=1)
+        f.review("changes_requested", inputs, expected=1,
+                 **({"discard_draft": draft["id"]}
+                    if isinstance(f, ForgejoFixture) else {}))
         interrupted = f.status()
         review_id = interrupted["reviews"][-1]["id"]
+        if isinstance(f, ForgejoFixture):
+            f.settings(interrupt_after_body=False)
+            assert all(r["id"] != draft["id"]
+                       for r in f.read_model()["prs"]["1"]["reviews"])
         f.review("changes_requested", inputs, resume=review_id)
         recovered = f.status()
         assert recovered["budget"]["used"] == 2
@@ -381,6 +464,29 @@ def run_smoke() -> dict:
                       "result": "fallback and resume preserved reviews"})
     assert all(not root.exists() for root in roots)
     steps.append({"step": 12, "result": "all temporary roots removed"})
+    return {
+        "forge": "forgejo" if fixture is ForgejoFixture else "github",
+        "identity_mode": "single" if fixture is ForgejoFixture else "dual",
+        "ok": True,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "scripted": [
+            "reviews",
+            "dispositions",
+            "verifications",
+            "decisions",
+            "stop",
+            "Herdr process states and messages",
+        ],
+        "command_count": len(commands),
+        "commands": commands,
+        "steps": steps,
+        "cleanup": "owned temporary repository and all worktrees removed",
+    }
+
+
+def run_github_single() -> dict:
+    roots = []
+    commands = []
     with ForgeFixture() as f:
         roots.append(f.root)
         f.single_identity()
@@ -412,24 +518,16 @@ def run_smoke() -> dict:
         assert_merge_cleanup(f, 1, "issue-1", issue=1)
         commands.extend(f.history)
     assert all(not root.exists() for root in roots)
-    steps.append({
-        "step": 13,
-        "result": "single identity, human decisions, merge and cleanup",
-    })
+
+    return {"ok": True, "command_count": len(commands), "commands": commands}
+
+
+def run_smoke() -> dict:
+    scenarios = [run_scenario(ForgeFixture), run_scenario(ForgejoFixture)]
+    single = run_github_single()
     return {
-        "ok": True,
-        "duration_seconds": round(time.monotonic() - started, 3),
-        "scripted": [
-            "reviews",
-            "dispositions",
-            "verifications",
-            "decisions",
-            "stop",
-            "Herdr process states and messages",
-        ],
-        "commands": commands,
-        "steps": steps,
-        "cleanup": "owned temporary repository and all worktrees removed",
+        "ok": True, "scenarios": scenarios, "github_single": single,
+        "cleanup": "all owned temporary roots removed",
     }
 
 
@@ -439,6 +537,7 @@ def assert_merge_cleanup(
     assert not f.worktree.exists()
     assert f.git("branch", "--list", branch) == ""
     assert f.git("ls-remote", "--heads", "origin", branch) == ""
+    assert f.git("branch", "-r", "--list", f"origin/{branch}") == ""
     assert not (f.repo / f".agent-squad/review-scratch/pr{pr}").exists()
     assert not (f.repo / f".agent-squad/review-scratch/issue-{issue}").exists()
     assert f.git("worktree", "list", "--porcelain").count("worktree ") == 1

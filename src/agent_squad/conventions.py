@@ -12,7 +12,8 @@ from .forge import (
 )
 from .initialization import AgentSquadError, Configuration, Worktree
 
-TAG = "AGENT_SQUAD/0.5.0"
+PROTOCOL_VERSION = "0.5.0"
+TAG = f"AGENT_SQUAD/{PROTOCOL_VERSION}"
 MERGE_INSTRUCTION = "Standing merge instruction: merge when approved."
 MERGE_WITHDRAWAL = "Standing merge instruction withdrawn."
 SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
