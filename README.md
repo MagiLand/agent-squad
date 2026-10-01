@@ -6,7 +6,7 @@ Developer decisions, and approval. Each review identifies an exact commit and
 runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
 for the Developer's review before merging.
 
-The implementation follows the [v0.6.0 specification delta](docs/agent-squad-v0.6.0-spec.md)
+The implementation follows the [Agent Squad specification](docs/agent-squad-spec.md)
 for GitHub and Forgejo, with dual and single identity modes. The package
 version is `0.6.0`; the protocol tag remains `AGENT_SQUAD/0.5.0`.
 Release readiness depends on the recorded checks and human-operated trials.
@@ -64,7 +64,7 @@ refused: move that configuration aside and rerun `init`; no migration is offered
 The defaults are Codex implementing, Claude Code reviewing, three review
 passes, and a merge commit. To reverse the agents, edit the existing
 `implementer.kind` and `reviewer.kind` configuration fields before the trial.
-See [configuration](docs/agent-squad-v0.6.0-spec.md#9-configuration-schema-version-2)
+See [configuration](docs/agent-squad-spec.md#9-configuration-schema-version-2)
 for account, branch, merge method, and directory settings.
 
 `doctor` checks both forge identities, Reviewer permission, the remote base
@@ -185,7 +185,7 @@ say “Let's start on issue #42” (use your issue number).
    remain advisory; each receives a disposition.
 5. Decisions and stops come back to you and your answer is recorded on the PR.
    The Implementer and Reviewer apply the
-   [review-before-merge rule](docs/agent-squad-v0.6.0-spec.md#122-squad-implementer-mandatory-rules)
+   [review-before-merge rule](docs/agent-squad-spec.md#122-squad-implementer-mandatory-rules)
    to the whole PR: security, irreversible changes, authority changes, new
    dependencies or CI authority, publication or incompatible interfaces, and
    unresolved scope or design choices require your review before merging.
@@ -225,7 +225,7 @@ followed by the same detailed state.
 
 ## PR conventions and recovery
 
-The [PR conventions](docs/agent-squad-v0.6.0-spec.md#7-pull-request-conventions)
+The [PR conventions](docs/agent-squad-spec.md#7-pull-request-conventions)
 define the exact grammar. In summary:
 
 - PR bodies contain `## Task` and `## Implementation report`.
@@ -261,7 +261,7 @@ If GitHub rejects a batch review, the full findings are published before
 individual roots are attempted. `status` reports missing roots and the review
 ID. `thread open` can restore a finding from PR data, and
 `review post --resume <review-id>` completes that publication without creating
-a second review. See the [command table](docs/agent-squad-v0.6.0-spec.md#102-command-table)
+a second review. See the [command table](docs/agent-squad-spec.md#102-command-table)
 for the required arguments; repeating plain `review post` creates a new review.
 
 Forgejo posts the review body first, followed by each finding root. An empty
@@ -290,7 +290,7 @@ The flag is unsupported on GitHub. Never discard a person's work implicitly.
 ## Command reference
 
 Use `agent-squad <command> --help` for all required arguments. The
-[full command table](docs/agent-squad-v0.6.0-spec.md#102-command-table) defines
+[full command table](docs/agent-squad-spec.md#102-command-table) defines
 role restrictions and forge-specific behavior; this inventory covers every
 shipped command path.
 
