@@ -55,7 +55,7 @@ Historical work-order text within otherwise effective sections is omitted: stage
 | [§4](#4-roles-identities-and-authority) | [§15](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#15-roles-and-authority) | [§4](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#4-roles-identities-and-authority) | [§4](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#4-roles-identities-and-authority) | — |
 | [§4.1](#41-developer) | [§15.1](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#151-developer) | [§4.1](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#41-developer) | — | [#74](https://github.com/MagiLand/agent-squad/issues/74) |
 | [§4.2](#42-implementer) | [§9.8](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#98-one-writer-per-worktree), [§15.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#152-implementer) | [§4.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#42-implementer) | — | [#74](https://github.com/MagiLand/agent-squad/issues/74) |
-| [§4.3](#43-reviewer) | [§7.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#72-preserve-independent-review), [§15.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#153-reviewer) | [§4.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#43-reviewer) | — | — |
+| [§4.3](#43-reviewer) | [§7.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#72-preserve-independent-review), [§15.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#153-reviewer) | [§4.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#43-reviewer) | — | [#43](https://github.com/MagiLand/agent-squad/issues/43), [#43 evidence](verification/2026-09-13-issue-43.md) |
 | [§4.4](#44-trust-and-security) | [§16](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#16-trust-and-security-model), [§16.1](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#161-cooperative-but-fallible-agents), [§16.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#162-same-user-limitation), [§16.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#163-sensitive-control-plane-changes), [§16.4](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#164-no-automatic-permission-key-injection) | [§4.4](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#44-trust-and-security) | — | — |
 | [§4.5](#45-forge-identities) | — | [§4.5](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#45-forge-identities) | [§4.5](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#45-forge-identities) | — |
 | [§4.6](#46-no-autonomous-project-manager) | [§15.4](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#154-no-autonomous-project-manager) | — | — | — |
@@ -117,7 +117,7 @@ Historical work-order text within otherwise effective sections is omitted: stage
 | [§13](#13-harness-specifics) | — | [§13](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#13-harness-specifics) | [§13](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#13-harness-specifics) | — |
 | [§13.1](#131-claude-code) | — | [§13.1](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#131-claude-code) | — | — |
 | [§13.2](#132-codex) | — | [§13.2](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#132-codex) | — | — |
-| [§13.3](#133-both) | — | [§13.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#133-both) | — | — |
+| [§13.3](#133-both) | — | [§13.3](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#133-both) | — | [#43](https://github.com/MagiLand/agent-squad/issues/43), [#43 evidence](verification/2026-09-13-issue-43.md) |
 | [§14](#14-failure-and-recovery-semantics) | [§31](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#31-local-delivery-discoverability-and-idempotency), [§33](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#33-failure-and-recovery-semantics) | [§14](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#14-failure-and-recovery-semantics) | [§14](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#14-failure-and-recovery-semantics) | — |
 | [§15](#15-cleanup-policy) | [§34](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#34-cleanup-policy) | [§15](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#15-cleanup-policy) | [§15](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#15-cleanup-policy) | [#66](https://github.com/MagiLand/agent-squad/issues/66) |
 | [§16](#16-testing-strategy) | [§36](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#36-testing-strategy) | [§16](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.5.0-spec.md#16-testing-strategy) | [§16](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.6.0-spec.md#16-testing-strategy) | [#64](https://github.com/MagiLand/agent-squad/issues/64), [#66](https://github.com/MagiLand/agent-squad/issues/66), [#74](https://github.com/MagiLand/agent-squad/issues/74) |
@@ -159,7 +159,7 @@ Historical work-order text within otherwise effective sections is omitted: stage
 | [17. Consuming-Repository Runtime Layout](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#17-consuming-repository-runtime-layout) | [§5](#5-runtime-layout) | Superseded: current roots and ownership replace run directories and local artifacts. |
 | [18. Repository and Worktree Identity](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#18-repository-and-worktree-identity) | [§5.2](#52-worktree-root-and-path-conventions) | Superseded: Git resource ownership replaces stored run identity; review target is §6. |
 | [19. Configuration](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#19-configuration) | [§9](#9-configuration-schema-version-2) | Superseded: configuration schema 2. |
-| [20. Preflight and Capability Verification](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#20-preflight-and-capability-verification) | [§10.3](#103-doctor) | Current diagnostics and live preflight; no run records or local request bundle. |
+| [20. Preflight and Capability Verification](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#20-preflight-and-capability-verification) | [§10.3](#103-doctor) | Verify sandbox capabilities; current diagnostics and rerunnable live preflight; no run records or local request bundle. |
 | [21. Task and Context Capture](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#21-task-and-context-capture) | [§7.2](#72-pr-body) | Superseded: PR Task and explicit amendments (§7.6) replace immutable run copies. |
 | [22. Git Revision Model](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#22-git-revision-model) | [§6](#6-git-revision-model) | Git rules with review-time merge-base and current approval/merge checks (§7.10). |
 | [23. Review Worktree and Self-contained Bundle](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#23-review-worktree-and-self-contained-bundle) | [§8](#8-herdr-handoff) | Superseded: detached Reviewer lifecycle and scratch replace bundles and markers. |
@@ -179,7 +179,7 @@ Historical work-order text within otherwise effective sections is omitted: stage
 | [37. Implementation Increments](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#37-implementation-increments) | Not carried forward | Historical work order: completed implementation increments, not new development gates. |
 | [38. Double Dubs as Dogfood](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#38-double-dubs-as-dogfood) | [§3.6](#36-repository-independence) | Consumer independence, preservation of unrelated files, and dedicated dogfood worktrees. |
 | [39. Reliability Guarantees](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#39-reliability-guarantees) | [§18.1](#181-reliability-guarantees) | Superseded: current PR-based reliability guarantees. |
-| [40. Explicit Non-guarantees](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#40-explicit-non-guarantees) | [§18.2](#182-non-guarantees) | Non-guarantees written out and extended for forges and single identity. |
+| [40. Explicit Non-guarantees](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#40-explicit-non-guarantees) | [§18.2](#182-non-guarantees) | Eight items retained by the deltas are written out and extended for forges/single identity; automatic merge correctness and two agents always outperforming one are not carried forward because neither delta retained them. |
 | [41. Deliberate Simplifications and Rejected Overdesign](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#41-deliberate-simplifications-and-rejected-overdesign) | [§18.3](#183-deliberate-simplifications) | Design guidance; obsolete local-state mechanisms excluded below. |
 | [42. Future Experiments](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#42-future-experiments) | [§19](#19-non-goals-deferred-items-and-unverified-behaviour) | Future experiments are not commitments and do not justify core abstractions. |
 | [43. Acceptance Criteria](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#43-acceptance-criteria) | Not carried forward | Historical work order: release-specific acceptance criteria superseded by delta delivery orders; current rules in §§3–16 and 18. |
@@ -217,9 +217,9 @@ Historical work-order text within otherwise effective sections is omitted: stage
 | [16.3 Sensitive control-plane changes](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#163-sensitive-control-plane-changes) | [§4.4](#44-trust-and-security) | Sensitive control-plane changes and self-review limitations. |
 | [16.4 No automatic permission-key injection](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#164-no-automatic-permission-key-injection) | [§4.4](#44-trust-and-security) | No automatic permission-key injection; lifecycle recovery in §8.4. |
 | [20.1 Deterministic checks](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#201-deterministic-checks) | [§10.3](#103-doctor) | Checks revised for PR and configured forges; no stored active run. |
-| [20.2 Live Reviewer preflight](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#202-live-reviewer-preflight) | [§10.3](#103-doctor) | Superseded bundle/sentinel probe: startup/readiness/trust/close probe, no review request. |
+| [20.2 Live Reviewer preflight](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#202-live-reviewer-preflight) | [§10.3](#103-doctor) | Bundle/sentinel checks replaced by startup/readiness/trust/close; rerun, optional caching, and fixed-workflow capability rules retained. |
 | [20.3 Control-pane checks](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#203-control-pane-checks) | Not carried forward | Superseded: control-pane interactive-confirmation checks explicitly dropped by v0.5.0 §2. |
-| [20.4 Orphaned review-resource inspection](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#204-orphaned-review-resource-inspection) | [§10.3](#103-doctor) | PR/worktree/issue-scratch orphan reporting, never automatic deletion. |
+| [20.4 Orphaned review-resource inspection](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#204-orphaned-review-resource-inspection) | [§10.3](#103-doctor) | PR/worktree/issue-scratch orphan reporting with paths, never automatic deletion. |
 | [22.1 Exact object IDs](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#221-exact-object-ids) | [§6.2](#62-exact-object-ids) | Exact object format and nonauthoritative abbreviations. |
 | [22.2 Fixed base](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#222-fixed-base) | [§6.1](#61-review-target) | Superseded: review-time merge-base replaces fixed run base. |
 | [22.3 Base ancestry requirement](https://github.com/MagiLand/agent-squad/blob/v0.6.0/docs/agent-squad-v0.4.4-spec.md#223-base-ancestry-requirement) | [§6.3](#63-reviewed-scope-and-ancestry) | Ancestry under review-time base; merge-time base movement in §7.10. |
@@ -442,7 +442,6 @@ The supported environment assumes:
 - Herdr installed and running, with Codex and Claude Code already usable through it; the Herdr skill may already be installed for both;
 - a target project that is a Git repository;
 - the Developer available when `needs_human` is reached;
-
 - the repository uses a supported forge and an ordinary working Git transport;
 - on GitHub, `gh` is installed and authenticated for the configured role account or accounts;
 - on Forgejo, the configured server meets §11.4's minimum version and the role token files satisfy §9; supported transport is HTTPS, with HTTP allowed only for loopback tests;
@@ -567,7 +566,7 @@ If future squads reveal actual shared requirements, abstractions may be extracte
 
 The reference implementation SHOULD remain understandable as a small local CLI with direct, explicit logic for one squad type.
 
-The Developer remains responsible for changing task requirements; architectural and product decisions; compatibility policy; material security or operational risk; unresolved disagreement; and final integration, release, or deployment. Push and merge instructions are exercised through the Implementer under §§4.1 and 7.10.
+The Developer MUST remain responsible for changing task requirements; architectural and product decisions; compatibility policy; material security or operational risk; unresolved disagreement; and final integration, release, or deployment. The Developer instructs the merge, when the issue starts or later, and the Implementer performs it (§§4.1 and 7.10).
 
 ## 4. Roles, Identities, and Authority
 
@@ -610,7 +609,7 @@ The Reviewer is a fresh session per review pass, launched by the Implementer in 
 - never modifies a tracked file; writes only inside the per-PR scratch directory and Git-ignored validation output;
 - is closed by the Implementer; it does not outlive its review pass.
 
-A per-PR Reviewer that persists across passes is a conditional fallback only if a trust prompt on every pass cannot be avoided (§13.3). The conventions of §7 work unchanged for both models; this is not the selected fresh-Reviewer lifecycle.
+A per-PR Reviewer that persists across passes was the contingency fallback had the live Reviewer preflight found a trust prompt on every pass that could not be avoided (§13.3); that preflight did not find one, so the fallback was not adopted. The conventions of §7 work unchanged for both models.
 
 ### 4.4 Trust and security
 
@@ -686,7 +685,7 @@ The suggested layout is:
 
 Worktrees nested under the excluded control directory are ordinary linked Git worktrees: the outer `git status` stays clean, `git worktree list` registers them, and `git worktree remove --force` removes them. The default keeps them inside the launch directory so a sandboxed harness whose writable root is its launch directory can still write to them. An absolute `worktree_root` outside the repository is permitted.
 
-**Resource ownership clarification (issue #43, Developer decision, 2026-09-13).** The tool records ownership in each linked worktree's Git administrative directory. The record contains the exact target and checkout identity and, after opening in Herdr, the workspace, pane, terminal IDs, and harness kind. It contains no review result, verdict, budget, or handoff status. Reuse and removal require this record to match the live Git resource; workspace cleanup also checks the recorded Herdr identities and isolation. A matching path and head alone do not establish ownership of a manually created checkout. This resource metadata is permitted alongside Git's worktree metadata; The configured forge remains the sole source of review authority.
+**Resource ownership clarification (issue #43, Developer decision, 2026-09-13).** The tool records ownership in each linked worktree's Git administrative directory. The record contains the exact target and checkout identity and, after opening in Herdr, the workspace, pane, terminal IDs, and harness kind. It contains no review result, verdict, budget, or handoff status. Reuse and removal require this record to match the live Git resource; workspace cleanup also checks the recorded Herdr identities and isolation. A matching path and head alone do not establish ownership of a manually created checkout. This resource metadata is permitted alongside Git's worktree metadata; the configured forge remains the sole source of review authority.
 
 ### 5.3 Scratch root
 
@@ -748,7 +747,7 @@ Before `reviewer launch`:
 
 Force-pushing a PR branch is not forbidden, but every rule in §7 operates on whatever the current head is; a `DISPOSITION fixed <sha>` whose SHA is no longer reachable from the head is invalid (§7.5).
 
-Unexpected untracked files SHOULD block submission unless they are Agent Squad runtime files excluded by Git, project-configured generated output, or explicitly accepted by the Developer for the work. Agent Squad MUST NOT delete unrelated untracked files to satisfy this check.
+Unexpected untracked files SHOULD block `reviewer launch` unless they are Agent Squad runtime files excluded by Git, project-configured generated output, or explicitly accepted by the Developer for the work. Agent Squad MUST NOT delete unrelated untracked files to satisfy this check.
 
 ### 6.5 Permitted Git operations
 
@@ -764,11 +763,11 @@ Inside `pr merge`, the tool MAY also fast-forward the primary checkout's checked
 
 After verified integration the tool MAY remove the exact remote-tracking ref for the merged PR branch, only under the absence and expected-SHA guards of §7.10.
 
-The following remain forbidden: no reset, rebase, or branch switch of a checkout the tool did not create, no broad destructive cleanup, and no networked submodule initialization. Submodule handling is specified in §6.7.
+Agent Squad MUST NOT otherwise automatically reset, rebase, merge, push, switch the implementation branch, delete branches, run broad destructive cleanup, or initialize or update submodules through network access without explicit authorization. In particular, the following remain forbidden: no reset, rebase, or branch switch of a checkout the tool did not create, no broad destructive cleanup, and no networked submodule initialization. Submodule handling is specified in §6.7.
 
 ### 6.6 Sensitive instruction-file warning
 
-When the candidate diff includes known agent-control or instruction files, review submission SHOULD issue a non-blocking warning.
+When the candidate diff includes known agent-control or instruction files, `reviewer launch` SHOULD issue a non-blocking warning.
 
 Examples include:
 
@@ -780,7 +779,7 @@ Agent Squad integration fragments
 Herdr integration scripts
 ```
 
-The warning does not create a general control-plane classifier and does not automatically block submission.
+The warning does not create a general control-plane classifier and does not automatically block `reviewer launch`.
 
 ### 6.7 Submodules
 
@@ -793,6 +792,8 @@ Agent Squad MUST NOT automatically run a recursive submodule update that may acc
 The consuming project is responsible for preparing required submodules or defining a safe project-specific preflight.
 
 ## 7. Pull Request Conventions
+
+Every rule here is derivable from the PR, Git, and Herdr.
 
 ### 7.1 Tagged lines
 
@@ -1026,7 +1027,7 @@ Derived facts:
 
 The agent-side conditions are §7.10 conditions 1–4 and 6 plus the mode's mirror rule. Missing dispositions are evaluated before either approval or the human wait. Missing human approval alone MUST NOT become `needs_decision` merely because the agent review used the last budget slot. Human request-changes does not enter `needs_decision`, `unaddressed_findings`, or a launch gate. A pending draft is a publication gate, not a reason to request another agent review. There is no new `human_request_changes` next-action value: it is a reported reason within `await_human_approval`, or alongside the other current action after a head change.
 
-For `await_human_approval`, `status` succeeds (exit 0), while `pr merge` refuses (exit 4). The Implementer reports the full head and approver logins and goes idle. It reports any human request-changes with login and commit to the Developer; it never polls for a later human review. A subsequent “check the PR” instruction re-derives all evidence. In `dual` mode approval can hold at an exhausted budget.
+For `await_human_approval`, `status` succeeds (exit 0), while `pr merge` refuses (exit 4). The Implementer reports the full head and approver logins and goes idle. It reports any human request-changes with login and commit to the Developer; it never polls for a later human review. A subsequent “check the PR” instruction re-derives all evidence. In `dual` mode the next-action order above applies unchanged, including approval at an exhausted budget.
 
 `status` prints the next action first and the reasons that led to it. It MUST make a current review that the Implementer has not acted on prominent; that is how a lost Herdr notification is discovered (§8.7). `--json` prints the same facts as one object.
 
@@ -1072,8 +1073,6 @@ After merging, if the repository runs CI on base-branch pushes, the Implementer 
 The `rebase` merge method remains unsupported. A failed integration check retains all cleanup resources and does not fast-forward the primary checkout. E9 did not establish which head was integrated; API fields alone MUST NOT be treated as Git inclusion evidence.
 
 ## 8. Herdr Handoff
-
-
 
 *Informative.* The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the tagged handoff lines or the asynchronous discipline. Section 8.5 directs the Implementer to current status in every approval scenario.
 
@@ -1349,9 +1348,17 @@ Checks use the factory and neutral adapter methods. `doctor.py` contains no forg
 
 Labels and transport-specific failure text belong to the adapter, including the `GitHub CLI` label; moving that label out of `doctor.py` preserves its displayed output while preserving the adapter boundary in §11.0. Forgejo repository push permission is read from `permissions.push` (Setup 009–010); a role's base permission is normalized before the common mode check. Approver existence is not proof that the forge will accept or count its review; forge branch protections remain authoritative at merge time.
 
-Retain the live Implementer-name/kind check (absence is a warning), orphan reporting for closed/merged PR resources and closed-issue scratch, and the `.gitmodules` warning. An unreadable issue/PR is a failure, never an assumed orphan; doctor never removes residue. Keep all Git object-format, committed-HEAD, ownership, and root probes.
+Retain the live Implementer-name/kind check (absence is a warning), the orphan reporting below for closed/merged PR resources and closed-issue scratch, and the `.gitmodules` warning. An unreadable issue/PR is a failure, never an assumed orphan; doctor never removes residue. Keep all Git object-format, committed-HEAD, ownership, and root probes.
 
 `doctor --live-reviewer` creates a disposable detached worktree at current HEAD, opens Herdr, starts the configured Reviewer with start_args, observes readiness and trust, closes owned resources and removes the worktree. It sends no review request. Unsafe cleanup retains and reports resources, exit 3. Section 8's unchanged trust/adopt rules apply.
+
+Cross-worktree permissions and agent sandbox behavior MUST be verified rather than assumed.
+
+A successful live Reviewer preflight result MAY be cached against relevant local configuration and Herdr version, but the Developer MUST be able to rerun it.
+
+This is a fixed capability check for one workflow, not a general capability-negotiation framework.
+
+`doctor` inspects orphaned resources: worktrees under `worktree_root` whose name matches the review convention but whose PR is merged or closed, live agents whose name matches the convention for a merged or closed PR, scratch directories for merged PRs, and `issue-<N>` scratch directories whose issue is closed. `doctor` MUST report these resources with paths and never remove them automatically. An open issue is not an orphan; an unreadable issue is a failure, as for a PR.
 
 ### 10.4 Reads used by the skills
 
@@ -1460,7 +1467,7 @@ Forgejo publication MUST refuse duplicate conversation anchors within a review b
 
 ### 11.3 Fake forges
 
-The executable fake `gh` covers: distinct fake role tokens, the existing scripted model and call log, batch rejection, omitted flat-list replies, pending drafts, exact-head refusal and author-approval refusal. Never call the real forge in automated tests.
+A committed fake forge serves the automated tests, like the committed fake Herdr: an executable named `gh`, placed ahead of `PATH` by the tests, that implements `gh --version`, `gh auth token --user <account>` (returning a distinct fake token per account), and the subset of `gh api` REST paths and GraphQL queries listed in §11.1. It keeps a scripted PR model in a JSON file named by an environment variable, applies mutations to it, records every call with the `GH_TOKEN` it received, and can be told through fixture settings to reject a batch review, drop an out-of-diff anchor silently, omit replies from the flat listing, report a pending draft, refuse a merge whose `sha` does not match, or refuse an approval from the PR author. Automated tests never call the real forge.
 
 The Forgejo fake is a committed `http.server.ThreadingHTTPServer` on `127.0.0.1:0`, started and stopped by the fixture. Tests select it through `forge.base_url` and exercise the real standard-library request construction. Seed its response shapes from the committed #54 recordings. Required cases model E1–E9: event spelling, hidden pending state for an unknown event, author approval/rejection 422, arbitrary accepted commit IDs, invalid anchors retained with empty hunks, body-first roots and replies, range-start mapping, real-draft absorption and deletion, requested-review rows, superseding dismissal, unreliable stale flags, live base tip, protection 405, exact-head 409, absent branch DELETE 500, and the post-deletion PR-head discrepancy. Some of these are intentionally adverse injected cases, not desired server behaviour.
 
@@ -1702,8 +1709,6 @@ The Reviewer MUST NOT request changes merely because a different implementation 
 
 ## 13. Harness Specifics
 
-
-
 *Informative.* There is no forge-specific harness mechanism. The #53 [recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) leaves first-launch trust resolution to a person and supplies no safe post-error wait bound. Runtime and skill installation remain between PRs from merged main (§17); no PR reviews itself using its unmerged runtime or changed skill rules.
 
 ### 13.1 Claude Code
@@ -1721,7 +1726,7 @@ The Reviewer MUST NOT request changes merely because a different implementation 
 ### 13.3 Both
 
 - Trust and permission prompts are answered by a person; the tool never injects keys.
-- In the 2026-09-05 trials neither harness recorded a trust entry for the review worktrees, only for the repositories they belonged to, which suggests both inherit trust for linked worktrees. Trust and sandbox behavior must be verified with `doctor --live-reviewer` before relying on the fresh-Reviewer-per-pass model. If a trust prompt appears on every pass and cannot be avoided, the conditional per-PR persistent Reviewer fallback of §4.3 is adopted and recorded in the evidence. The later #53 and #100 observations and their limits are recorded in §8; they do not establish that condition.
+- In the 2026-09-05 trials neither harness recorded a trust entry for the review worktrees, only for the repositories they belonged to, which suggests both inherit trust for linked worktrees. The `doctor --live-reviewer` runs recorded in [#43](verification/2026-09-13-issue-43.md) confirmed that fresh linked worktrees run after repository trust is established, so the per-PR persistent Reviewer fallback of §4.3 was not adopted. The later #53 and #100 observations and their limits are recorded in §8.
 
 ## 14. Failure and Recovery Semantics
 
@@ -1766,8 +1771,6 @@ In every case the PR is preserved and re-derived; no local state can be corrupte
 | Submodule-dependent validation cannot run in the review worktree | Reported; the Reviewer says so in the review; the Developer decides |
 
 ## 15. Cleanup Policy
-
-
 
 - After consuming a result or a stop, the Implementer runs `reviewer close`; a Reviewer never outlives its review pass by design.
 - Forced removal of a squad-created review worktree is acceptable because it holds nothing authoritative; the Reviewer's saved probes live in the scratch directory, not in the worktree.
@@ -1975,10 +1978,8 @@ Agent Squad does not guarantee:
 - multi-machine consistency;
 - automatic recovery from every Herdr or terminal failure;
 - safe automated review of Agent Squad's own unreviewed control-plane changes;
-- automatic merge correctness;
 - CI success;
 - automatic submodule initialization;
-- that two agents always outperform one;
 - that a model review replaces human review for high-risk software;
 - protection against forge outages, rate limits, or forge-side data loss.
 
