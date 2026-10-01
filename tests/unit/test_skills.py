@@ -135,7 +135,7 @@ class SkillTests(unittest.TestCase):
     def test_every_required_verbatim_block_is_packaged_byte_for_byte(
         self,
     ) -> None:
-        spec = (PROJECT_ROOT / "docs/agent-squad-v0.5.0-spec.md").read_bytes()
+        spec = (PROJECT_ROOT / "docs/agent-squad-spec.md").read_bytes()
         markers = [
             (b"### 8.8 Asynchronous handoff discipline", "squad-implementer"),
             (b"6. **Non-blocking and optional findings [verbatim]:**",

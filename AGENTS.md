@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The implementation baseline is `docs/agent-squad-v0.6.0-spec.md`, the approved delta over `docs/agent-squad-v0.5.0-spec.md`; do not treat files under ignored `.local/` as project inputs.
+The implementation baseline is `docs/agent-squad-spec.md`; do not treat files under ignored `.local/` as project inputs.
 
 Implementation should follow the specification's focused increments. Production code belongs under `src/agent_squad/`, with the installed command defined in `cli.py`. Put unit tests in `tests/unit/`, Git and process integration tests in `tests/integration/`, reusable data in `tests/fixtures/`, smoke tooling in `scripts/`, and consumer examples in `examples/`. Prefer combining small modules over creating shallow wrappers.
 
@@ -23,7 +23,7 @@ Target Python 3.11 or later and use four-space indentation. Follow `snake_case` 
 
 ## Testing Guidelines
 
-Use `unittest`; name files `test_*.py` and test methods `test_<behavior>`. Every protocol derivation, validator, configuration write, recovery path, and Git identity check needs deterministic coverage. Use temporary repositories and fake Herdr processes for integration tests; automated tests must not call real models. The delta defines required coverage in Section 16; no numeric coverage threshold is currently set.
+Use `unittest`; name files `test_*.py` and test methods `test_<behavior>`. Every protocol derivation, validator, configuration write, recovery path, and Git identity check needs deterministic coverage. Use temporary repositories and fake Herdr processes for integration tests; automated tests must not call real models. The specification defines required coverage in Section 16; no numeric coverage threshold is currently set.
 
 ## Commit & Pull Request Guidelines
 

@@ -1,6 +1,6 @@
 # Workflow verification
 
-The [v0.6.0 delta](agent-squad-v0.6.0-spec.md#16-testing-strategy) defines the
+The [Agent Squad specification](agent-squad-spec.md#16-testing-strategy) defines the
 release proof. Deterministic tests establish command behavior; live trials
 establish delivery, independent review, human decisions, and integration in
 actual repositories. Passing one does not establish the other.
