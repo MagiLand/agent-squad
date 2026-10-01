@@ -451,8 +451,140 @@ class TransportTests(unittest.TestCase):
             self.open.return_value = self.response(value)
             self.assertEqual(self.forge.repository_permission(), expected)
 
+    def test_branch_lookup_finds_match_on_later_page(self) -> None:
+        unrelated = {"head": {"ref": "other"}}
+        match = {"head": {"ref": "feature"}, "state": "closed"}
+        self.open.side_effect = [
+            self.response([unrelated] * 50), self.response([match]),
+        ]
+        self.assertEqual(self.forge.branch_prs("feature"), [match])
+        self.assertEqual(
+            [c.args[0].full_url.rsplit("/", 1)[1]
+             for c in self.open.call_args_list],
+            ["pulls?state=all&limit=50&page=1",
+             "pulls?state=all&limit=50&page=2"],
+        )
+
+    def test_branch_lookup_does_not_accept_partial_pagination(self) -> None:
+        for first_branch in ("other", "feature"):
+            for failure in ("http", "object", "json", "identity"):
+                with self.subTest(first_branch=first_branch, failure=failure):
+                    page = {
+                        "http": HTTPError(
+                            "url", 503, "reason", {},
+                            self.response({"message": "page unavailable"}),
+                        ),
+                        "object": self.response({"items": []}),
+                        "json": BytesIO(b"invalid JSON"),
+                        "identity": self.response([{"head": {}}]),
+                    }[failure]
+                    self.open.reset_mock()
+                    self.open.side_effect = [
+                        self.response([{"head": {"ref": first_branch}}] * 50),
+                        page,
+                    ]
+                    with self.assertRaises(ForgeError):
+                        self.forge.branch_prs("feature")
+                    self.assertEqual(self.open.call_count, 2)
+
+
+class BranchLookupTests(unittest.TestCase):
+    def test_unrelated_closed_pr_with_deleted_base_does_not_block_lookup(
+        self,
+    ) -> None:
+        row = recording("061-e7-merged-pr.json")
+        row["head"]["ref"] = "feature/unrelated-history"
+        row["base"]["sha"] = ""
+        forge = SimpleNamespace(
+            prefix="/repos/example/project",
+            listing=Mock(return_value=[row]),
+        )
+        self.assertEqual(Forgejo.branch_prs(forge, "feature/new-work"), [])
+        forge.listing.assert_called_once_with(
+            "/repos/example/project/pulls?state=all"
+        )
+
+    def test_commit_metadata_is_not_required_for_branch_identity(self) -> None:
+        for state in ("open", "closed"):
+            for field in ("base.sha", "head.sha", "merge_base",
+                          "merge_commit_sha"):
+                for value in ("", None, "invalid"):
+                    for branch in ("feature", "other"):
+                        with self.subTest(state=state, field=field,
+                                          value=value, branch=branch):
+                            row = recording("061-e7-merged-pr.json")
+                            row.update(state=state, merged=state == "closed")
+                            row["head"]["ref"] = branch
+                            parent, key = (row, field)
+                            if "." in field:
+                                group, key = field.split(".")
+                                parent = row[group]
+                            if value is None:
+                                parent.pop(key)
+                            else:
+                                parent[key] = value
+                            forge = SimpleNamespace(
+                                prefix="/repos/example/project",
+                                listing=lambda path: [row],
+                            )
+                            matches = Forgejo.branch_prs(forge, "feature")
+                            self.assertEqual(
+                                matches, [row] if branch == "feature" else []
+                            )
+                            if matches:
+                                self.assertIs(matches[0], row)
+
+    def test_head_ref_is_compared_exactly_including_pull_refs(self) -> None:
+        pull_ref = recording("061-e7-merged-pr.json")["head"]["ref"]
+        self.assertEqual(pull_ref, "refs/pull/1/head")
+        rows = [{"head": {"ref": ref}} for ref in (
+            pull_ref, "Feature", "feature/child", "feature",
+        )]
+        forge = SimpleNamespace(prefix="/repos/example/project",
+                                listing=lambda path: rows)
+        self.assertEqual(Forgejo.branch_prs(forge, "feature"), [rows[-1]])
+        self.assertEqual(Forgejo.branch_prs(forge, pull_ref), [rows[0]])
+
+    def test_malformed_identity_is_never_skipped(self) -> None:
+        cases = [
+            (None, "pull request"), ([], "pull request"),
+            ("invalid", "pull request"), ({}, "pull request head"),
+            ({"head": None}, "pull request head"),
+            ({"head": []}, "pull request head"),
+            ({"head": "feature"}, "pull request head"),
+            ({"head": {}}, "head.ref"),
+        ] + [({"head": {"ref": value}}, "head.ref")
+             for value in ("", None, 1, True, [], {})]
+        for row, message in cases:
+            with self.subTest(row=row):
+                forge = SimpleNamespace(
+                    prefix="/repos/example/project",
+                    listing=lambda path: [{"head": {"ref": "other"}}, row],
+                )
+                with self.assertRaisesRegex(ForgeError, message):
+                    Forgejo.branch_prs(forge, "feature")
+
 
 class RecordedParserTests(unittest.TestCase):
+    def test_full_pr_parsing_still_requires_valid_commit_metadata(self) -> None:
+        for field in ("base.sha", "head.sha", "merge_base",
+                      "merge_commit_sha"):
+            for value in ("", None, "invalid"):
+                if field == "merge_commit_sha" and value is None:
+                    continue  # A merge commit is optional in the full parser.
+                with self.subTest(field=field, value=value):
+                    row = recording("061-e7-merged-pr.json")
+                    parent, key = row, field
+                    if "." in field:
+                        group, key = field.split(".")
+                        parent = row[group]
+                    if value is None:
+                        parent.pop(key)
+                    else:
+                        parent[key] = value
+                    with self.assertRaisesRegex(ForgeError, field):
+                        parse_pullrequest(row)
+
     def test_request_review_is_skipped_before_empty_sha_validation(
         self,
     ) -> None:

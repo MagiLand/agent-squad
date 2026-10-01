@@ -38,11 +38,13 @@ def review_wire(row: dict) -> dict:
     return template
 
 
-def pr_wire(row: dict) -> dict:
+def pr_wire(row: dict, base_sha: str | None) -> dict:
     template = recording("017-setup-pr-after-base-push.json")
     template.update(deepcopy(row))
     template["base"].setdefault("repo", {"full_name": "MagiLand/trial"})
     template["merge_base"] = row.get("merge_base", row["base"]["sha"])
+    # Forgejo reports the live base tip, including for closed PRs.
+    template["base"]["sha"] = base_sha or ""
     template.pop("mergeable_state", None)
     return template
 
@@ -317,8 +319,9 @@ class Handler(BaseHTTPRequestHandler):
                     reviews=[], comments=[], conversation=[], threads=[],
                 )
                 prs[number] = row
-                return 201, pr_wire(row)
-            rows = [pr_wire(p) for p in prs.values()
+                return 201, pr_wire(row, self.branch(model, body["base"]))
+            rows = [pr_wire(p, self.branch(model, p["base"]["ref"]))
+                    for p in prs.values()
                     if query.get("state", ["all"])[0] in ("all", p["state"])]
             return 200, self.paged(rows, query)
         if number not in prs:
@@ -327,7 +330,6 @@ class Handler(BaseHTTPRequestHandler):
         if pr["state"] == "open":
             pr["head"]["sha"] = self.branch(model, pr["head"]["ref"])
             pr.setdefault("merge_base", pr["base"]["sha"])
-            pr["base"]["sha"] = self.branch(model, pr["base"]["ref"])
         if len(parts) == 5:
             if pr["merged"] and settings.get("merge_confirmation_403"):
                 return 403, {"message": "merge confirmation unreadable"}
@@ -336,8 +338,10 @@ class Handler(BaseHTTPRequestHandler):
                     return 503, {"message": "injected Task mirror failure"}
                 if not settings.get("body_update_ignored"):
                     pr["body"] = body["body"]
-                return 201, pr_wire(pr)
-            return 200, pr_wire(pr)
+                return 201, pr_wire(
+                    pr, self.branch(model, pr["base"]["ref"])
+                )
+            return 200, pr_wire(pr, self.branch(model, pr["base"]["ref"]))
         if parts[5:] == ["merge"] and self.command == "POST":
             return self.merge_pr(model, pr, body)
         if parts[5] != "reviews":
