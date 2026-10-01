@@ -1,6 +1,7 @@
 """Reviewer recovery against real Git and the fake Herdr and forge."""
 
 import json
+from itertools import product
 from pathlib import Path
 import unittest
 
@@ -163,7 +164,9 @@ class ReviewerTests(unittest.TestCase):
         self.assertEqual(self.f.herdr_model()["workspaces"], [])
         self.assertNotIn(str(self.path), self.f.git("worktree", "list"))
 
-    def test_codex_initial_prompt_preserves_start_arguments(self) -> None:
+    def test_codex_long_review_keeps_name_and_closes_after_one_request(
+        self,
+    ) -> None:
         f = self.f
         path = f.repo / ".agent-squad/config.json"
         config = json.loads(path.read_text())
@@ -171,45 +174,150 @@ class ReviewerTests(unittest.TestCase):
             kind="codex", start_args=["--add-dir", str(f.root)]
         )
         path.write_text(json.dumps(config))
+        # If delivered during startup, this request remains working through
+        # Herdr's deadline. After interactive startup it stays working with
+        # no pending startup deadline. The fixture models timeouts, not sleep.
+        f.herdr_settings(
+            initial_request_state="working", prompt_state="working"
+        )
         result = self.lifecycle("launch")
-        self.assertEqual(result["delivery"], "initial_prompt")
+        self.assertEqual(result["delivery"], "agent_prompt")
+        self.assertEqual(result["observed_state"], "working")
+        self.assertEqual(result["name"], self.path.name)
+        self.assertEqual(result["worktree"], str(self.path))
+        agent = f.herdr_model()["agents"][0]
+        self.assertEqual(agent["name"], result["name"])
+        self.assertEqual(agent["pane_id"], result["pane_id"])
+        self.assertEqual(agent["workspace_id"], result["workspace_id"])
+        self.assertFalse(agent["launch_pending"])
+        self.assertTrue(f.status()["gates"]["reviewer_live"])
         calls = f.herdr_model()["calls"]
         starts = [
             c
             for c in calls
             if c[:2] == ["agent", "start"] and "--help" not in c
         ]
-        self.assertEqual(
-            starts[0][-4:],
-            [
-                "--",
-                "--add-dir",
-                str(f.root),
-                (
-                    f"$squad-reviewer pr=1 head={self.head} base={f.base}"
-                    " implementer=implementer"
-                ),
-            ],
-        )
-        self.assertFalse(
-            any(
-                c[:2] == ["agent", "prompt"] and "--help" not in c
-                for c in calls
-            )
-        )
+        self.assertEqual(starts, [[
+            "agent", "start", result["name"], "--kind", "codex",
+            "--pane", result["pane_id"], "--", "--add-dir", str(f.root),
+        ]])
+        prompts = [
+            c for c in calls
+            if c[:2] == ["agent", "prompt"] and "--help" not in c
+        ]
+        self.assertEqual(prompts, [[
+            "agent", "prompt", result["name"],
+            f"$squad-reviewer pr=1 head={self.head} base={f.base}"
+            " implementer=implementer",
+        ]])
+        self.assertLess(calls.index(starts[0]), calls.index(prompts[0]))
+        self.assertFalse(any("--wait" in c or "send-keys" in c for c in calls))
         self.lifecycle("close")
+        self.assertFalse(self.path.exists())
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+
+    def test_startup_failure_retains_resources_without_prompt_or_retry(
+        self,
+    ) -> None:
+        for kind in ("codex", "claude"):
+            for settings, message in (
+                ({"start_failure": True}, "agent exited during startup"),
+                ({"start_state": "working"}, "timed out waiting"),
+                ({"start_state": "unknown"}, "timed out waiting"),
+            ):
+                with self.subTest(kind=kind, settings=settings):
+                    config_path = self.f.repo / ".agent-squad/config.json"
+                    config = json.loads(config_path.read_text())
+                    config["reviewer"]["kind"] = kind
+                    config_path.write_text(json.dumps(config))
+                    self.f.herdr_settings(
+                        start_failure=False, start_state="idle"
+                    )
+                    self.f.herdr_settings(**settings)
+                    result = self.lifecycle("launch", expected=1)
+                    self.assertIn(message, result["error"])
+                    self.assertIn("resources retained", result["error"])
+                    self.assertTrue(self.path.exists())
+                    model = self.f.herdr_model()
+                    calls = [
+                        c for c in model["calls"] if "--help" not in c
+                    ]
+                    self.assertEqual(sum(
+                        c[:2] == ["agent", "start"] for c in calls
+                    ), 1)
+                    self.assertFalse(any(
+                        c[:2] in (["agent", "prompt"], ["agent", "rename"])
+                        for c in calls
+                    ))
+                    if model["agents"]:
+                        # The timeout erased the name; unchanged cleanup
+                        # guards must refuse this occupant, retaining it.
+                        self.assertIsNone(model["agents"][0]["name"])
+                        self.lifecycle("close", expected=3)
+                        self.assertTrue(self.path.exists())
+                    # Simulate agent exit solely to reset this fake case.
+                    model["agents"] = []
+                    model["panes"][0]["agent"] = None
+                    self.f.save_herdr(model)
+                    self.lifecycle("close")
+                    model = self.f.herdr_model()
+                    model["calls"] = []
+                    self.f.save_herdr(model)
+
+    def test_fake_startup_contract(self) -> None:
+        self.worktree("create")
+        opened = self.f.run([
+            str(self.f.bin / "herdr"), "worktree", "open",
+            "--cwd", str(self.f.repo), "--path", str(self.path),
+            "--label", self.path.name, "--no-focus",
+        ])
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        pane = json.loads(opened.stdout)["result"]["root_pane"]
+        baseline = self.f.herdr_model()
+        for state, code in (
+            ("idle", None), ("blocked", "agent_not_ready"),
+            ("working", "timeout"), ("unknown", "timeout"),
+        ):
+            with self.subTest(state=state):
+                self.f.save_herdr(baseline)
+                self.f.herdr_settings(start_state=state)
+                started = self.f.run([
+                    str(self.f.bin / "herdr"), "agent", "start",
+                    self.path.name, "--kind", "codex", "--pane",
+                    pane["pane_id"],
+                ])
+                self.assertEqual(started.returncode, int(code is not None))
+                if code is not None:
+                    self.assertEqual(
+                        json.loads(started.stderr)["error"]["code"], code
+                    )
+                model = self.f.herdr_model()
+                self.assertEqual(len(model["agents"]), 1)
+                agent = model["agents"][0]
+                self.assertEqual(agent["agent_status"], state)
+                self.assertEqual(agent["name"], (
+                    None if code == "timeout" else self.path.name
+                ))
+                self.assertEqual(agent["pane_id"], pane["pane_id"])
+                self.assertEqual(agent["terminal_id"], pane["terminal_id"])
+                self.assertEqual(model["panes"][0]["agent"], "codex")
 
     def test_blocked_and_not_ready_leave_resources_and_adopt_creates_nothing(
         self,
     ) -> None:
-        for settings in (
-            {"start_state": "blocked"},
+        for kind, settings in product(("codex", "claude"), (
+            {"start_blocked_success": True},
             {"start_not_ready": True},
             {"prompt_state": "blocked"},
-        ):
-            with self.subTest(settings=settings):
+        )):
+            with self.subTest(kind=kind, settings=settings):
+                path = self.f.repo / ".agent-squad/config.json"
+                config = json.loads(path.read_text())
+                config["reviewer"]["kind"] = kind
+                path.write_text(json.dumps(config))
                 self.f.herdr_settings(
                     start_state="idle",
+                    start_blocked_success=False,
                     start_not_ready=False,
                     prompt_state="working",
                     **{},
@@ -224,6 +332,7 @@ class ReviewerTests(unittest.TestCase):
                 model["agents"][0]["agent_status"] = "idle"
                 model["settings"].update(
                     start_not_ready=False,
+                    start_blocked_success=False,
                     start_state="idle",
                     prompt_state="working",
                 )
@@ -247,8 +356,14 @@ class ReviewerTests(unittest.TestCase):
                 self.lifecycle("close")
 
     def test_prompt_failure_and_agent_not_found_are_not_retried(self) -> None:
-        for setting in ("prompt_failure", "prompt_agent_not_found"):
-            with self.subTest(setting=setting):
+        for kind, setting in product(
+            ("codex", "claude"), ("prompt_failure", "prompt_agent_not_found")
+        ):
+            with self.subTest(kind=kind, setting=setting):
+                path = self.f.repo / ".agent-squad/config.json"
+                config = json.loads(path.read_text())
+                config["reviewer"]["kind"] = kind
+                path.write_text(json.dumps(config))
                 self.f.herdr_settings(**{setting: True})
                 result = self.lifecycle("launch", expected=1)
                 self.assertIn("resources retained", result["error"])

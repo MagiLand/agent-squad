@@ -73,10 +73,10 @@ A parent row governs only the parent's own introductory text; each subsection's 
 | 7.8 Budget | Retained | — |
 | 7.9 Derived state | Superseded | §7.9: capabilities, human decisions, draft gate, ordering |
 | 7.10 Approval validity and merge | Superseded | §7.10: approval conditions and guarded cleanup |
-| 8 Herdr Handoff | Amended | §8.5: status-directed approved handoff; no new wait |
+| 8 Herdr Handoff | Amended | §§8.3, 8.5: deliver after startup; status-directed approved handoff |
 | 8.1 Reviewer name, worktree, and scratch directory | Retained | — |
 | 8.2 Herdr surface | Retained | — |
-| 8.3 Request: `reviewer launch` | Retained | — |
+| 8.3 Request: `reviewer launch` | Amended | §8.3: Codex uses `agent prompt` after idle startup so long reviews retain their name |
 | 8.4 Blocked detection | Retained | — |
 | 8.5 Result and stop: `handoff review-result` and `handoff stopped` | Amended | §8.5: status-directed approved handoff |
 | 8.6 Adopt: `reviewer adopt` | Retained | — |
@@ -432,9 +432,49 @@ The `rebase` merge method remains unsupported. A failed integration check retain
 
 ## 8. Herdr Handoff
 
-The subsections of v0.5.0 §8, including §8.3 and §8.4, are **retained** except for §8.5, amended below.
+The subsections of v0.5.0 §8, including §8.4, are **retained** except for §§8.3 and 8.5, amended below.
 
 *Informative.* The [#53 investigation recommendation](verification/2026-09-25-issue-53.md#recommendation-for-increment-4) found a persistent first-launch trust prompt, not a measured automatic transition from blocked to idle. There is no new post-error wait, retry loop, or readiness timeout. `agent_not_ready` keeps exit 3 and reports retained pane/workspace identities; a person answers, then `reviewer adopt` delivers to the now-idle Reviewer. Neither the tool nor a skill sends keys. Human approval waiting does not alter the tagged handoff lines or the asynchronous discipline. The amended §8.5 changes only the `approved` instruction sentence and directs the Implementer to current status in every approval scenario.
+
+*Informative.* Issue #100 identifies a separate startup contract defect: a Codex request passed as a startup argument can keep the Reviewer working through Herdr's startup deadline, causing timeout and loss of its managed name. Section 8.3 delivers the request after idle startup instead. This does not change the #53 trust behavior, adopt/close ownership checks, or Herdr timeout. Supervised live evidence is required before this fix can close the release-acceptance blocker; only the Developer decides release acceptance.
+
+*Informative.* The #53 observation was a Claude startup. In the [#100 Codex trial](verification/2026-09-30-issue-100.md), Herdr 0.9.3 instead reported a folder-trust prompt as `unknown`, then timed out and removed the Reviewer name; `reviewer adopt` could not recover that unnamed agent. A person answered trust and exited Codex to the shell before guarded `reviewer close` and a fresh launch succeeded. This observed limitation, including `doctor --live-reviewer` recovery for an unnamed agent, remains outside the delivery fix; it does not authorize weaker identity checks or automatic trust handling.
+
+### 8.3 Request: `reviewer launch`
+
+`agent-squad reviewer launch --pr <N>` performs, in order:
+
+1. fetches the base branch, derives the state (§7.9), and refuses on any gate: `not_pushed`, `stopped`, `needs_decision`, `unanchored_findings` (blocking findings only), `unaddressed_findings`, `same_head_requires_rejections` (unless `task_amended`), `budget_exhausted`; refuses when a live agent already carries the Reviewer name (use `reviewer adopt` or `reviewer close`);
+2. computes the target (§6.1) and refuses an empty scope;
+3. creates the detached review worktree at the head, or reuses an existing clean one at that head (`review-worktree create`), verifies its `HEAD`, and creates the scratch directory;
+4. opens the worktree in Herdr and verifies that the opened path equals the review worktree:
+
+   ```bash
+   herdr worktree open --cwd <primary-worktree> --path <review-worktree> --label reviewer-pr<N>-<sha7> --no-focus
+   ```
+
+5. starts the Reviewer in the returned root pane, with only the configured start arguments and no review request:
+
+   ```bash
+   herdr agent start reviewer-pr<N>-<sha7> --kind <reviewer.kind> --pane <pane-id> [-- <reviewer.start_args>...]
+   ```
+
+6. after successful startup and identity validation, delivers the request once through `herdr agent prompt reviewer-pr<N>-<sha7> "<line>"` without `--wait`. For Claude Code the line is, verbatim:
+
+   ```text
+   /squad-reviewer pr=<N> head=<full-sha> base=<full-sha> implementer=<implementer.agent_name>
+   ```
+
+   For Codex the line is, verbatim:
+
+   ```text
+   $squad-reviewer pr=<N> head=<full-sha> base=<full-sha> implementer=<implementer.agent_name>
+   ```
+
+7. reads the Reviewer's state once with `herdr agent get` for blocked detection (§8.4);
+8. prints the name, workspace and pane IDs, worktree path, target, delivery mechanism, and observed state.
+
+Both harness kinds use the adapter's `agent_prompt` delivery constant. There is no configuration selector or initial-prompt fallback in the runtime. Herdr must finish startup before the request begins, so a review lasting beyond the startup deadline cannot cause that deadline to remove its name. A startup timeout or genuine startup failure retains resources and fails without resending the request or starting another agent. Blocked startup still follows §8.4.
 
 ### 8.5 Result and stop: `handoff review-result` and `handoff stopped`
 
@@ -980,6 +1020,7 @@ With the fake forge and the fake Herdr, in temporary repositories:
 - `doctor` passes on an open issue's scratch directory, warns with the path for a closed issue, fails on an unreadable issue, and never removes the directory;
 - nested worktree creation and removal under `.agent-squad/worktrees`, including forced removal and the outer status staying clean;
 - `reviewer launch`, `adopt`, and `close`, including blocked at startup, `agent_not_ready`, prompt failure, `agent_not_found`, a workspace with an extra pane, and an already-exited Reviewer;
+- fake Herdr startup succeeds only when idle, preserves the name on blocked `agent_not_ready`, and times out working/unknown startup while removing the name and retaining the pane; a long Codex review launches successfully with one start and one prompt, no request in start arguments, preserved identity, and guarded close; genuine startup failures and timeouts retain resources without duplicate starts or requests;
 - token selection by role for every mutating command, asserted from the fake forge's call log;
 - `review post` with the batch rejection fallback, a stranded pending draft, and the unanchored-findings append;
 - optional-thread rejection bodies: accept `Not pursued:` with a reason and `Deferred to #<open issue>:`; refuse a bare `DISPOSITION rejected`, invalid bodies, and closed, missing, or pull-request references, with the fake forge call log proving the issue read;
@@ -1091,7 +1132,7 @@ Done when the four required trials and deterministic checks pass, each evidence 
 
 A Developer can start a ready issue and obtain exact-revision agent review on either forge, with dual or single identity as configured. Every unsettled thread is dispositioned, every settled disposition verified, and stops and Task changes remain under Developer authority. Single mode waits visibly and without polling for an independent human decision; valid agent and human approvals may arrive in either order. A standing instruction proceeds only when all conditions and holds allow; CI evidence is checked by the Implementer, the forge may still refuse, and actual integration is verified before guarded cleanup and the permitted primary fast-forward.
 
-The planned schedule targets 2026-10-02 with 2026-10-05 as the hard date. Preserve the plan's contingency: if behind on 10-01, two-account Forgejo fake coverage is the first scope to drop, trial 4 moves after release, and any launch fix is follow-up work. Such a cut MUST be recorded explicitly in the release scope/evidence and Developer decision, not silently reported as completed coverage. On current #53 evidence there is no launch fix to defer.
+The planned schedule targets 2026-10-02 with 2026-10-05 as the hard date. Preserve the plan's contingency: if behind on 10-01, two-account Forgejo fake coverage is the first scope to drop, trial 4 moves after release, and any launch fix is follow-up work. Such a cut MUST be recorded explicitly in the release scope/evidence and Developer decision, not silently reported as completed coverage. Issue #100's long-running Codex startup defect remains a release-acceptance blocker until its remedy is verified and the Developer lifts the blocker; it is distinct from #53's trust-prompt investigation.
 
 ### 17.8 Instructions to the implementing agent
 
