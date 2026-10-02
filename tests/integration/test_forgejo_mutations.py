@@ -3,10 +3,13 @@
 import json
 import sys
 import unittest
+from unittest.mock import patch
+from urllib.request import Request, urlopen
 
 from tests.forge_support import (
     ForgeFixture, ForgejoFixture, REPORT, TASK, finding,
 )
+from tests.fixtures.fake_forgejo import Handler
 
 
 class ForgejoMutationCases:
@@ -289,6 +292,118 @@ class ForgejoMutationCases:
         self.assertIn(body, wire)
         self.assertIn(body, f.status()["decisions"][-1]["body"])
         self.assertIn("Closes #1", f.status()["pr"]["evidence"]["body"])
+
+    def historical_base(self):
+        f = self.f
+        f.git("push", "origin", "main:refs/heads/historical-base")
+        model = f.read_model()
+        model["prs"]["1"].update(state="closed")
+        model["prs"]["1"]["base"]["ref"] = "historical-base"
+        f.save_model(model)
+
+    def pull_response(self, suffix):
+        request = Request(
+            self.f.server.base_url + "/api/v1/repos/MagiLand/trial/pulls"
+            + suffix,
+            headers={"Authorization": "token fake-token-developer"},
+        )
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+    def test_fake_reports_live_base_for_open_and_closed_prs(self):
+        f = self.f
+        self.historical_base()
+        for state in ("open", "closed"):
+            model = f.read_model()
+            model["prs"]["1"]["state"] = state
+            f.save_model(model)
+            for tip in (f.base, self.head, None):
+                with self.subTest(state=state, tip=tip):
+                    if tip is None:
+                        f.git("push", "origin", ":refs/heads/historical-base")
+                    else:
+                        f.git("push", "origin",
+                              f"{tip}:refs/heads/historical-base", "--force")
+                    listed = self.pull_response("?state=all")[0]
+                    single = self.pull_response("/1")
+                    for row in (listed, single):
+                        self.assertEqual(row["base"]["sha"], tip or "")
+                        self.assertEqual(row["merge_base"], f.base)
+
+    def test_create_ignores_unrelated_pr_after_its_base_is_deleted(self):
+        f = self.f
+        self.historical_base()
+        f.git("push", "origin", ":refs/heads/historical-base")
+        model = f.read_model()
+        # Simulate a missing head repository as well as the deleted base.
+        model["prs"]["1"]["head"].pop("sha")
+        model["prs"]["1"]["merge_base"] = ""
+        model["issues"]["2"] = dict(model["issues"]["1"], id=2, number=2)
+        f.save_model(model)
+        f.worktree = f.repo / ".agent-squad/worktrees/issue-2"
+        f.git("worktree", "add", "-b", "new-work", str(f.worktree), self.head)
+        f.git("push", "-u", "origin", "HEAD", cwd=f.worktree)
+        before = len(f.read_model()["calls"])
+        created = f.cli("pr", "create", "--as", "implementer", "--issue",
+                        "2", "--task", f.task, "--report", f.report)
+        self.assertEqual(created["number"], 2)
+        writes = self.writes(before)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]["method"], "POST")
+        self.assertTrue(writes[0]["path"].endswith("/pulls"))
+
+    def test_create_refuses_matching_prs_with_incomplete_metadata(self):
+        f = self.f
+        self.historical_base()
+        f.git("push", "origin", ":refs/heads/historical-base")
+        for state in ("open", "closed"):
+            for missing in (False, True):
+                with self.subTest(state=state, missing=missing):
+                    model = f.read_model()
+                    row = model["prs"]["1"]
+                    row["state"] = state
+                    if missing:
+                        row["head"].pop("sha", None)
+                        row.pop("merge_base", None)
+                    else:
+                        row["head"]["sha"] = ""
+                        row["merge_base"] = ""
+                    f.save_model(model)
+                    before = len(model["calls"])
+                    error = f.cli(
+                        "pr", "create", "--as", "implementer", "--issue",
+                        "1", "--report", f.report, expected=1,
+                    )
+                    self.assertIn("a PR already exists for this branch",
+                                  error["error"])
+                    self.assertEqual(self.writes(before), [])
+
+    def test_create_refuses_malformed_branch_identity_without_post(self):
+        f = self.f
+        dispatch = Handler.dispatch
+        for row, message in (
+            (None, "pull request"), ({}, "pull request head"),
+            ({"head": []}, "pull request head"),
+            ({"head": {}}, "head.ref"),
+            ({"head": {"ref": ""}}, "head.ref"),
+            ({"head": {"ref": 1}}, "head.ref"),
+        ):
+            def malformed(handler, model, auth, body):
+                status, result = dispatch(handler, model, auth, body)
+                if "/pulls?" in handler.path:
+                    return 200, [row]
+                return status, result
+
+            with self.subTest(row=row), patch.object(
+                Handler, "dispatch", malformed,
+            ):
+                before = len(f.read_model()["calls"])
+                error = f.cli(
+                    "pr", "create", "--as", "implementer", "--issue", "1",
+                    "--report", f.report, expected=1,
+                )
+                self.assertIn(message, error["error"])
+                self.assertEqual(self.writes(before), [])
 
     def test_merge_refusals_retain_resources_and_report_hidden_protection(
         self,

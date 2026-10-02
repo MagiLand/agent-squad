@@ -665,11 +665,14 @@ class Forgejo:
             raise
 
     def branch_prs(self, branch: str) -> list[dict[str, object]]:
-        return [
-            row
-            for row in self.listing(f"{self.prefix}/pulls?state=all")
-            if parse_pullrequest(row).head_branch == branch
-        ]
+        matches = []
+        for row in self.listing(f"{self.prefix}/pulls?state=all"):
+            data = object_value(row, "pull request")
+            head = object_value(data.get("head"), "pull request head")
+            # Historical PRs may lack commit metadata after branch deletion.
+            if V.require_string(head.get("ref"), "head.ref") == branch:
+                matches.append(data)
+        return matches
 
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str
