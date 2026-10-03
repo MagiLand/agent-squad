@@ -296,7 +296,8 @@ def cleanup_merge(
                 })
                 return steps
             if not step("review worktree", lambda: close_reviewer(
-                review, HerdrClient(repository.primary)
+                review,
+                HerdrClient(repository.primary, repository=repository),
             )):
                 return steps
 

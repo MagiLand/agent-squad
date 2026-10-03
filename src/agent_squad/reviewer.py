@@ -441,7 +441,9 @@ def launch(
     *,
     client: HerdrClient | None = None,
 ) -> dict:
-    client = client or HerdrClient(repository.primary)
+    client = client or HerdrClient(repository.primary, repository=repository)
+    # Refuse before any worktree, scratch directory or Herdr resource exists.
+    client.session()
     state = state_for(
         repository,
         forge.snapshot(pr),
@@ -555,7 +557,7 @@ def adopt(
     *,
     client: HerdrClient | None = None,
 ) -> dict:
-    client = client or HerdrClient(repository.primary)
+    client = client or HerdrClient(repository.primary, repository=repository)
     target = state_for(repository, forge.snapshot(pr))["target"]
     worktree = ReviewWorktree.for_pr(repository, pr, target["head"])
     resource = worktree.owner()["herdr"]
@@ -637,7 +639,7 @@ def handoff(
         raise AgentSquadError(
             "no matching tagged review or STOPPED exists on the PR"
         )
-    client = client or HerdrClient(repository.primary)
+    client = client or HerdrClient(repository.primary, repository=repository)
     name = repository.configuration.implementer.agent_name
     client.prompt(name, message)
     return {"pr": pr, "head": head, "target_agent": name, "message": message}

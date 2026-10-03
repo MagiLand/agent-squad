@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Stateful deterministic Herdr fixture; starts no harnesses or models."""
+"""Stateful deterministic Herdr fixture; starts no harnesses or models.
+
+The top level of the model file is the session named ``fixture``, which is
+also the default session. ``sessions`` maps further session names to states of
+the same shape. Each session has its own resources, settings and recorded
+calls. Like Herdr, the fixture chooses the session from HERDR_SOCKET_PATH,
+then HERDR_SESSION, then the default session.
+"""
 
 import json
 import os
@@ -38,11 +45,11 @@ results = [
 ]
 missing = os.environ.get("FAKE_HERDR_SCHEMA_MISSING")
 model_path = os.environ.get("FAKE_HERDR_MODEL")
-if model_path and os.path.exists(model_path):
-    with open(model_path) as stream:
-        model = json.load(stream)
-else:
-    model = {
+PRIMARY = "fixture"
+
+
+def blank():
+    return {
         "workspaces": [],
         "tabs": [],
         "panes": [],
@@ -51,14 +58,53 @@ else:
         "next_id": 1,
         "settings": {},
     }
-settings = model["settings"]
-model["calls"].append(args)
+
+
+if model_path and os.path.exists(model_path):
+    with open(model_path) as stream:
+        root = json.load(stream)
+else:
+    root = blank()
+states = {PRIMARY: root, **root.setdefault("sessions", {})}
+for state in states.values():
+    for key, value in blank().items():
+        state.setdefault(key, value)
+
+
+def socket_for(name):
+    directory = os.path.dirname(model_path) if model_path else os.getcwd()
+    return os.path.join(directory, f"herdr-{name}.sock")
+
+
+def running(name):
+    return states[name]["settings"].get("running", True)
+
+
+socket_path = os.environ.get("HERDR_SOCKET_PATH")
+if root["settings"].get("ignore_socket_path"):
+    # Deliberately off contract: a Herdr that does not honour the variable.
+    socket_path = None
+if socket_path:
+    target = next((n for n in states if socket_for(n) == socket_path), None)
+elif os.environ.get("HERDR_SESSION"):
+    target = os.environ["HERDR_SESSION"]
+else:
+    target = PRIMARY
+# None when the addressed session does not exist or is not running.
+model = states[target] if target in states and running(target) else None
+settings = (model or root)["settings"]
+if model is not None:
+    model["calls"].append(args)
+elif target in states:
+    states[target]["calls"].append(args)
+else:
+    root.setdefault("stray", []).append(args)
 
 
 def save():
     if model_path:
         with open(model_path, "w") as stream:
-            stream.write(json.dumps(model))
+            stream.write(json.dumps(root))
 
 
 def output(value):
@@ -99,11 +145,17 @@ def workspace(ident):
 def agent(name):
     if os.environ.get("FAKE_HERDR_MISSING_AGENT"):
         return None
-    if name == "implementer":
+    # ``implementer`` places the Implementer: false removes it, an object
+    # sets its name, kind and cwd. Only the default session has one unless a
+    # further session configures its own.
+    spec = settings.get("implementer", {} if model is root else False)
+    if isinstance(spec, dict) and name == spec.get("name", "implementer"):
         return {
             "name": name,
-            "agent": settings.get("implementer_kind", "codex"),
-            "cwd": os.getcwd(),
+            "agent": spec.get(
+                "kind", settings.get("implementer_kind", "codex")
+            ),
+            "cwd": spec.get("cwd", os.getcwd()),
             "agent_status": "working",
             "pane_id": "implementer-pane",
             "terminal_id": "implementer-terminal",
@@ -116,8 +168,36 @@ def forget(ident):
         model[key] = [v for v in model[key] if v["workspace_id"] != ident]
 
 
+socket_command = "--help" not in args and (
+    args == ["api", "snapshot"]
+    or args[:1] in (["agent"], ["worktree"], ["workspace"])
+)
 if args == ["--version"]:
     print("herdr fixture-discovery")
+elif args == ["session", "list", "--json"]:
+    if root["settings"].get("session_list_failure"):
+        failure("unsupported", "fixture has no session listing")
+    output(
+        root["settings"].get(
+            "session_list",
+            {
+                "sessions": [
+                    {
+                        "name": name,
+                        "default": name == PRIMARY,
+                        "running": running(name),
+                        "socket_path": socket_for(name),
+                    }
+                    for name in states
+                ]
+            },
+        )
+    )
+elif socket_command and model is None:
+    failure(
+        "server_not_running",
+        f"no herdr server is running at {socket_path or target}",
+    )
 elif args == ["api", "schema", "--json"]:
     output(
         {
@@ -169,7 +249,7 @@ elif "--help" in args:
         " --force workspace_id"
     )
 elif args == ["api", "snapshot"]:
-    if settings.get("unreachable"):
+    if settings.get("unreachable") or settings.get("snapshot_failure"):
         failure("unreachable", "fixture Herdr is unreachable")
     response(
         "session_snapshot",

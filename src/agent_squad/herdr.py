@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 
-from .initialization import AgentKind, AgentSquadError, decode_json
+from .initialization import (
+    AgentKind,
+    AgentSquadError,
+    Repository,
+    decode_json,
+    list_worktrees,
+)
 from .conventions import SHA, TAG, render_line
 
 
@@ -25,6 +32,17 @@ class HerdrCommandError(HerdrError):
         self.code = code
 
 
+class HerdrSessionError(HerdrError):
+    """No single running session holds this repository's Implementer."""
+
+    def __init__(self, message: str, matches: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.matches = matches
+
+
+# Herdr chooses its session from these; the adapter never inherits them when
+# it addresses the Implementer's session (§8.2).
+SESSION_VARIABLES = ("HERDR_SESSION", "HERDR_SOCKET_PATH")
 # Selected by the live delivery experiment, not by consumer configuration.
 REVIEW_DELIVERY = {
     AgentKind.CLAUDE: "agent_prompt",
@@ -114,8 +132,21 @@ class HerdrInstallation:
     protocol: int
 
 
+@dataclass(frozen=True)
+class HerdrSession:
+    """One entry of ``herdr session list --json``."""
+
+    name: str
+    running: bool
+    socket_path: str
+
+
 class HerdrClient:
-    """Small adapter for the exact Herdr surface Agent Squad needs."""
+    """Small adapter for the exact Herdr surface Agent Squad needs.
+
+    Given a repository, every call is addressed to the one running session
+    that holds its Implementer, whatever session the calling process inherited.
+    """
 
     _REQUIRED_METHODS = {
         "agent.get": "AgentTarget",
@@ -170,11 +201,133 @@ class HerdrClient:
         *,
         executable: str | Path | None = None,
         timeout_seconds: float = 45.0,
+        repository: Repository | None = None,
     ) -> None:
         self._working_directory = working_directory
         self._configured_executable = executable
         self._timeout_seconds = timeout_seconds
         self._executable: Path | None = None
+        # Without a repository the inherited session is used; only the
+        # doctor's fallback and the adapter's own tests rely on that.
+        self._repository = repository
+        self._session: HerdrSession | HerdrError | None = None
+
+    def session(self) -> HerdrSession:
+        """Find the Implementer's session once; later calls reuse the result.
+
+        A refusal is remembered too, so one command never searches twice.
+        """
+        if self._repository is None:
+            raise HerdrError("this Herdr client has no repository to resolve")
+        if self._session is None:
+            try:
+                self._session = self._resolve_session(self._repository)
+            except HerdrError as error:
+                self._session = error
+        if isinstance(self._session, HerdrError):
+            raise self._session
+        return self._session
+
+    def use_inherited_session(self) -> None:
+        """Fall back to the calling process's session (doctor only)."""
+        self._repository = None
+
+    def sessions(self) -> tuple[HerdrSession, ...]:
+        """List the machine's sessions, rejecting a malformed listing."""
+        listing = self._decode_object(
+            self._run(("session", "list", "--json")).stdout,
+            "Herdr session listing",
+        )
+        values = listing.get("sessions")
+        if not isinstance(values, list):
+            raise HerdrError("Herdr session listing has no sessions array")
+        sessions = []
+        for value in values:
+            if not isinstance(value, dict) or type(
+                value.get("running")
+            ) is not bool:
+                raise HerdrError("Herdr session listing has an invalid entry")
+            socket_path = _required_text(
+                value.get("socket_path"), "Herdr session socket_path"
+            )
+            if not Path(socket_path).is_absolute():
+                raise HerdrError(
+                    "Herdr session socket_path must be an absolute path"
+                )
+            sessions.append(HerdrSession(
+                _required_text(value.get("name"), "Herdr session name"),
+                value["running"],
+                socket_path,
+            ))
+        return tuple(sessions)
+
+    def _resolve_session(self, repository: Repository) -> HerdrSession:
+        implementer = repository.configuration.implementer
+        roots = [w.root for w in list_worktrees(repository.primary)]
+        examined: list[str] = []
+        unreadable: list[str] = []
+        matches: list[HerdrSession] = []
+        for session in self.sessions():
+            if not session.running:
+                continue
+            examined.append(session.name)
+            try:
+                agent = self._get_agent(
+                    implementer.agent_name,
+                    role="Implementer",
+                    socket_path=session.socket_path,
+                )
+            except HerdrError as error:
+                unreadable.append(
+                    f"{session.name} ({format_herdr_error(str(error))})"
+                )
+                continue
+            if (
+                agent is not None
+                and agent.get("name") == implementer.agent_name
+                and agent.get("agent") == implementer.kind.value
+                and _is_inside(agent.get("cwd"), roots)
+            ):
+                matches.append(session)
+        if len(matches) == 1:
+            return matches[0]
+        wanted = (
+            f"Implementer {implementer.agent_name!r} (kind"
+            f" {implementer.kind.value!r}) working in {repository.primary}"
+        )
+        detail = "; sessions examined: " + (", ".join(examined) or "none")
+        if matches:
+            names = tuple(session.name for session in matches)
+            raise HerdrSessionError(
+                f"several running Herdr sessions hold {wanted}: "
+                + ", ".join(names)
+                + detail,
+                names,
+            )
+        if unreadable:
+            detail += "; sessions that could not be read: " + ", ".join(
+                unreadable
+            )
+        raise HerdrSessionError(
+            f"no running Herdr session holds {wanted}{detail}", ()
+        )
+
+    def _verify_session_addressing(self) -> None:
+        """Prove that Herdr offers the listing and honours the socket path."""
+        sessions = self.sessions()
+        base = next(
+            (s.socket_path for s in sessions if s.running),
+            str(self._working_directory / "herdr.sock"),
+        )
+        absent = base + ".agent-squad-absent"
+        result = self._run(
+            ("api", "snapshot"), allow_failure=True, socket_path=absent
+        )
+        if result.returncode == 0:
+            raise HerdrError(
+                "installed Herdr does not honour HERDR_SOCKET_PATH: a"
+                f" snapshot addressed to the absent socket {absent} succeeded"
+            )
 
     def discover(
         self,
@@ -276,6 +429,7 @@ class HerdrClient:
                 raise HerdrError(
                     "Herdr session snapshot has no version string"
                 )
+            self._verify_session_addressing()
 
         except HerdrError as error:
             for role in roles:
@@ -553,10 +707,12 @@ class HerdrClient:
         agent_name: str,
         *,
         role: str = "Reviewer",
+        socket_path: str | None = None,
     ) -> dict[str, object] | None:
         result = self._run(
             ("agent", "get", agent_name),
             allow_failure=True,
+            socket_path=socket_path,
         )
         if result.returncode != 0:
             error = _decode_error_response(result.stderr or result.stdout)
@@ -599,12 +755,30 @@ class HerdrClient:
         arguments: tuple[str, ...],
         *,
         allow_failure: bool = False,
+        socket_path: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         executable = self._resolve_executable()
+        environment = None
+        listing = arguments[:2] == ("session", "list")
+        if (
+            not listing
+            and socket_path is None
+            and self._repository is not None
+        ):
+            socket_path = self.session().socket_path
+        if listing or socket_path is not None:
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in SESSION_VARIABLES
+            }
+            if socket_path is not None:
+                environment["HERDR_SOCKET_PATH"] = socket_path
         try:
             result = subprocess.run(
                 [str(executable), *arguments],
                 cwd=self._working_directory,
+                env=environment,
                 check=False,
                 shell=False,
                 text=True,
@@ -680,6 +854,17 @@ def _process_detail(process: subprocess.CompletedProcess[str]) -> str:
     return (process.stderr or process.stdout).strip() or (
         f"exit status {process.returncode}"
     )
+
+
+def _is_inside(cwd: object, roots: list[Path]) -> bool:
+    """Whether an agent's directory is in, or below, one of the checkouts."""
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+        return False
+    try:
+        resolved = Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return any(root == resolved or root in resolved.parents for root in roots)
 
 
 def _required_text(value: object, label: str) -> str:
