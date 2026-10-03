@@ -396,6 +396,96 @@ class DoctorTests(unittest.TestCase):
                 self.diagnostic(
                     result, "Herdr Implementer discovery and integration")
 
+    def test_names_the_resolved_session_and_checks_it(self) -> None:
+        f = self.f
+        elsewhere = f.root / "elsewhere"
+        elsewhere.mkdir()
+        f.herdr_settings(implementer={"cwd": str(elsewhere)})
+        f.herdr_session("ours", implementer={})
+        for inherited in ("fixture", "ours", None):
+            with self.subTest(inherited=inherited):
+                f.inherit_herdr(inherited)
+                result = f.cli("doctor", "--live-reviewer")
+                self.assertEqual(
+                    self.diagnostic(
+                        result, "Herdr Implementer session", "pass",
+                    )["detail"],
+                    f"ours ({f.herdr_socket('ours')})",
+                )
+                self.diagnostic(result, "Implementer identity", "pass")
+                model = f.herdr_model()
+                self.assertEqual(
+                    {tuple(c[:2]) for c in model["calls"]},
+                    {("session", "list"), ("agent", "get")},
+                )
+                ours = model["sessions"]["ours"]
+                self.assertEqual(ours["workspaces"], [])
+                for command in (
+                    ["api", "snapshot"], ["integration", "status"],
+                    ["worktree", "open"], ["agent", "start"],
+                ):
+                    self.assertTrue(
+                        any(c[:2] == command and "--help" not in c
+                            for c in ours["calls"]),
+                        command,
+                    )
+                model["calls"] = []
+                ours["calls"] = []
+                f.save_herdr(model)
+
+    def test_no_session_warns_and_several_sessions_fail(self) -> None:
+        f = self.f
+        f.herdr_session("twin", implementer={})
+        result = f.cli("doctor", "--live-reviewer", expected=1)
+        for name in ("Herdr Implementer session", "live Reviewer"):
+            self.assertIn(
+                "several running Herdr sessions hold Implementer"
+                " 'implementer' (kind 'codex') working in "
+                f"{f.repo}: fixture, twin; sessions examined: fixture, twin",
+                self.diagnostic(result, name)["detail"],
+            )
+        self.assertIsNone(result["live_reviewer"])
+        self.assertEqual(result["exit_code"], 1)
+        self.diagnostic(f.cli("doctor", expected=1),
+                        "Herdr Implementer session")
+
+        model = f.herdr_model()
+        model["settings"]["implementer"] = False
+        model["sessions"]["twin"]["settings"]["implementer"] = False
+        model["calls"] = []
+        f.save_herdr(model)
+        f.inherit_herdr("fixture")
+        result = f.cli("doctor")
+        self.assertTrue(result["ok"])
+        self.assertIn(
+            "no running Herdr session holds Implementer 'implementer'",
+            self.diagnostic(
+                result, "Herdr Implementer session", "warn")["detail"],
+        )
+        self.diagnostic(result, "Implementer identity", "warn")
+        # The remaining Herdr rows fall back to the inherited session.
+        self.diagnostic(result, "Herdr socket and inventory", "pass")
+        self.assertIn(["api", "snapshot"], f.herdr_model()["calls"])
+        before = f.git("worktree", "list", "--porcelain")
+        result = f.cli("doctor", "--live-reviewer", expected=1)
+        self.assertIn(
+            "no running Herdr session holds",
+            self.diagnostic(result, "live Reviewer")["detail"],
+        )
+        self.assertIsNone(result["live_reviewer"])
+        self.assertEqual(f.git("worktree", "list", "--porcelain"), before)
+        model = f.herdr_model()
+        for state in (model, model["sessions"]["twin"]):
+            self.assertEqual(state["workspaces"], [])
+
+    def test_unusable_session_listing_fails(self) -> None:
+        self.f.herdr_settings(session_list_failure=True)
+        result = self.f.cli("doctor", expected=1)
+        self.assertIn(
+            "herdr session list failed",
+            self.diagnostic(result, "Herdr Implementer session")["detail"],
+        )
+
     def test_socket_unreachable_from_current_process(self) -> None:
         self.f.herdr_settings(unreachable=True)
         result = self.f.cli("doctor", expected=1)

@@ -123,7 +123,9 @@ def state_for(
     )
     live = False
     if include_reviewer:
-        client = herdr_client or HerdrClient(repository.primary)
+        client = herdr_client or HerdrClient(
+            repository.primary, repository=repository
+        )
         try:
             live = (
                 client.get_agent(reviewer_name(pr.number, pr.head)) is not None

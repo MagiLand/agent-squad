@@ -99,6 +99,193 @@ class ReviewerTests(unittest.TestCase):
         self.assertEqual(f.status()["next_action"], "launch_review")
         self.assertEqual(f.herdr_model()["workspaces"], [])
 
+    def two_sessions(self) -> None:
+        """Default session: another repository's implementer. Ours: `ours`."""
+        elsewhere = self.f.root / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        self.f.herdr_settings(implementer={"cwd": str(elsewhere)})
+        self.f.herdr_session("ours", implementer={})
+
+    def test_launch_creates_reviewer_in_the_implementers_session(
+        self,
+    ) -> None:
+        f = self.f
+        self.two_sessions()
+        f.inherit_herdr("fixture")
+        result = self.lifecycle("launch")
+        model = f.herdr_model()
+        ours = model["sessions"]["ours"]
+        self.assertEqual([a["name"] for a in ours["agents"]], [result["name"]])
+        self.assertEqual(
+            [w["label"] for w in ours["workspaces"]], [result["name"]]
+        )
+        self.assertEqual(
+            [c[2] for c in ours["calls"] if c[:2] == ["agent", "prompt"]],
+            ["--help", result["name"]],
+        )
+        # The inherited session is read while searching and never changed.
+        for key in ("workspaces", "tabs", "panes", "agents"):
+            self.assertEqual(model[key], [], key)
+        self.assertEqual(
+            {tuple(c[:2]) for c in model["calls"]},
+            {("session", "list"), ("agent", "get")},
+        )
+
+    def mutations(self, calls: list) -> list:
+        return [
+            c for c in calls
+            if "--help" not in c and c[:2] in (
+                ["worktree", "open"], ["worktree", "remove"],
+                ["agent", "start"], ["agent", "prompt"],
+                ["workspace", "close"],
+            )
+        ]
+
+    def test_inherited_variables_never_decide_the_session(self) -> None:
+        f = self.f
+        self.two_sessions()
+        # The right session, another one, a session that is gone, and none.
+        for inherited in ("ours", "fixture", "absent", None):
+            with self.subTest(inherited=inherited):
+                f.inherit_herdr(inherited)
+                result = self.lifecycle("launch")
+                ours = f.herdr_model()["sessions"]["ours"]
+                self.assertEqual(
+                    [a["name"] for a in ours["agents"]], [result["name"]]
+                )
+                self.assertTrue(f.status()["gates"]["reviewer_live"])
+                self.assertEqual(
+                    self.lifecycle("adopt")["observed_state"], "working"
+                )
+                self.lifecycle("close")
+                model = f.herdr_model()
+                self.assertEqual(model["sessions"]["ours"]["workspaces"], [])
+                self.assertFalse(self.path.exists())
+                self.assertFalse(f.status()["gates"]["reviewer_live"])
+                self.assertEqual(self.mutations(model["calls"]), [])
+                self.assertEqual(
+                    len(self.mutations(model["sessions"]["ours"]["calls"])), 5
+                )
+                model["sessions"]["ours"]["calls"] = []
+                f.save_herdr(model)
+
+    def test_launch_without_one_session_refuses_and_creates_nothing(
+        self,
+    ) -> None:
+        f = self.f
+        wanted = (
+            "Implementer 'implementer' \\(kind 'codex'\\) working in "
+            + str(f.repo)
+        )
+        scratch = f.repo / ".agent-squad/review-scratch/pr1"
+        before = f.git("worktree", "list", "--porcelain")
+        f.herdr_session("stopped", running=False, implementer={})
+        f.herdr_session("twin", implementer={})
+        for settings, message in (
+            (
+                {"twin": False},
+                f"no running Herdr session holds {wanted};"
+                " sessions examined: fixture, twin$",
+            ),
+            (
+                {"twin": {}},
+                f"several running Herdr sessions hold {wanted}:"
+                " fixture, twin; sessions examined: fixture, twin$",
+            ),
+        ):
+            with self.subTest(settings=settings):
+                model = f.herdr_model()
+                model["settings"]["implementer"] = settings["twin"]
+                model["sessions"]["twin"]["settings"]["implementer"] = (
+                    settings["twin"]
+                )
+                f.save_herdr(model)
+                result = self.lifecycle("launch", expected=1)
+                self.assertRegex(result["error"], message)
+                self.assertFalse(self.path.exists())
+                self.assertFalse(scratch.exists())
+                self.assertEqual(
+                    f.git("worktree", "list", "--porcelain"), before
+                )
+                model = f.herdr_model()
+                for state in (model, *model["sessions"].values()):
+                    self.assertEqual(state["workspaces"], [])
+                    self.assertEqual(self.mutations(state["calls"]), [])
+                self.assertEqual(model["sessions"]["stopped"]["calls"], [])
+
+    def test_handoffs_prompt_only_the_resolved_implementer(self) -> None:
+        f = self.f
+        self.two_sessions()
+        f.review("approved", [])
+        f.cli(
+            "stop", "post", "--as", "reviewer", "--pr", "1", "--head",
+            self.head, "--reason", "budget", "--body",
+            f.write("stop.md", "Stop."),
+        )
+        commands = (
+            ("review-result", "--verdict", "approved"),
+            ("stopped", "--reason", "budget"),
+        )
+        for inherited in ("fixture", "ours", None):
+            f.inherit_herdr(inherited)
+            for command in commands:
+                with self.subTest(inherited=inherited, command=command[0]):
+                    result = f.cli(
+                        "handoff", command[0], "--pr", "1", "--head",
+                        self.head, *command[1:],
+                    )
+                    model = f.herdr_model()
+                    self.assertEqual(
+                        self.mutations(model["sessions"]["ours"]["calls"]),
+                        [["agent", "prompt", "implementer",
+                          result["message"]]],
+                    )
+                    self.assertEqual(self.mutations(model["calls"]), [])
+                    model["sessions"]["ours"]["calls"] = []
+                    f.save_herdr(model)
+        model = f.herdr_model()
+        model["sessions"]["ours"]["settings"]["implementer"] = False
+        f.save_herdr(model)
+        for command in commands:
+            with self.subTest(refused=command[0]):
+                result = f.cli(
+                    "handoff", command[0], "--pr", "1", "--head", self.head,
+                    *command[1:], expected=1,
+                )
+                self.assertIn(
+                    "no running Herdr session holds", result["error"]
+                )
+                model = f.herdr_model()
+                for state in (model, model["sessions"]["ours"]):
+                    self.assertEqual(self.mutations(state["calls"]), [])
+
+    def test_no_session_hides_reviewer_from_status_and_keeps_resources(
+        self,
+    ) -> None:
+        f = self.f
+        self.lifecycle("launch")
+        workspaces = f.herdr_model()["workspaces"]
+        self.assertEqual(len(workspaces), 1)
+        f.herdr_settings(implementer=False)
+        before = len(self.mutations(f.herdr_model()["calls"]))
+        state = f.status()
+        self.assertFalse(state["gates"]["reviewer_live"])
+        self.assertEqual(state["next_action"], "launch_review")
+        adopted = self.lifecycle("adopt", expected=1)
+        self.assertIn("no running Herdr session holds", adopted["error"])
+        closed = self.lifecycle("close", expected=3)
+        self.assertIn("no running Herdr session holds", closed["error"])
+        self.assertIn("resources retained", closed["error"])
+        self.assertTrue(self.path.exists())
+        model = f.herdr_model()
+        self.assertEqual(model["workspaces"], workspaces)
+        self.assertEqual(len(model["agents"]), 1)
+        self.assertEqual(len(self.mutations(model["calls"])), before)
+        f.herdr_settings(implementer={})
+        self.assertTrue(f.status()["gates"]["reviewer_live"])
+        self.lifecycle("close")
+        self.assertFalse(self.path.exists())
+
     def test_create_reuses_clean_owned_worktree_and_refuses_dirty(
         self,
     ) -> None:
@@ -386,11 +573,19 @@ class ReviewerTests(unittest.TestCase):
     ) -> None:
         self.f.herdr_settings(unreachable=True)
         self.assertEqual(self.f.status()["next_action"], "launch_review")
+        # An unreadable session cannot be resolved: nothing is created.
+        self.assertIn(
+            "sessions that could not be read: fixture",
+            self.lifecycle("launch", expected=1)["error"],
+        )
+        self.assertFalse(self.path.exists())
+        # A failure after resolution still retains the created worktree.
+        self.f.herdr_settings(unreachable=False, snapshot_failure=True)
         self.assertIn(
             str(self.path), self.lifecycle("launch", expected=1)["error"]
         )
         self.assertTrue(self.path.exists())
-        self.f.herdr_settings(unreachable=False)
+        self.f.herdr_settings(snapshot_failure=False)
         self.assertTrue(self.lifecycle("launch")["reused"])
         self.lifecycle("close")
 

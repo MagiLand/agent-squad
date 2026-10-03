@@ -47,7 +47,15 @@ using `--force` to replace it. Installation does not install `code-review`.
 
 Start your interactive Implementer inside Herdr in the consuming repository's
 primary checkout. Its live agent name must match `implementer.agent_name`
-(default `implementer`). Then initialize, substituting the two account names:
+(default `implementer`) and its kind must match `implementer.kind`.
+
+Herdr can run several named sessions. Agent Squad finds the one running
+session whose agent has that name and kind and works inside this repository,
+and sends every Herdr call there, whatever session the calling process
+inherited. Commands that need Herdr refuse when no session or more than one
+matches; `doctor` names the session it found.
+
+Then initialize, substituting the two account names:
 
 ```bash
 agent-squad init --implementer-account <login> --reviewer-account <different-login>

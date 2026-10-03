@@ -108,7 +108,9 @@ class ForgeFixture:
             key: value
             for key, value in os.environ.items()
             if not (
-                key.startswith(("GIT_", "GH_", "GITHUB_", "PYTHON", "FAKE_"))
+                key.startswith(
+                    ("GIT_", "GH_", "GITHUB_", "PYTHON", "FAKE_", "HERDR_")
+                )
             )
         }
         self.env.update(
@@ -260,6 +262,24 @@ class ForgeFixture:
         model = self.herdr_model()
         model["settings"].update(values)
         self.save_herdr(model)
+
+    def herdr_session(self, name: str, **settings: object) -> None:
+        """Add a further fake session; ``fixture`` is the default one."""
+        model = self.herdr_model()
+        model.setdefault("sessions", {})[name] = {"settings": settings}
+        self.save_herdr(model)
+
+    def herdr_socket(self, name: str = "fixture") -> str:
+        return str(self.root / f"herdr-{name}.sock")
+
+    def inherit_herdr(self, name: str | None) -> None:
+        """Point the inherited Herdr variables at a session, or clear them."""
+        for key in ("HERDR_SESSION", "HERDR_SOCKET_PATH"):
+            self.env.pop(key, None)
+        if name is not None:
+            self.env.update(
+                HERDR_SESSION=name, HERDR_SOCKET_PATH=self.herdr_socket(name)
+            )
 
     def cli(
         self, *args: str, expected: int = 0, cwd: Path | None = None

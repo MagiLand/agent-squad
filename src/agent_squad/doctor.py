@@ -10,7 +10,7 @@ import tempfile
 from typing import Callable, Iterator
 
 from .forge import Forge, PullRequest, make_forge
-from .herdr import HerdrClient, HerdrError
+from .herdr import HerdrClient, HerdrError, HerdrSessionError
 from .initialization import (
     AgentSquadError,
     LOCAL_EXCLUDE_PATTERNS,
@@ -397,7 +397,23 @@ def diagnose(
         )
         add("approver accounts", "pass", "empty as required in dual mode")
 
-    client = herdr_client or HerdrClient(repository.root)
+    client = herdr_client or HerdrClient(
+        repository.root, repository=repository
+    )
+    # Without one matching session the remaining Herdr checks use the
+    # inherited session, as before; the Developer's session may start later.
+    session_error: HerdrError | None = None
+    try:
+        session = client.session()
+        add(
+            "Herdr Implementer session", "pass",
+            f"{session.name} ({session.socket_path})",
+        )
+    except HerdrError as error:
+        session_error = error
+        missing = isinstance(error, HerdrSessionError) and not error.matches
+        add("Herdr Implementer session", "warn" if missing else "fail", error)
+        client.use_inherited_session()
     discoveries = client.discover_roles({
         "Reviewer": config.reviewer.kind,
         "Implementer": config.implementer.kind,
@@ -450,7 +466,11 @@ def diagnose(
 
     live = None
     retained = False
-    if live_reviewer and not any(d.severity == "fail" for d in diagnostics):
+    if live_reviewer and session_error is not None:
+        add("live Reviewer", "fail", session_error)
+    elif live_reviewer and not any(
+        d.severity == "fail" for d in diagnostics
+    ):
         from .reviewer import live_probe
 
         try:

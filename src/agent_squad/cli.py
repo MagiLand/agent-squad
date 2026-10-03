@@ -197,7 +197,7 @@ def execute(args: argparse.Namespace) -> dict:
             repository, args.pr, args.head or forge.pr(args.pr).head
         )
         return reviewer.close_reviewer(
-            worktree, HerdrClient(repository.primary)
+            worktree, HerdrClient(repository.primary, repository=repository)
         )
     if args.group == "handoff":
         return reviewer.handoff(
