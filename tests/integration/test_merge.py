@@ -22,6 +22,43 @@ from agent_squad.merging import (
 )
 
 
+class ExternalWorktreeMergeTests(unittest.TestCase):
+    def test_cleanup_resolves_session_before_removing_implementation(
+        self,
+    ) -> None:
+        """PR #108 REV-1: the Implementer works in the issue worktree."""
+        f = ForgeFixture()
+        self.addCleanup(f.close)
+        f.initialize()
+        path = f.repo / ".agent-squad/config.json"
+        config = json.loads(path.read_text())
+        config["worktree_root"] = str(f.root / "external-worktrees")
+        path.write_text(json.dumps(config))
+        f.worktree = Path(config["worktree_root"]) / "issue-1"
+        f.git("worktree", "add", "-b", "issue-1", str(f.worktree))
+        f.push("value = 1\nsecond = 2\nthird = 3\n")
+        f.create_pr()
+        f.herdr_settings(implementer={"cwd": str(f.worktree)})
+        review = Path(f.cli("reviewer", "launch", "--pr", "1")["worktree"])
+        f.review("approved")
+        model = f.herdr_model()
+        model["calls"] = []
+        f.save_herdr(model)
+        result = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
+                       cwd=f.repo)
+        self.assertTrue(result["merged"])
+        self.assertEqual(
+            [s for s in result["cleanup"] if not s["ok"]], [])
+        self.assertFalse(f.worktree.exists())
+        self.assertFalse(review.exists())
+        model = f.herdr_model()
+        self.assertEqual(model["workspaces"], [])
+        self.assertEqual(
+            sum(c == ["session", "list", "--json"] for c in model["calls"]),
+            1,
+        )
+
+
 class MergeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.f = ForgeFixture()

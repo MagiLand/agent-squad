@@ -11,7 +11,7 @@ from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
 from .forge import ForgeError, Forge
-from .herdr import HerdrClient
+from .herdr import HerdrClient, HerdrError
 from .initialization import (
     AgentSquadError,
     GateError,
@@ -245,6 +245,26 @@ def cleanup_merge(
     if not step("remote-tracking ref", remove_tracking):
         return steps
 
+    root = repository.resolve_root(repository.configuration.worktree_root)
+
+    def review_worktrees() -> list:
+        return [
+            w for w in list_worktrees(repository.primary)
+            if w.root.parent == root and re.fullmatch(
+                rf"reviewer-pr{pr}-[0-9a-f]{{7}}", w.root.name
+            )
+        ]
+
+    # Resolve the Implementer's session while the implementation worktree is
+    # still registered: the Implementer may be working in it (§8.2). A refusal
+    # is remembered by the client and fails the Reviewer step below.
+    client = HerdrClient(repository.primary, repository=repository)
+    if review_worktrees():
+        try:
+            client.session()
+        except HerdrError:
+            pass
+
     issue: int
 
     def remove_implementation() -> str:
@@ -281,25 +301,20 @@ def cleanup_merge(
 
     if not step("local branch", remove_branch):
         return steps
-    root = repository.resolve_root(repository.configuration.worktree_root)
     # Paths identify candidates only; ReviewWorktree checks Git and Herdr
     # ownership before it removes any candidate.
-    for worktree in list_worktrees(repository.primary):
-        if worktree.root.parent == root and re.fullmatch(
-            rf"reviewer-pr{pr}-[0-9a-f]{{7}}", worktree.root.name
+    for worktree in review_worktrees():
+        review = ReviewWorktree.for_pr(repository, pr, worktree.head)
+        if review.path != worktree.root:
+            steps.append({
+                "step": "review worktree", "ok": False,
+                "detail": f"review path/HEAD mismatch: {worktree.root}",
+            })
+            return steps
+        if not step(
+            "review worktree", lambda: close_reviewer(review, client)
         ):
-            review = ReviewWorktree.for_pr(repository, pr, worktree.head)
-            if review.path != worktree.root:
-                steps.append({
-                    "step": "review worktree", "ok": False,
-                    "detail": f"review path/HEAD mismatch: {worktree.root}",
-                })
-                return steps
-            if not step("review worktree", lambda: close_reviewer(
-                review,
-                HerdrClient(repository.primary, repository=repository),
-            )):
-                return steps
+            return steps
 
     def remove_scratch(scratch: Path) -> str:
         if scratch.is_symlink():
