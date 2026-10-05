@@ -1141,6 +1141,77 @@ class DerivedStateTests(unittest.TestCase):
         self.assertEqual(result["budget"]["used"], 1)
         self.assertFalse(result["approval"]["approved"])
 
+    def test_dismissal_of_a_mirroring_review_is_not_a_state_mismatch(
+        self,
+    ) -> None:
+        # Forgejo dismisses pass 1 when the same Reviewer approves pass 2.
+        passes = (
+            review(10, "changes_requested",
+                   findings="REV-1 [blocking] Finding"),
+            review(14, head=J),
+        )
+        s = snapshot(
+            reviews=(replace(passes[0], dismissed=True), passes[1]),
+            comments=(root(), reply(12, f"DISPOSITION fixed {J}"),
+                      reply(13, "VERIFIED fixed", author="reviewer")),
+            head=J,
+        )
+        result = derive_state(s)
+        self.assertEqual(result["next_action"], "approved")
+        self.assertTrue(result["approval"]["approved"])
+        self.assertEqual(result["diagnostics"], [])
+        latest = replace(s, reviews=(
+            s.reviews[0], replace(passes[1], dismissed=True),
+        ))
+        result = derive_state(latest)
+        self.assertFalse(result["approval"]["approved"])
+        self.assertEqual(result["approval"]["reasons"],
+                         ["latest review was dismissed on the forge"])
+        self.assertEqual(result["next_action"], "launch_review")
+        self.assertEqual(result["diagnostics"], [])
+
+    def test_differing_review_state_keeps_mismatch_and_reason(self) -> None:
+        github = replace(review(10, state=ReviewState.COMMENTED),
+                         dismissed=True, display_state="DISMISSED")
+        for latest, label in (
+            (review(10, state=ReviewState.COMMENTED), "commented"),
+            (review(10, state=ReviewState.CHANGES_REQUESTED),
+             "changes_requested"),
+            (replace(review(10, state=ReviewState.CHANGES_REQUESTED),
+                     dismissed=True), "changes_requested"),
+            (github, "DISMISSED"),
+        ):
+            with self.subTest(latest=latest):
+                result = derive_state(snapshot(reviews=(latest,)))
+                self.assertFalse(result["approval"]["approved"])
+                self.assertEqual(result["approval"]["reasons"],
+                                 ["forge review state is not approved"])
+                self.assertEqual(
+                    [(d["kind"], d["id"], d["detail"])
+                     for d in result["diagnostics"]],
+                    [("forge_state_mismatch", 10,
+                      f"{label} does not mirror approved")],
+                )
+        earlier = replace(
+            review(10, "changes_requested",
+                   findings="REV-1 [blocking] Finding",
+                   state=ReviewState.COMMENTED),
+            dismissed=True, display_state="DISMISSED",
+        )
+        s = snapshot(
+            reviews=(earlier, review(14, head=J)),
+            comments=(root(), reply(12, f"DISPOSITION fixed {J}"),
+                      reply(13, "VERIFIED fixed", author="reviewer")),
+            head=J,
+        )
+        result = derive_state(s)
+        self.assertEqual(result["next_action"], "approved")
+        self.assertEqual(
+            [(d["kind"], d["detail"]) for d in result["diagnostics"]],
+            [("forge_state_mismatch",
+              "DISMISSED does not mirror changes_requested")],
+        )
+
     def test_id_allocation_uses_other_authors_and_resolved_threads(
         self,
     ) -> None:
@@ -1304,6 +1375,32 @@ class SingleIdentityTests(unittest.TestCase):
         self.assertNotIn('human_approvals', dual)
         self.assertEqual(dual['approval']['reasons'],
                          ['forge review state is not approved'])
+
+    def test_dismissal_reason_and_mismatch_in_single_mode(self) -> None:
+        agent = review(10, author='dev', state=ReviewState.COMMENTED)
+        result = self.state((self.approval(),),
+                            reviews=(replace(agent, dismissed=True),))
+        self.assertFalse(result['approval']['approved'])
+        self.assertEqual(result['approval']['reasons'],
+                         ['latest review was dismissed on the forge'])
+        self.assertEqual(result['diagnostics'], [])
+        for dismissed in (False, True):
+            wrong = replace(review(10, author='dev'), dismissed=dismissed)
+            result = self.state((self.approval(),), reviews=(wrong,))
+            self.assertEqual(result['approval']['reasons'],
+                             ['forge review state is not commented'])
+            self.assertEqual(
+                [(d['kind'], d['detail']) for d in result['diagnostics']],
+                [('forge_state_mismatch',
+                  'approved does not mirror approved')],
+            )
+        pending = review(10, author='dev', state=ReviewState.PENDING)
+        result = self.state((self.approval(),), reviews=(pending,))
+        self.assertFalse(result['approval']['approved'])
+        self.assertIn(
+            ('forge_state_mismatch', 'pending does not mirror approved'),
+            [(d['kind'], d['detail']) for d in result['diagnostics']],
+        )
 
     def test_wait_precedes_budget_and_merge_but_not_stop_or_decision(
         self,

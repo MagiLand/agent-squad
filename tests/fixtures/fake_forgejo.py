@@ -19,6 +19,7 @@ import tempfile
 from urllib.parse import parse_qs, unquote, urlsplit
 
 RECORDINGS = Path(__file__).parent / "forgejo/recordings"
+DECISIONS = ("APPROVED", "REQUEST_CHANGES")
 
 
 def recording(name: str) -> object:
@@ -379,6 +380,16 @@ class Handler(BaseHTTPRequestHandler):
                     row["id"] = pending["id"]
                     pending.update(row)
                 else:
+                    if row["state"] in DECISIONS:
+                        # E9 (Forgejo 16.0.3 CreateReview and SubmitReview):
+                        # only the account's newest decision stays current.
+                        for earlier in reviews:
+                            if earlier["user"]["login"] != account:
+                                continue
+                            earlier["official"] = False
+                            if earlier["state"] in DECISIONS:
+                                earlier["dismissed"] = True
+                        row["official"] = True
                     reviews.append(row)
                 if settings.get("interrupt_after_body"):
                     return 503, {
