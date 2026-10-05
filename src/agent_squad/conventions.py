@@ -645,11 +645,10 @@ def derive(
         }
         reviews.append(entry)
         latest_review = review
-        if (
-            review.dismissed
-            or review.state != requested_state(
-                fields["verdict"], config.identity_mode,
-            )
+        # A dismissal is not a state (§7.3, §11.0): Forgejo dismisses a
+        # reviewer's earlier decisions when the reviewer submits a new one.
+        if review.state != requested_state(
+            fields["verdict"], config.identity_mode,
         ):
             diagnostic(
                 "forge_state_mismatch",
@@ -858,6 +857,17 @@ def derive(
         ),
         "reviewer_live": reviewer_live,
     }
+    approving_state = (
+        latest_review is not None
+        and latest_review.state == requested_state(
+            "approved", config.identity_mode,
+        )
+    )
+    state_reason = (
+        "latest review was dismissed on the forge" if approving_state
+        else "forge review state is not commented" if single
+        else f"forge review state is not {snapshot.approved_state_label}"
+    )
     approval_reasons = []
     conditions = [
         (
@@ -876,15 +886,7 @@ def derive(
             not newer(latest_stop, latest),
             "a STOPPED comment is newer than the review",
         ),
-        (
-            latest_review is not None
-            and latest_review.state == requested_state(
-                "approved", config.identity_mode,
-            )
-            and not latest_review.dismissed,
-            ("forge review state is not commented" if single else
-             f"forge review state is not {snapshot.approved_state_label}"),
-        ),
+        (approving_state and not latest_review.dismissed, state_reason),
         (not newer(amendment, latest), "Task was amended after the review"),
     ]
     approval_reasons.extend(

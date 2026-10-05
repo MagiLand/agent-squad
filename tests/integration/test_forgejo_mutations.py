@@ -564,12 +564,131 @@ class ForgejoMutationCases:
         self.assertNotEqual(state["target"]["base_tip"], f.base)
 
 
+def post_review(f, account, event, head):
+    request = Request(
+        f.server.base_url + "/api/v1/repos/MagiLand/trial/pulls/1/reviews",
+        data=json.dumps({"body": f"{account} {event}", "event": event,
+                         "commit_id": head}).encode(),
+        headers={"Authorization": "token fake-token-" + account,
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+def review_rows(f, account="developer"):
+    request = Request(
+        f.server.base_url + "/api/v1/repos/MagiLand/trial/pulls/1/reviews",
+        headers={"Authorization": "token fake-token-" + account},
+    )
+    with urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+def decisions(rows, login):
+    return [(r["state"], r["dismissed"], r["official"]) for r in rows
+            if r["user"]["login"] == login and r["state"] != "COMMENT"]
+
+
 class DualForgejoMutationTests(ForgejoMutationCases, unittest.TestCase):
-    pass
+    def test_two_pass_loop_reads_back_dismissal_without_mismatch(self):
+        f = self.f
+        fid = f.review("changes_requested", [finding(line=1)])["findings"][0]
+        head = f.push("value = 10\nsecond = 2\nthird = 3\n")
+        f.reply(fid, f"DISPOSITION fixed {head}\n\nChanged the fixture line.")
+        f.reply(fid, "VERIFIED fixed\nChecked the new head.", role="reviewer")
+        f.review("approved")
+        state = f.status()
+        first, second = (r["id"] for r in state["reviews"])
+        rows = {r["id"]: r for r in review_rows(f)}
+        self.assertEqual((rows[first]["state"], rows[first]["dismissed"]),
+                         ("REQUEST_CHANGES", True))
+        self.assertEqual((rows[second]["state"], rows[second]["dismissed"]),
+                         ("APPROVED", False))
+        self.assertEqual(state["next_action"], "approved")
+        self.assertEqual(state["diagnostics"], [])
+        result = self.merge()
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["head"], head)
 
 
 class SingleForgejoMutationTests(ForgejoMutationCases, unittest.TestCase):
     single = True
+
+    def test_latest_human_review_still_decides_after_dismissal(self):
+        f = self.f
+        f.review("approved")
+        post_review(f, "human", "REQUEST_CHANGES", self.head)
+        post_review(f, "human", "APPROVED", self.head)
+        self.assertEqual(decisions(review_rows(f), "human"),
+                         [("REQUEST_CHANGES", True, False),
+                          ("APPROVED", False, True)])
+        state = f.status()
+        self.assertEqual(state["next_action"], "approved")
+        self.assertEqual(state["human_request_changes"], [])
+        requested = post_review(f, "human", "REQUEST_CHANGES", self.head)
+        state = f.status()
+        self.assertEqual(state["next_action"], "await_human_approval")
+        self.assertEqual([r["id"] for r in state["human_request_changes"]],
+                         [requested["id"]])
+
+
+class FakeForgejoSupersededReviewTests(unittest.TestCase):
+    """Forgejo 16.0.3 dismissal of superseded decisions (#54, E9)."""
+
+    def test_new_decision_dismisses_only_the_accounts_earlier_decisions(
+        self,
+    ) -> None:
+        from tests.fixtures.fake_forgejo import recording
+
+        def recorded(name):
+            return decisions(recording(name), "approver")
+
+        with ForgejoFixture() as f:
+            f.initialize()
+            head = f.candidate()
+            f.create_pr()
+            comment = post_review(f, "reviewer", "COMMENT", head)
+            post_review(f, "reviewer", "APPROVED", head)
+            post_review(f, "reviewer", "REQUEST_CHANGES", head)
+            self.assertEqual(
+                decisions(review_rows(f), "reviewer"),
+                recorded("053-e9-after-request-changes.json"),
+            )
+            head = f.push("value = 10\nsecond = 2\nthird = 3\n")
+            post_review(f, "reviewer", "APPROVED", head)
+            expected = recorded("059-e9-after-new-approval.json")
+            self.assertEqual(decisions(review_rows(f), "reviewer"), expected)
+            later = post_review(f, "reviewer", "COMMENT", head)
+            rows = {r["id"]: r for r in review_rows(f)}
+            for ident in (comment["id"], later["id"]):
+                self.assertEqual(
+                    (rows[ident]["dismissed"], rows[ident]["official"]),
+                    (False, False),
+                )
+            self.assertEqual(decisions(rows.values(), "reviewer"), expected)
+            other = post_review(f, "human", "APPROVED", head)
+            self.assertEqual((other["dismissed"], other["official"]),
+                             (False, True))
+            self.assertEqual(decisions(review_rows(f), "reviewer"), expected)
+            model = f.read_model()
+            model["prs"]["1"]["reviews"].append({
+                "id": 999, "user": {"login": "reviewer"}, "body": "Draft",
+                "state": "PENDING", "commit_id": head, "dismissed": False,
+                "submitted_at": None, "created_at": "2026-01-01T01:00:00Z",
+            })
+            f.save_model(model)
+            f.settings(absorb_pending_draft=True)
+            absorbed = post_review(f, "reviewer", "REQUEST_CHANGES", head)
+            self.assertEqual(absorbed["id"], 999)
+            rows = review_rows(f, "reviewer")
+            self.assertEqual(
+                [dismissed for _, dismissed, _ in decisions(rows, "reviewer")],
+                [True, True, False, False],
+            )
+            self.assertEqual(decisions(rows, "human"),
+                             [("APPROVED", False, True)])
 
 
 class SharedMutationGuards(unittest.TestCase):
