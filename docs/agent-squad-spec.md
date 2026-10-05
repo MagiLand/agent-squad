@@ -1,6 +1,6 @@
 # Agent Squad Specification
 
-- **Package version:** 0.6.0
+- **Package version:** 0.6.1
 - **Protocol tag:** `AGENT_SQUAD/0.5.0`
 - **Source revision:** `2c0df060449f0f31491fdeedb68ff7009519e8d6` (release tag `v0.6.0`)
 - **Primary runtime:** Herdr
@@ -18,7 +18,7 @@ The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and 
 
 Sections labelled *Informative* explain design history or rationale and are not independently normative.
 
-This is the standalone implementation baseline for package version `0.6.0`, with protocol tag `AGENT_SQUAD/0.5.0`. Package and protocol versions are distinct; the release audit checks the protocol constant independently.
+This is the standalone implementation baseline for package version `0.6.1`, with protocol tag `AGENT_SQUAD/0.5.0`. Package and protocol versions are distinct; the release audit checks the protocol constant independently.
 
 The skill-rule markers describe the source prompts: **[verbatim]** marks text quoted unchanged, **[adapted]** marks adapted text, and **[new]** marks a rule with no counterpart in those prompts. A section reference `§N` names a section of this document.
 
