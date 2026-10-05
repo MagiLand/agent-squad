@@ -41,6 +41,6 @@ class CliSurfaceTests(unittest.TestCase):
         self.assertEqual(leaves(parser()), expected)
 
     def test_release_and_protocol_versions(self) -> None:
-        self.assertEqual(__version__, "0.6.0")
+        self.assertEqual(__version__, "0.6.1")
         self.assertEqual(PROTOCOL_VERSION, "0.5.0")
         self.assertEqual(TAG, f"AGENT_SQUAD/{PROTOCOL_VERSION}")

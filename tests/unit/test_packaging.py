@@ -44,13 +44,13 @@ class PackagingTests(unittest.TestCase):
                 metadata = next(name for name in built.namelist()
                                 if name.endswith(".dist-info/METADATA"))
                 self.assertEqual(BytesParser().parsebytes(
-                    built.read(metadata))["Version"], "0.6.0")
+                    built.read(metadata))["Version"], "0.6.1")
                 package_info = next(m for m in archive.getmembers()
                                     if m.name.count("/") == 1
                                     and m.name.endswith("/PKG-INFO"))
                 self.assertEqual(BytesParser().parsebytes(
                     archive.extractfile(package_info).read())["Version"],
-                    "0.6.0")
+                    "0.6.1")
                 for name in ("squad-implementer", "squad-reviewer"):
                     path = f"agent_squad/skills/{name}/SKILL.md"
                     expected = (PROJECT_ROOT / "src" / path).read_bytes()
