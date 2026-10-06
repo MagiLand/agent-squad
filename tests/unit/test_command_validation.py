@@ -215,6 +215,18 @@ class ReviewCompositionTests(unittest.TestCase):
         )
         self.assertEqual(validate_review_body(fenced), [])
 
+    def test_generated_findings_list_is_validated(self) -> None:
+        base = {"Summary": SUMMARY, "Verified dispositions": "none"}
+        # The finding grammar excludes only CR and LF; splitlines() also
+        # breaks the Findings list on these, so the whole body is checked.
+        for separator in "\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+            inputs = load_threads([finding(title=f"Pasted{separator}title")])
+            with (
+                self.subTest(separator=separator),
+                self.assertRaisesRegex(AgentSquadError, "## Findings entry"),
+            ):
+                compose_review(base, inputs, ["REV-1"])
+
 
 class ReplyOptionTests(unittest.TestCase):
     def refuse(self, *options: str, role: str = "implementer") -> str:

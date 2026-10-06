@@ -23,6 +23,7 @@ from .conventions import (
     task_from_issue,
     validate_merge_directive,
     validate_pr_body,
+    validate_review_body,
     validate_section,
 )
 from .forge import (
@@ -334,11 +335,14 @@ def compose_review(
         )
         or "none"
     )
-    return "\n\n".join(
+    body = "\n\n".join(
         f"## {name}\n\n{texts.get(name, 'none')}"
         for name in REVIEW_SECTIONS
         if name in texts or name != "Merge hold"
     )
+    # A title may hold a separator such as U+2028 that the list parser splits.
+    validate_review_body(body)
+    return body
 
 
 def post_review(

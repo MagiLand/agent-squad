@@ -198,6 +198,38 @@ class ForgeCommandTests(unittest.TestCase):
                                      f"/repos/MagiLand/trial/issues/{issue}")
                     self.assertEqual(issue_reads[0]["account"], "developer")
 
+    def test_reasonless_optional_rejection_reads_only_before_refusal(
+        self,
+    ) -> None:
+        # Decided on PR #118 (option A): the severity read is the only forge
+        # access before this refusal; no write and no issue read.
+        f = self.f
+        f.review("approved", [finding("optional")])
+        before = f.read_model()
+        refused = f.reply(
+            "REV-1", "Unqualified reason.", disposition="rejected", expected=1
+        )
+        self.assertIn("--not-pursued with a reason", refused["error"])
+        after = f.read_model()
+        self.assertEqual(after["prs"], before["prs"])
+        api = [
+            c for c in after["calls"][len(before["calls"]):]
+            if c["arguments"][0] == "api"
+        ]
+        self.assertTrue(api)
+        for call in api:
+            arguments = call["arguments"]
+            with self.subTest(endpoint=arguments[1]):
+                if arguments[1] == "graphql":
+                    self.assertTrue(
+                        call["body"]["query"].startswith("query ")
+                    )
+                else:
+                    self.assertEqual(
+                        arguments[arguments.index("--method") + 1], "GET"
+                    )
+                    self.assertNotRegex(arguments[1], r"/issues/[0-9]+$")
+
     def test_optional_disposition_gates_launch_and_merge_after_approval(
         self,
     ) -> None:
@@ -880,6 +912,11 @@ class ForgeCommandTests(unittest.TestCase):
         )
         self.assertIn("--standards file must hold section text",
                       refused["error"])
+        refused = f.review(
+            "changes_requested", [finding(title="Pasted\u2028title")],
+            expected=1,
+        )
+        self.assertIn("## Findings entry", refused["error"])
         self.assertEqual(f.read_model(), before)
 
     def test_read_default_identity_in_registered_review_worktree(self) -> None:
