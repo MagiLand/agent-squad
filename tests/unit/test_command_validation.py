@@ -14,9 +14,11 @@ add_src_to_path()
 
 from agent_squad.cli import main, positive_argument  # noqa: E402
 from agent_squad.commands import (  # noqa: E402
-    compose_reply, compose_review, load_threads, workflow_paths,
+    comment_issue, compose_reply, compose_review, load_threads, view_issue,
+    workflow_paths,
 )
 from agent_squad.conventions import validate_review_body  # noqa: E402
+from agent_squad.forge import Evidence  # noqa: E402
 from agent_squad.initialization import (  # noqa: E402
     AgentSquadError, Repository,
 )
@@ -294,3 +296,129 @@ class ReplyOptionTests(unittest.TestCase):
                     "--finding", "REV-1", "--body", "unused.md", *options,
                 ]), 0)
                 execute.assert_called_once()
+
+
+class StubIssueForge:
+    """Record issue reads and comment writes without a transport."""
+
+    def __init__(self, role: str = "implementer", **record: object) -> None:
+        self.role = role
+        self.record = {
+            "number": 5, "title": "Issue", "state": "open",
+            "is_pull_request": False, "body": "Body", "labels": [],
+            "comments": (),
+        } | record
+        self.calls: list[tuple] = []
+
+    def issue(self, number: int) -> dict:
+        self.calls.append(("issue", number))
+        return self.record
+
+    def comment(self, number: int, body: str) -> Evidence:
+        self.calls.append(("comment", number, body))
+        return Evidence(7, "dev", "2026-01-01T00:00:07Z", body)
+
+
+class IssueCommentTests(unittest.TestCase):
+    NOTE = "AGENT_SQUAD/0.5.0 NOTE role=implementer"
+
+    def test_note_line_precedes_the_stripped_prose(self) -> None:
+        forge = StubIssueForge()
+        result = comment_issue(forge, 5, "\n  Root cause: a race.\n\nFix.\n")
+        body = self.NOTE + "\n\nRoot cause: a race.\n\nFix."
+        self.assertEqual(forge.calls, [("issue", 5), ("comment", 5, body)])
+        self.assertEqual(result, {
+            "issue": 5, "id": 7, "author": "dev",
+            "created_at": "2026-01-01T00:00:07Z", "body": body,
+        })
+
+    def test_empty_or_tagged_bodies_are_refused_before_any_forge_call(
+        self,
+    ) -> None:
+        for body, message in (
+            ("", "must not be empty"),
+            (" \n\t\n", "must not be empty"),
+            (self.NOTE + "\n\nCopied marker.", "must start with prose"),
+            ("**" + self.NOTE + "**", "must start with prose"),
+            ("\n  _AGENT_SQUAD/0.5.0 DECISION finding=none_", "must start"),
+            ("AGENT_SQUAD/0.5.0 NOTE", "must start with prose"),
+            ("`DISPOSITION fixed`", "must start with prose"),
+            ("VERIFIED fixed", "must start with prose"),
+            ("NOT FIXED yet", "must start with prose"),
+            ("[REV-1][blocking][tests] Copied", "must start with prose"),
+        ):
+            with self.subTest(body=body):
+                forge = StubIssueForge()
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    comment_issue(forge, 5, body)
+                self.assertEqual(forge.calls, [])
+
+    def test_pull_requests_and_closed_issues_are_refused_after_the_read(
+        self,
+    ) -> None:
+        for record, message in (
+            ({"is_pull_request": True}, "not pull request #5"),
+            ({"state": "closed"}, "requires open issue #5"),
+            ({"is_pull_request": True, "state": "closed"}, "pull request"),
+        ):
+            with self.subTest(record=record):
+                forge = StubIssueForge(**record)
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    comment_issue(forge, 5, "Root cause.")
+                self.assertEqual(forge.calls, [("issue", 5)])
+
+    def test_the_grammar_admits_no_reviewer_note(self) -> None:
+        forge = StubIssueForge(role="reviewer")
+        with self.assertRaises(AgentSquadError):
+            comment_issue(forge, 5, "Root cause.")
+        self.assertEqual(forge.calls, [])
+
+    def test_issue_view_marks_exactly_the_note_comments(self) -> None:
+        primary = Path("/unused-primary").resolve()
+        repository = Repository(primary, primary, primary / ".git", config())
+        comments = (
+            Evidence(1, "dev", "2026-01-01T00:00:01Z",
+                     self.NOTE + "\n\nRoot cause."),
+            Evidence(2, "dev", "2026-01-01T00:00:02Z", "Developer words."),
+            Evidence(3, "dev", "2026-01-01T00:00:03Z", "**" + self.NOTE),
+            Evidence(4, "dev", "2026-01-01T00:00:04Z", self.NOTE + " x"),
+        )
+        view = view_issue(
+            repository, StubIssueForge(comments=comments), 5)
+        self.assertEqual(
+            [(c["id"], c["agent_note"]) for c in view["comments"]],
+            [(1, True), (2, False), (3, False), (4, False)],
+        )
+        self.assertEqual(view["comments"][0]["body"], comments[0].body)
+        self.assertEqual(view["paths"]["issue_scratch"],
+                         str(primary / ".agent-squad/review-scratch/issue-5"))
+
+
+class IssueCommentOptionTests(unittest.TestCase):
+    def test_only_the_implementer_with_a_body_reaches_execution(self) -> None:
+        base = ["issue", "comment", "--issue", "5"]
+        for options, error in (
+            (("--as", "reviewer", "--body", "b.md"), "invalid choice"),
+            (("--body", "b.md"), "the following arguments are required: --as"),
+            (("--as", "implementer"), "required: --body"),
+            (("--as", "implementer", "--body", "b.md", "--issue", "05"),
+             "positive decimal integer"),
+        ):
+            stderr = io.StringIO()
+            with (
+                self.subTest(options=options),
+                patch("agent_squad.cli.execute") as execute,
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main([*base, *options])
+            self.assertEqual(raised.exception.code, 2)
+            execute.assert_not_called()
+            self.assertIn(error, stderr.getvalue())
+        with (
+            patch("agent_squad.cli.execute", return_value={}) as execute,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                main([*base, "--as", "implementer", "--body", "b.md"]), 0)
+            execute.assert_called_once()

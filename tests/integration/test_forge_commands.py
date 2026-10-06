@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -129,6 +130,108 @@ class ForgeCommandTests(unittest.TestCase):
                     self.assertIn("--merge-instruction record or withdraw",
                                   refused["error"])
                     self.assertEqual(f.read_model(), before)
+
+    def test_issue_comment_posts_one_marked_note_on_the_open_issue(
+        self,
+    ) -> None:
+        f = self.f
+        model = f.read_model()
+        for number, state in (("2", "open"), ("3", "closed")):
+            model["issues"][number] = dict(
+                model["issues"]["1"], id=int(number), number=int(number),
+                state=state, conversation=[],
+            )
+        f.save_model(model)
+
+        def writes(calls: list[dict]) -> list[dict]:
+            return [c for c in calls if c["arguments"][0] == "api"
+                    and "--method" in c["arguments"]
+                    and c["arguments"][c["arguments"].index("--method") + 1]
+                    != "GET"]
+
+        before = f.read_model()
+        note = f.write("note.md", "\nRoot cause: cleanup races GitHub.\n")
+        result = f.cli("issue", "comment", "--as", "implementer",
+                       "--issue", "2", "--body", note)
+        after = f.read_model()
+        body = (
+            "AGENT_SQUAD/0.5.0 NOTE role=implementer\n\n"
+            "Root cause: cleanup races GitHub."
+        )
+        [stored] = after["issues"]["2"]["conversation"]
+        self.assertEqual((stored["body"], stored["user"]["login"]),
+                         (body, "developer"))
+        self.assertEqual((result["issue"], result["id"], result["body"]),
+                         (2, stored["id"], body))
+        self.assertEqual(after["prs"], before["prs"])
+        [write] = writes(after["calls"][len(before["calls"]):])
+        self.assertEqual(write["arguments"][1],
+                         "/repos/MagiLand/trial/issues/2/comments")
+        self.assertEqual((write["account"], write["GH_TOKEN"]),
+                         ("developer", "fake-token-developer"))
+
+        # issue view tells the note from a comment the Developer wrote.
+        after["issues"]["2"]["conversation"].append(dict(
+            stored, id=stored["id"] + 1, body="Developer: also check X.",
+        ))
+        f.save_model(after)
+        view = f.cli("issue", "view", "--issue", "2")
+        self.assertEqual(
+            [(c["id"], c["agent_note"]) for c in view["comments"]],
+            [(stored["id"], True), (stored["id"] + 1, False)],
+        )
+        self.assertEqual(view["state"], "open")
+        self.assertEqual(view["labels"], ["ready-for-agent"])
+        human = f.run([sys.executable, "-m", "agent_squad", "issue", "view",
+                       "--issue", "2"], cwd=f.worktree)
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertEqual(
+            [line for line in human.stdout.splitlines()
+             if line.startswith("Comment ")],
+            [f'Comment {stored["id"]} by developer is an Implementer agent'
+             " note, not a Developer comment."],
+        )
+
+        empty = f.write("empty.md", " \n\n")
+        tagged = f.write("tagged.md", body)
+        for issue, file, message, forge_read in (
+            ("2", empty, "must not be empty", False),
+            ("2", tagged, "must start with prose", False),
+            ("3", note, "requires open issue #3", True),
+            ("999", note, "issue not found", True),
+            # The fixtures' issue 1 and PR 1 share a number, which no forge
+            # allows; the fake refuses the note instead of writing it to PR 1.
+            ("1", note, "fixture issue and PR share number 1", True),
+            # Last: without issue 1, number 1 names only PR 1.
+            ("PR 1", note, "not pull request #1", True),
+        ):
+            with self.subTest(issue=issue, message=message):
+                if issue == "PR 1":
+                    model = f.read_model()
+                    del model["issues"]["1"]
+                    f.save_model(model)
+                number = issue.removeprefix("PR ")
+                before = f.read_model()
+                refused = f.cli("issue", "comment", "--as", "implementer",
+                                "--issue", number, "--body", file, expected=1)
+                after = f.read_model()
+                self.assertIn(message, refused["error"])
+                self.assertEqual(
+                    (after["issues"], after["prs"]),
+                    (before["issues"], before["prs"]),
+                )
+                calls = after["calls"][len(before["calls"]):]
+                if not forge_read:
+                    self.assertEqual(calls, [])
+                elif message.startswith("fixture"):
+                    # The fake refused the POST; nothing was stored.
+                    self.assertEqual(len(writes(calls)), 1)
+                else:
+                    self.assertEqual(writes(calls), [])
+                    self.assertIn(
+                        f"/repos/MagiLand/trial/issues/{number}",
+                        [c["arguments"][1] for c in calls],
+                    )
 
     def test_optional_rejection_validates_reason_and_open_followup_issue(
         self,

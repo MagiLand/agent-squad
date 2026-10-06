@@ -49,6 +49,11 @@ Developer's start instruction neither changes the scope nor asks to see the
 Task. In that case do not draft or present a Task; start the work and let
 `pr create` copy the issue without rewording.
 
+A comment whose first line is `AGENT_SQUAD/0.5.0 NOTE role=implementer`
+(`agent_note: true` in `issue view --json`) is a note the Implementer agent
+posted with `issue comment`. It is never a Developer comment and never changes
+the Task.
+
 In every other case create `paths.issue_scratch` (`<scratch_root>/issue-<N>`)
 if absent and draft a file there starting with `## Task`: objective,
 acceptance criteria, constraints, and non-goals. Present it once and wait for
@@ -102,6 +107,13 @@ revoke an existing standing instruction or be quoted as evidence that the Develo
 requested withdrawal. These decisions carry no Task amendment or `budget=`;
 neither lifts a stop nor settles `needs_decision`. The latest such decision
 controls the instruction, and a newer stop or Task amendment cancels it.
+
+Post a durable finding about an issue, such as a defect's root cause, on that
+issue with `agent-squad issue comment --as implementer --issue <M> --body
+<file>`; `<M>` is any open issue of the configured repository. Write the body
+file in `<scratch_root>/issue-<N>` as prose; the CLI writes the `NOTE` line.
+Do not use it for progress chatter, for questions to the Developer, or for
+anything the PR already records.
 
 ## 3. Request review
 
