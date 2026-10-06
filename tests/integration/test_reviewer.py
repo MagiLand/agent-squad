@@ -671,7 +671,6 @@ class ReviewerTests(unittest.TestCase):
     ) -> None:
         f = self.f
         original_model = f.read_model()
-        original_review = Path(f.review_body).read_text()
         expected_message = (
             f"AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=1 head={self.head}"
             " verdict=approved\n"
@@ -687,22 +686,17 @@ class ReviewerTests(unittest.TestCase):
         for scenario, next_action in scenarios:
             with self.subTest(scenario=scenario):
                 f.save_model(original_model)
-                Path(f.review_body).write_text(original_review)
-                if scenario == "merge hold":
-                    body = Path(f.review_body)
-                    body.write_text(
-                        body.read_text()
-                        + "\n## Merge hold\n\nItem 3: merge rules.\n"
-                    )
                 f.review(
                     "approved",
                     [finding("optional")]
                     if scenario == "optional findings" else [],
+                    sections=(
+                        {"merge-hold": "Item 3: merge rules."}
+                        if scenario == "merge hold" else None
+                    ),
                 )
                 if scenario != "no instruction":
-                    f.decision(body=(
-                        "Standing merge instruction: merge when approved."
-                    ))
+                    f.decision(merge_instruction="record", body="")
                 before = len(f.herdr_model()["calls"])
                 result = f.cli(
                     "handoff", "review-result", "--pr", "1",

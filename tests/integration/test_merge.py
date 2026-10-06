@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import ForgeFixture
-from agent_squad.conventions import MERGE_INSTRUCTION
 from agent_squad.github import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
@@ -111,11 +110,8 @@ class MergeTests(unittest.TestCase):
 
     def test_hold_names_review_and_requires_explicit_acceptance(self) -> None:
         f = self.f
-        body = Path(f.review_body)
-        body.write_text(body.read_text() +
-                        "\n## Merge hold\n\nItem 3: merge rules.\n")
-        f.review("approved")
-        f.decision(body=MERGE_INSTRUCTION)
+        f.review("approved", sections={"merge-hold": "Item 3: merge rules."})
+        f.decision(merge_instruction="record", body="")
         state = f.status()
         hold = state["merge_hold"]
         self.assertEqual(hold["text"], "Item 3: merge rules.")

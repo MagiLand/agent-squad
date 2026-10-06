@@ -486,6 +486,31 @@ class GrammarTests(unittest.TestCase):
             "VERIFIED rejection accepted",
             "NOT FIXED",
         ]
+        # thread reply options render exactly the hand-written lines.
+        self.assertEqual(
+            [
+                render_line("disposition", disposition="fixed", sha=J),
+                render_line("disposition", disposition="rejected"),
+                render_line("disposition", disposition="needs-human"),
+                render_line("verification", verification="fixed"),
+                render_line(
+                    "verification", verification="rejection-accepted"
+                ),
+                render_line("verification", verification="not-fixed"),
+            ],
+            lines[4:],
+        )
+        for kind, fields in (
+            ("disposition", {"disposition": "fixed"}),
+            ("disposition", {"disposition": "rejected", "sha": J}),
+            ("disposition", {"disposition": "accepted"}),
+            ("verification", {"verification": "rejected"}),
+        ):
+            with (
+                self.subTest(kind=kind, fields=fields),
+                self.assertRaises(AgentSquadError),
+            ):
+                render_line(kind, **fields)
         for line in lines:
             with self.subTest(line=line):
                 self.assertIsNotNone(parse_line(line))

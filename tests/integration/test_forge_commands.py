@@ -6,7 +6,9 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from tests.forge_support import ForgeFixture, TASK, REPORT, finding
+from tests.forge_support import (
+    ForgeFixture, REPORT, SUMMARY, TASK, finding,
+)
 from agent_squad.forge import ForgeError
 from agent_squad.github import GitHub, parse_pullrequest, parse_review
 from agent_squad.initialization import load_initialized_repository
@@ -91,20 +93,42 @@ class ForgeCommandTests(unittest.TestCase):
     ) -> None:
         f = self.f
         f.review("approved")
-        recorded = f.decision(body=MERGE_INSTRUCTION + '\n\n> Start #1.')
+        header = "AGENT_SQUAD/0.5.0 DECISION finding=none\n\n"
+        recorded = f.decision(merge_instruction="record", body="> Start #1.")
         state = f.status()
         self.assertEqual(state["next_action"], "merge")
         self.assertEqual(state["merge_instruction"]["id"],
                          recorded["decision"]["id"])
-        f.decision(body=MERGE_WITHDRAWAL)
-        self.assertEqual(f.status()["next_action"], "approved")
-        for directive in (MERGE_INSTRUCTION, MERGE_WITHDRAWAL):
+        # The stored text is what the hand-written body produced before.
+        self.assertEqual(state["decisions"][-1]["body"],
+                         header + MERGE_INSTRUCTION + "\n\n> Start #1.")
+        f.decision(merge_instruction="withdraw", body="\n")
+        state = f.status()
+        self.assertEqual(state["next_action"], "approved")
+        self.assertIsNone(state["merge_instruction"])
+        self.assertEqual(state["decisions"][-1]["body"],
+                         header + MERGE_WITHDRAWAL)
+        for directive in ("record", "withdraw"):
             for kwargs in ({"budget": 4}, {"task": TASK}, {"fid": "REV-1"}):
                 with self.subTest(directive=directive, kwargs=kwargs):
                     before = f.read_model()["prs"]
-                    refused = f.decision(body=directive, expected=1, **kwargs)
+                    refused = f.decision(merge_instruction=directive,
+                                         body="", expected=1, **kwargs)
                     self.assertIn("standing merge decisions", refused["error"])
                     self.assertEqual(f.read_model()["prs"], before)
+        for body in (
+            MERGE_INSTRUCTION, MERGE_WITHDRAWAL + "\n\nA hold applies.",
+            "Standing merge instruction: merge when approved",
+            "**Standing merge instruction withdrawn.**",
+        ):
+            for directive in (None, "record"):
+                with self.subTest(body=body, directive=directive):
+                    before = f.read_model()
+                    refused = f.decision(merge_instruction=directive,
+                                         body=body, expected=1)
+                    self.assertIn("--merge-instruction record or withdraw",
+                                  refused["error"])
+                    self.assertEqual(f.read_model(), before)
 
     def test_optional_rejection_validates_reason_and_open_followup_issue(
         self,
@@ -122,31 +146,35 @@ class ForgeCommandTests(unittest.TestCase):
             },
         )
         f.save_model(model)
-        for body, expected, message, issue in (
-            ("DISPOSITION rejected", 1, "second non-empty line", None),
-            ("DISPOSITION rejected\nNot pursued:   ", 1,
-             "second non-empty line", None),
-            ("DISPOSITION rejected\nUnqualified reason.", 1,
-             "second non-empty line", None),
-            ("DISPOSITION rejected\nDeferred to #01:", 1,
-             "second non-empty line", None),
-            ("DISPOSITION rejected\nDeferred to other/repo#1:", 1,
-             "second non-empty line", None),
-            ("Unstructured reply", 1, "requires a DISPOSITION", None),
-            ("DISPOSITION rejected\n\nDeferred to #2: follow-up.", 1,
-             "requires an open issue", 2),
-            ("DISPOSITION rejected\nDeferred to #3: a pull request.", 1,
-             "requires an open issue", 3),
-            ("DISPOSITION rejected\nDeferred to #999:", 1,
-             "issue not found", 999),
-            ("DISPOSITION rejected\n\nNot pursued: unnecessary here.",
-             0, None, None),
-            ("DISPOSITION rejected\n\nDeferred to #1: follow-up.",
-             0, None, 1),
+        rejected = {"disposition": "rejected"}
+        for options, body, expected, message, issue, stored in (
+            (rejected, "", 1, "--not-pursued with a reason", None, None),
+            (rejected, "Unqualified reason.", 1, "--not-pursued with a reason",
+             None, None),
+            ({**rejected, "not_pursued": True}, "   ", 1, "requires a reason",
+             None, None),
+            (rejected, "Not pursued: typed by hand.", 1,
+             "supply the reason prefix", None, None),
+            ({**rejected, "deferred_to": "01"}, "", 2,
+             "positive decimal integer", None, None),
+            ({}, "Unstructured reply", 1, "requires --disposition", None,
+             None),
+            ({**rejected, "deferred_to": 2}, "follow-up.", 1,
+             "requires an open issue", 2, None),
+            ({**rejected, "deferred_to": 3}, "a pull request.", 1,
+             "requires an open issue", 3, None),
+            ({**rejected, "deferred_to": 999}, "", 1, "issue not found", 999,
+             None),
+            # The stored bodies are the hand-written ones accepted before.
+            ({**rejected, "not_pursued": True}, "unnecessary here.\n", 0,
+             None, None, "DISPOSITION rejected\n\nNot pursued: unnecessary"
+             " here."),
+            ({**rejected, "deferred_to": 1}, "follow-up.", 0, None, 1,
+             "DISPOSITION rejected\n\nDeferred to #1: follow-up."),
         ):
-            with self.subTest(body=body):
+            with self.subTest(options=options, body=body):
                 before = f.read_model()
-                result = f.reply("REV-1", body, expected=expected)
+                result = f.reply("REV-1", body, expected=expected, **options)
                 after = f.read_model()
                 if expected:
                     self.assertIn(message, result["error"])
@@ -154,7 +182,7 @@ class ForgeCommandTests(unittest.TestCase):
                 else:
                     self.assertEqual(
                         f.status()["optional_findings"][0]
-                        ["disposition"]["body"], body
+                        ["disposition"]["body"], stored
                     )
                 calls = after["calls"][len(before["calls"]):]
                 issue_reads = [
@@ -170,6 +198,38 @@ class ForgeCommandTests(unittest.TestCase):
                                      f"/repos/MagiLand/trial/issues/{issue}")
                     self.assertEqual(issue_reads[0]["account"], "developer")
 
+    def test_reasonless_optional_rejection_reads_only_before_refusal(
+        self,
+    ) -> None:
+        # Decided on PR #118 (option A): the severity read is the only forge
+        # access before this refusal; no write and no issue read.
+        f = self.f
+        f.review("approved", [finding("optional")])
+        before = f.read_model()
+        refused = f.reply(
+            "REV-1", "Unqualified reason.", disposition="rejected", expected=1
+        )
+        self.assertIn("--not-pursued with a reason", refused["error"])
+        after = f.read_model()
+        self.assertEqual(after["prs"], before["prs"])
+        api = [
+            c for c in after["calls"][len(before["calls"]):]
+            if c["arguments"][0] == "api"
+        ]
+        self.assertTrue(api)
+        for call in api:
+            arguments = call["arguments"]
+            with self.subTest(endpoint=arguments[1]):
+                if arguments[1] == "graphql":
+                    self.assertTrue(
+                        call["body"]["query"].startswith("query ")
+                    )
+                else:
+                    self.assertEqual(
+                        arguments[arguments.index("--method") + 1], "GET"
+                    )
+                    self.assertNotRegex(arguments[1], r"/issues/[0-9]+$")
+
     def test_optional_disposition_gates_launch_and_merge_after_approval(
         self,
     ) -> None:
@@ -183,9 +243,8 @@ class ForgeCommandTests(unittest.TestCase):
         refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
                         expected=4, cwd=f.repo)
         self.assertIn("unaddressed_findings: REV-1", refused["error"])
-        f.reply(
-            "REV-1", "DISPOSITION rejected\nNot pursued: unnecessary here."
-        )
+        f.reply("REV-1", "unnecessary here.", disposition="rejected",
+                not_pursued=True)
         self.assertEqual(f.status()["next_action"], "approved")
         launched = f.cli("reviewer", "launch", "--pr", "1")
         self.assertEqual(launched["observed_state"], "working")
@@ -198,18 +257,19 @@ class ForgeCommandTests(unittest.TestCase):
         f = self.f
         f.review("approved", [finding("optional")])
         refused = f.reply(
-            "REV-1", f"DISPOSITION fixed {self.head}", expected=1
+            "REV-1", disposition="fixed", sha=self.head, expected=1
         )
         self.assertIn("absent from", refused["error"])
-        f.reply("REV-1", "DISPOSITION needs-human\nA Developer choice.")
+        f.reply("REV-1", "A Developer choice.", disposition="needs-human")
         refused = f.cli("reviewer", "launch", "--pr", "1", expected=4)
         self.assertIn("needs_decision", refused["error"])
         f.decision(fid="REV-1")
         self.assertFalse(f.status()["gates"]["needs_decision"])
         head = f.push("value = 1\nsecond = 20\nthird = 3\n")
-        f.reply("REV-1", f"DISPOSITION fixed {head}\nRun the fixture probe.")
+        f.reply("REV-1", "Run the fixture probe.", disposition="fixed",
+                sha=head)
         self.assertFalse(f.status()["gates"]["unaddressed_findings"])
-        f.reply("REV-1", "VERIFIED fixed\nFixture checked.", "reviewer")
+        f.reply("REV-1", "Fixture checked.", verification="fixed")
         self.assertTrue(f.status()["findings"][0]["settled"])
 
     def test_moved_base_uses_fetched_tip_with_frozen_pr_base(self) -> None:
@@ -244,7 +304,7 @@ class ForgeCommandTests(unittest.TestCase):
         f.git("add", "example.py", cwd=f.worktree)
         f.git("commit", "-m", "test: fix before push", cwd=f.worktree)
         head = f.git("rev-parse", "HEAD", cwd=f.worktree)
-        f.reply("REV-1", f"DISPOSITION fixed {head}")
+        f.reply("REV-1", disposition="fixed", sha=head)
         before = f.status()
         self.assertEqual(before["next_action"], "address_findings")
         self.assertIn(
@@ -337,7 +397,7 @@ class ForgeCommandTests(unittest.TestCase):
             "approval requires", f.review("approved", expected=4)["error"]
         )
         self.assertEqual(len(f.read_model()["prs"]["1"]["reviews"]), 1)
-        f.reply("REV-1", "NOT FIXED", "reviewer")
+        f.reply("REV-1", verification="not-fixed")
         f.review("changes_requested")
         self.assertEqual(f.status()["budget"]["used"], 2)
         # A verification consumed by the preceding pass cannot justify another.
@@ -455,8 +515,8 @@ class ForgeCommandTests(unittest.TestCase):
     ) -> None:
         f = self.f
         f.review("changes_requested", [finding()])
-        f.reply("REV-1", "DISPOSITION rejected\n\nEvidence.")
-        f.reply("REV-1", "VERIFIED rejection accepted\n\nChecked.", "reviewer")
+        f.reply("REV-1", "Evidence.", disposition="rejected")
+        f.reply("REV-1", "Checked.", verification="rejection-accepted")
         f.cli(
             "thread",
             "resolve",
@@ -540,11 +600,9 @@ class ForgeCommandTests(unittest.TestCase):
             "changes_requested",
             [finding(), finding("optional", "Optional", line=3)],
         )
-        f.reply(
-            "REV-1",
-            "DISPOSITION rejected\n\nEvidence from omitted flat listing.",
-        )
-        f.reply("REV-1", "VERIFIED rejection accepted\n\nChecked.", "reviewer")
+        f.reply("REV-1", "Evidence from omitted flat listing.",
+                disposition="rejected")
+        f.reply("REV-1", "Checked.", verification="rejection-accepted")
         state = f.status()
         self.assertTrue(state["findings"][0]["settled"])
         self.assertEqual(len(state["findings"][0]["replies"]), 2)
@@ -713,11 +771,8 @@ class ForgeCommandTests(unittest.TestCase):
     def test_reply_roles_fixed_sha_validation_and_resolve_gate(self) -> None:
         f = self.f
         f.review("changes_requested", [finding()])
-        f.reply("REV-1", "VERIFIED fixed", expected=1)
-        f.reply("REV-1", "DISPOSITION rejected", "reviewer", expected=1)
-        f.reply("REV-1", f"DISPOSITION fixed {self.head}", expected=1)
-        f.reply("REV-1", "DISPOSITION fixed abc123", expected=1)
-        f.reply("REV-1", "DISPOSITION fixed " + "f" * 40, expected=1)
+        f.reply("REV-1", disposition="fixed", sha=self.head, expected=1)
+        f.reply("REV-1", disposition="fixed", sha="f" * 40, expected=1)
         f.cli(
             "thread",
             "resolve",
@@ -729,8 +784,8 @@ class ForgeCommandTests(unittest.TestCase):
             "REV-1",
             expected=4,
         )
-        f.reply("REV-1", "DISPOSITION rejected")
-        f.reply("REV-1", "VERIFIED rejection accepted", "reviewer")
+        f.reply("REV-1", disposition="rejected")
+        f.reply("REV-1", verification="rejection-accepted")
         f.cli(
             "thread",
             "resolve",
@@ -742,6 +797,127 @@ class ForgeCommandTests(unittest.TestCase):
             "REV-1",
         )
         self.assertTrue(f.read_model()["prs"]["1"]["threads"][0]["isResolved"])
+
+    def test_reply_options_post_the_existing_tagged_lines(self) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        head = f.push("value = 2\nsecond = 2\nthird = 3\n")
+        for options, prose, stored, field, value, settled in (
+            ({"disposition": "needs-human"}, "A Developer choice.\n",
+             "DISPOSITION needs-human\n\nA Developer choice.",
+             "latest_disposition", "needs-human", False),
+            ({"disposition": "rejected"}, "Evidence.",
+             "DISPOSITION rejected\n\nEvidence.",
+             "latest_disposition", "rejected", False),
+            ({"disposition": "fixed", "sha": head}, "Run the probe.",
+             f"DISPOSITION fixed {head}\n\nRun the probe.",
+             "latest_disposition", "fixed", False),
+            ({"verification": "not-fixed"}, "", "NOT FIXED",
+             "latest_verification", "NOT FIXED", False),
+            ({"verification": "rejection-accepted"}, "Checked.",
+             "VERIFIED rejection accepted\n\nChecked.",
+             "latest_verification", "VERIFIED rejection accepted", True),
+            ({"verification": "fixed"}, "Probe passed.",
+             "VERIFIED fixed\n\nProbe passed.",
+             "latest_verification", "VERIFIED fixed", True),
+        ):
+            with self.subTest(options=options):
+                f.reply("REV-1", prose, **options)
+                thread = f.status()["findings"][0]
+                self.assertEqual(thread["replies"][-1]["body"], stored)
+                self.assertEqual(thread[field]["value"], value)
+                self.assertEqual(thread["settled"], settled)
+
+    def test_reply_refusals_make_no_forge_call(self) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        for role, options, body, expected, error in (
+            ("implementer", {"disposition": "fixed"}, "", 2,
+             "--disposition fixed requires --sha"),
+            ("implementer", {"disposition": "rejected", "sha": self.head}, "",
+             2, "--sha requires --disposition fixed"),
+            ("implementer", {"disposition": "rejected", "not_pursued": True,
+                             "deferred_to": 1}, "Reason.", 2,
+             "not allowed with argument"),
+            ("reviewer", {"disposition": "rejected"}, "", 2,
+             "--disposition requires --as implementer"),
+            ("implementer", {"verification": "fixed"}, "", 2,
+             "--verification requires --as reviewer"),
+            ("reviewer", {}, "VERIFIED fixed\nChecked.", 1,
+             "supply the tagged line with --verification"),
+            ("implementer", {"disposition": "rejected"},
+             "DISPOSITION rejected\nEvidence.", 1,
+             "supply the tagged line with --disposition"),
+            ("reviewer", {"verification": "fixed"}, "VERIFIED: fixed", 1,
+             "supply the tagged line with --verification"),
+        ):
+            with self.subTest(role=role, options=options, body=body):
+                before = f.read_model()
+                result = f.reply(
+                    "REV-1", body, role, expected=expected, **options
+                )
+                self.assertIn(error, result["error"])
+                self.assertEqual(f.read_model(), before)
+        before = f.read_model()["prs"]
+        refused = f.reply("REV-1", "Reason.", disposition="rejected",
+                          not_pursued=True, expected=1)
+        self.assertIn("apply only to an optional thread", refused["error"])
+        self.assertEqual(f.read_model()["prs"], before)
+
+    def test_review_sections_publish_the_required_body(self) -> None:
+        f = self.f
+        f.review(
+            "changes_requested",
+            [finding()],
+            sections={
+                "merge-hold": "Task: Developer review.\n",
+                "standards": "Standards axis.",
+                "spec": "Spec axis.",
+                "evidence": "make test",
+            },
+        )
+        state = f.status()
+        self.assertEqual(state["reviews"][0]["body"], (
+            f"AGENT_SQUAD/0.5.0 REVIEW pr=1 head={self.head} base={f.base}"
+            " verdict=changes_requested\n\n"
+            f"## Summary\n\n{SUMMARY}\n\n## Verified dispositions\n\nnone"
+            "\n\n## Findings\n\nREV-1 [blocking] Fixture finding\n\n"
+            "## Merge hold\n\nTask: Developer review.\n\n"
+            "## Standards\n\nStandards axis.\n\n## Spec\n\nSpec axis.\n\n"
+            "## Evidence\n\nmake test"
+        ))
+        self.assertEqual(
+            state["merge_hold"]["text"], "Task: Developer review."
+        )
+        target = [
+            "review", "post", "--as", "reviewer", "--pr", "1", "--head",
+            self.head, "--base", f.base, "--verdict", "needs_human",
+            "--threads", f.write("none.json", "[]"),
+        ]
+        before = f.read_model()
+        for options, error in (
+            (["--verified-dispositions", f.verified],
+             "arguments are required: --summary"),
+            (["--summary", f.summary],
+             "arguments are required: --verified-dispositions"),
+            (["--summary", f.summary, "--verified-dispositions", f.verified,
+              "--body", f.summary], "unrecognized arguments: --body"),
+        ):
+            with self.subTest(options=options):
+                refused = f.cli(*target, *options, expected=2)
+                self.assertIn(error, refused["error"])
+        refused = f.review(
+            "needs_human", sections={"standards": "## Standards\n\nText."},
+            expected=1,
+        )
+        self.assertIn("--standards file must hold section text",
+                      refused["error"])
+        refused = f.review(
+            "changes_requested", [finding(title="Pasted\u2028title")],
+            expected=1,
+        )
+        self.assertIn("## Findings entry", refused["error"])
+        self.assertEqual(f.read_model(), before)
 
     def test_read_default_identity_in_registered_review_worktree(self) -> None:
         f = self.f

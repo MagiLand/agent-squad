@@ -32,9 +32,13 @@ REPORT = (
     + "\n"
 )
 TASK = "## Task\n\nExercise the forge protocol with scripted content.\n"
+SUMMARY = (
+    "Scripted review; the Developer must decide the requested policy when"
+    " needed."
+)
+# The stored form of a review without findings, as conventions parse it.
 REVIEW = (
-    "## Summary\n\nScripted review; the Developer must decide the requested"
-    " policy when needed.\n\n## Verified dispositions\n\nnone\n\n##"
+    f"## Summary\n\n{SUMMARY}\n\n## Verified dispositions\n\nnone\n\n##"
     " Findings\n\nnone\n"
 )
 FINDING_BODY = "\n\n".join(
@@ -147,7 +151,8 @@ class ForgeFixture:
         self.worktree = self.repo
         self.task = self.write("task.md", TASK)
         self.report = self.write("report.md", REPORT)
-        self.review_body = self.write("review.md", REVIEW)
+        self.summary = self.write("summary.md", SUMMARY + "\n")
+        self.verified = self.write("verified.md", "none\n")
         self.prepare_skills()
 
     def prepare_skills(self) -> None:
@@ -348,7 +353,9 @@ class ForgeFixture:
         head: str | None = None,
         base: str | None = None,
         expected: int = 0,
+        sections: dict[str, str] | None = None,
     ) -> dict:
+        """Post with the fixture summary; ``sections`` adds other files."""
         file = self.write("threads.json", json.dumps(threads or []))
         args = [
             "review",
@@ -363,11 +370,15 @@ class ForgeFixture:
             base or self.base,
             "--verdict",
             verdict,
-            "--body",
-            self.review_body,
+            "--summary",
+            self.summary,
+            "--verified-dispositions",
+            self.verified,
             "--threads",
             file,
         ]
+        for name, text in (sections or {}).items():
+            args += ["--" + name, self.write(name + ".md", text)]
         if discard_draft is not None:
             args += ["--discard-draft", str(discard_draft)]
         if resume is not None:
@@ -378,8 +389,21 @@ class ForgeFixture:
         return self.cli("status", "--pr", "1")
 
     def reply(
-        self, fid: str, body: str, role: str = "implementer", expected: int = 0
+        self,
+        fid: str,
+        body: str = "",
+        role: str | None = None,
+        expected: int = 0,
+        **options: object,
     ) -> dict:
+        """Reply with options such as ``disposition="fixed", sha=head``."""
+        role = role or (
+            "reviewer" if "verification" in options else "implementer"
+        )
+        flags = []
+        for name, value in options.items():
+            flag = "--" + name.replace("_", "-")
+            flags += [flag] if value is True else [flag, str(value)]
         file = self.write("reply.md", body)
         return self.cli(
             "thread",
@@ -390,6 +414,7 @@ class ForgeFixture:
             "1",
             "--finding",
             fid,
+            *flags,
             "--body",
             file,
             expected=expected,
@@ -401,6 +426,7 @@ class ForgeFixture:
         fid: str = "none",
         budget: int | None = None,
         task: str | None = None,
+        merge_instruction: str | None = None,
         expected: int = 0,
         body: str = (
             "Scripted Developer decision: continue under the fixture policy."
@@ -426,6 +452,8 @@ class ForgeFixture:
             args += ["--budget", str(budget)]
         if task is not None:
             args += ["--task", self.write("amended-task.md", task)]
+        if merge_instruction is not None:
+            args += ["--merge-instruction", merge_instruction]
         return self.cli(*args, expected=expected)
 
 

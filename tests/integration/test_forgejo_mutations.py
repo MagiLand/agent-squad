@@ -76,9 +76,10 @@ class ForgejoMutationTests(unittest.TestCase):
             root["position"] += 100
         f.save_model(model)
         for fid in result["findings"]:
-            f.reply(fid, "DISPOSITION rejected\nExisting evidence is correct.")
-            f.reply(fid, "VERIFIED rejection accepted\nChecked evidence.",
-                    role="reviewer")
+            f.reply(fid, "Existing evidence is correct.",
+                    disposition="rejected")
+            f.reply(fid, "Checked evidence.",
+                    verification="rejection-accepted")
         state = f.status()
         self.assertTrue(all(x["settled"] for x in state["findings"]))
         self.assertTrue(all(len(x["replies"]) == 2 for x in state["findings"]))
@@ -194,7 +195,8 @@ class ForgejoMutationTests(unittest.TestCase):
                       "--finding", fid, "--path", "example.py", "--line", "2")
                 current = f.status()["findings"][-1]
                 self.assertFalse(current["unanchored"])
-                f.reply(fid, "DISPOSITION rejected\nEvidence already correct.")
+                f.reply(fid, "Evidence already correct.",
+                        disposition="rejected")
                 self.assertEqual(len(f.status()["findings"][-1]["replies"]), 1)
         self.assertEqual(f.status()["budget"]["used"], 2)
 
@@ -531,8 +533,9 @@ class ForgejoMutationTests(unittest.TestCase):
         f = self.f
         fid = f.review("changes_requested", [finding(line=1)])["findings"][0]
         head = f.push("value = 10\nsecond = 2\nthird = 3\n")
-        f.reply(fid, f"DISPOSITION fixed {head}\n\nChanged the fixture line.")
-        f.reply(fid, "VERIFIED fixed\nChecked the new head.", role="reviewer")
+        f.reply(fid, "Changed the fixture line.", disposition="fixed",
+                sha=head)
+        f.reply(fid, "Checked the new head.", verification="fixed")
         f.review("approved")
         state = f.status()
         first, second = (r["id"] for r in state["reviews"])
