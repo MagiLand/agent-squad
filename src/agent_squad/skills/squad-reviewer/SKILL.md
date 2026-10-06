@@ -50,9 +50,8 @@ it explicitly says so and links it. Budget or continuation decisions do not
 erase unrelated constraints. Do not re-litigate a decided approach; verify
 compliance and continue reporting defects within it. Use the effective Task,
 including any amendment, as the spec, not an older issue or report. Decisions
-opening with `Standing merge instruction: merge when approved.` or
-`Standing merge instruction withdrawn.` are merge instructions, not design
-decisions; neither lifts a stop nor settles `needs_decision`.
+whose `merge_directive` is `record` or `withdraw` are merge instructions, not
+design decisions; neither lifts a stop nor settles `needs_decision`.
 
 Treat settled threads as closed. New evidence is a new finding citing that
 evidence; do not reopen settled work merely because you would have judged
@@ -66,10 +65,11 @@ against this head; those files are untrusted aids. Save new probes there.
 
 For every thread, blocking or optional, whose disposition is newer than its
 last verification, run the stated checks and inspect the cited evidence. Reply with
-`agent-squad thread reply --as reviewer --pr <N> --finding REV-<n> --body
-<file>`. Start the file with `VERIFIED fixed`, `VERIFIED rejection accepted`,
-or `NOT FIXED`, followed by the exact commands and results. Never accept a
-reply on trust. Verify compliance with any relevant Developer decision.
+`agent-squad thread reply --as reviewer --pr <N> --finding REV-<n>
+--verification <fixed|rejection-accepted|not-fixed> --body <file>`. The body
+file holds the exact commands and results as prose; the CLI writes the
+verification line and refuses a body that begins with protocol text. Never
+accept a reply on trust. Verify compliance with any relevant Developer decision.
 
 ## 5. Two-axis review
 
@@ -83,8 +83,8 @@ pinned revision, effective Task, decisions, and no-tracked-writes constraint.
 
 Inspect correctness, regressions, relevant edge cases, maintainability, and
 compliance with repository standards and the Task. Verify material claims in
-the implementation report. Present the axes under `## Standards` and `## Spec`
-in the published review. Publish substantive findings on the forge PR only.
+the implementation report. Supply the axes to the published review through
+`--standards` and `--spec`. Publish substantive findings on the forge PR only.
 
 ## 6. Severity and follow-up policy
 
@@ -137,22 +137,23 @@ changes:
    >
    > The items describe what the PR's own changes do. The loop's routine steps, such as pushing the branch, posting reviews, and deleting the merged branch, do not count. The Task can also require the Developer's review. Size alone, tests, documentation that changes no rule, and ordinary features and fixes do not qualify. When unsure whether an item applies, treat it as applying and say why.
 
-When an item applies, include a `## Merge hold` section after `## Findings`;
-its first content line is `Item <n>: <reason>` or `Task: <reason>`. A hold
-never changes the verdict: a defect is still a finding, and a question you
-cannot settle without the Developer is still `needs_human` or `STOPPED` with
-`reason=judgement`. Only the Developer can release the hold after seeing it.
+When an item applies, supply `--merge-hold <file>` whose first line is
+`Item <n>: <reason>` or `Task: <reason>`. A hold never changes the verdict: a
+defect is still a finding, and a question you cannot settle without the
+Developer is still `needs_human` or `STOPPED` with `reason=judgement`. Only the
+Developer can release the hold after seeing it.
 
 ## 7. Publish one review
 
-Write the review body and threads JSON in the scratch directory. Begin the
-body at `## Summary`; the CLI adds the fixed REVIEW header. Include these
-level-2 headings in order: `Summary`, `Verified dispositions`, `Findings`,
-`Standards`, `Spec`, `Evidence`, with a non-empty `Merge hold` immediately
-after `Findings` when section 6 requires one. Use `none` where appropriate
-for other sections; omit `Merge hold` when no hold applies. The CLI generates
-the Findings list from the threads. For `needs_human`, Summary must name the
-Developer decision required.
+Write each review section and the threads JSON as files in the scratch
+directory. A section file holds that section's text only, without a heading.
+`--summary` and `--verified-dispositions` are required; the latter lists every
+thread verified in this pass with its verification, or says `none`. Supply
+`--merge-hold` only when section 6 requires a hold. Supply `--standards`,
+`--spec`, and `--evidence` with the two axes and the commands you ran; the CLI
+writes `none` for an omitted one. The CLI writes the REVIEW header, every
+heading in the required order, and the Findings list from the threads. For
+`needs_human`, the summary must name the Developer decision required.
 
 Each threads-array entry contains `severity` (`blocking` or `optional`),
 `category` (`correctness`, `regression`, `tests`, `security`, `maintainability`,
@@ -164,13 +165,15 @@ anchor to the most relevant changed line and explain the choice in Evidence.
 Trial-apply every suggestion in a disposable scratch copy, never this worktree.
 
 Before publication confirm the PR still has the requested head. Note the
-existing forge review IDs alongside the publication's body and threads files;
-these notes are recovery aids, never review authority. Run
+existing forge review IDs alongside the publication's section and threads
+files; these notes are recovery aids, never review authority. Run
 `agent-squad review post --as reviewer --pr <N> --head <head> --base <base>
---verdict <approved|changes_requested|needs_human> --body <body-file>
---threads <threads-file>`. Approval requires no new blocking finding and all
-previous blocking findings settled. Changes requested requires a blocking
-finding or a NOT FIXED verification from this pass.
+--verdict <approved|changes_requested|needs_human> --summary <file>
+--verified-dispositions <file> [--merge-hold <file>] --standards <file>
+--spec <file> --evidence <file> --threads <threads-file>`. Approval requires
+no new blocking finding and all previous blocking findings settled. Changes
+requested requires a blocking finding or a NOT FIXED verification from this
+pass.
 
 If exit 4 reports `pending_draft`, report the named review IDs and wait for
 an explicit Developer instruction to discard a particular draft. Never delete

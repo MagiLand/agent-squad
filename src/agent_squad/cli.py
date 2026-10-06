@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
+import re
 import sys
 
 from . import __version__
@@ -13,6 +14,7 @@ from .anchors import Anchor
 from . import commands
 from . import reviewer
 from . import skills
+from .conventions import DISPOSITIONS, SHA, VERIFICATIONS
 from .doctor import diagnose
 from .forge import make_forge
 from .herdr import HerdrClient
@@ -27,8 +29,6 @@ from .initialization import (
 
 
 def positive_argument(value: str) -> int:
-    import re
-
     if re.fullmatch(r"[1-9][0-9]*", value) is None:
         raise argparse.ArgumentTypeError(
             "must be a positive decimal integer without leading zeros"
@@ -98,8 +98,13 @@ def parser() -> argparse.ArgumentParser:
     pr["merge"].add_argument("--accept-merge-hold", action="store_true")
     review = command("review", ("post",))["post"]
     common(review, role="reviewer", mutation=True)
-    for name in ("head", "base", "verdict", "body", "threads"):
+    for name in (
+        "head", "base", "verdict", "summary", "verified-dispositions",
+        "threads",
+    ):
         review.add_argument("--" + name, required=True)
+    for name in ("merge-hold", "standards", "spec", "evidence"):
+        review.add_argument("--" + name)
     review.add_argument("--resume", type=positive_argument)
     review.add_argument("--discard-draft", type=positive_argument)
     threads = command("thread", ("reply", "open", "resolve"))
@@ -109,6 +114,13 @@ def parser() -> argparse.ArgumentParser:
         )
         p.add_argument("--finding", required=True)
     threads["reply"].add_argument("--body", required=True)
+    tag = threads["reply"].add_mutually_exclusive_group()
+    tag.add_argument("--disposition", choices=DISPOSITIONS)
+    tag.add_argument("--verification", choices=tuple(VERIFICATIONS))
+    threads["reply"].add_argument("--sha")
+    reason = threads["reply"].add_mutually_exclusive_group()
+    reason.add_argument("--not-pursued", action="store_true")
+    reason.add_argument("--deferred-to", type=positive_argument)
     threads["open"].add_argument("--path", required=True)
     threads["open"].add_argument(
         "--line", type=positive_argument, required=True
@@ -119,6 +131,9 @@ def parser() -> argparse.ArgumentParser:
     decision.add_argument("--finding", required=True)
     decision.add_argument("--budget", type=positive_argument)
     decision.add_argument("--task")
+    decision.add_argument(
+        "--merge-instruction", choices=("record", "withdraw")
+    )
     decision.add_argument("--body", required=True)
     stop = command("stop", ("post",))["post"]
     common(stop, mutation=True)
@@ -229,6 +244,14 @@ def execute(args: argparse.Namespace) -> dict:
             accept_merge_hold=args.accept_merge_hold,
         )
     if key == ("review", "post"):
+        sections = {
+            "Summary": args.summary,
+            "Verified dispositions": args.verified_dispositions,
+            "Merge hold": args.merge_hold,
+            "Standards": args.standards,
+            "Spec": args.spec,
+            "Evidence": args.evidence,
+        }
         return commands.post_review(
             repository,
             forge,
@@ -236,7 +259,11 @@ def execute(args: argparse.Namespace) -> dict:
             args.head,
             args.base,
             args.verdict,
-            commands.read_file(args.body),
+            {
+                name: commands.read_file(path)
+                for name, path in sections.items()
+                if path is not None
+            },
             decode_json(commands.read_file(args.threads)),
             args.resume,
             args.discard_draft,
@@ -248,6 +275,11 @@ def execute(args: argparse.Namespace) -> dict:
             args.pr,
             args.finding,
             commands.read_file(args.body),
+            disposition=args.disposition,
+            sha=args.sha,
+            not_pursued=args.not_pursued,
+            deferred_to=args.deferred_to,
+            verification=args.verification,
         )
     if key == ("thread", "open"):
         return commands.open_thread(
@@ -270,6 +302,7 @@ def execute(args: argparse.Namespace) -> dict:
             commands.read_file(args.body),
             args.budget,
             commands.read_file(args.task) if args.task else None,
+            args.merge_instruction,
         )
     if key == ("stop", "post"):
         return commands.post_stop(
@@ -297,6 +330,25 @@ def execute(args: argparse.Namespace) -> dict:
     return state
 
 
+def reply_option_error(args: argparse.Namespace) -> str | None:
+    """Refuse option combinations before any forge call."""
+    if args.disposition and args.role != "implementer":
+        return "--disposition requires --as implementer"
+    if args.verification and args.role != "reviewer":
+        return "--verification requires --as reviewer"
+    if args.disposition == "fixed" and args.sha is None:
+        return "--disposition fixed requires --sha <full-sha>"
+    if args.disposition != "fixed" and args.sha is not None:
+        return "--sha requires --disposition fixed"
+    if args.sha is not None and re.fullmatch(SHA, args.sha) is None:
+        return "--sha must be a full lowercase commit SHA"
+    if args.disposition != "rejected" and (
+        args.not_pursued or args.deferred_to is not None
+    ):
+        return "--not-pursued and --deferred-to require --disposition rejected"
+    return None
+
+
 def json_default(value: object) -> object:
     if is_dataclass(value):
         return asdict(value)
@@ -314,6 +366,10 @@ def main(argv: list[str] | None = None) -> int:
                 root.error(
                     "--forge forgejo requires --" + name.replace("_", "-"),
                 )
+    if (args.group, getattr(args, "command", None)) == ("thread", "reply"):
+        error = reply_option_error(args)
+        if error:
+            root.error(error)
     try:
         result = execute(args)
         if args.json:

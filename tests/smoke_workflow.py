@@ -7,7 +7,6 @@ from pathlib import Path
 import time
 
 from tests.forge_support import ForgeFixture, ForgejoFixture, finding
-from agent_squad.conventions import MERGE_INSTRUCTION
 
 
 def initialize(f: ForgeFixture) -> None:
@@ -95,9 +94,8 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         )
         assert f.status()["next_action"] == "address_findings"
         steps.append({"step": 3, "result": "three findings and handoff"})
-        f.reply(
-            "REV-1", "DISPOSITION needs-human\n\nScripted policy question."
-        )
+        f.reply("REV-1", "Scripted policy question.",
+                disposition="needs-human")
         gated = f.status()
         assert (
             gated["gates"]["needs_decision"]
@@ -123,19 +121,18 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         assert not f.status()["gates"]["needs_decision"]
         previous = head
         head = f.commit("value = 1\nsecond = 20\nthird = 3\n")
-        f.reply(
-            "REV-1",
-            f"DISPOSITION fixed {head}\n\nScripted fix; python -m unittest.",
-        )
+        f.reply("REV-1", "Scripted fix; python -m unittest.",
+                disposition="fixed", sha=head)
         f.reply(
             "REV-2",
-            "DISPOSITION rejected\n\nThe scripted example already meets the"
-            " requirement.",
+            "The scripted example already meets the requirement.",
+            disposition="rejected",
         )
         f.reply(
             "REV-3",
-            "DISPOSITION rejected\n\nNot pursued: the advisory improvement"
-            " is unnecessary for this fixture.",
+            "the advisory improvement is unnecessary for this fixture.",
+            disposition="rejected",
+            not_pursued=True,
         )
         before_push = f.status()
         # The earlier needs-human disposition still has its Developer
@@ -160,21 +157,12 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         )
         f.cli("reviewer", "close", "--pr", "1", "--head", previous)
         f.cli("reviewer", "launch", "--pr", "1")
-        f.reply(
-            "REV-1",
-            "VERIFIED fixed\n\nScripted execution evidence.",
-            "reviewer",
-        )
-        f.reply(
-            "REV-2",
-            "VERIFIED rejection accepted\n\nScripted execution evidence.",
-            "reviewer",
-        )
-        f.reply(
-            "REV-3",
-            "VERIFIED rejection accepted\n\nScripted advisory checked.",
-            "reviewer",
-        )
+        f.reply("REV-1", "Scripted execution evidence.",
+                verification="fixed")
+        f.reply("REV-2", "Scripted execution evidence.",
+                verification="rejection-accepted")
+        f.reply("REV-3", "Scripted advisory checked.",
+                verification="rejection-accepted")
         for fid in ("REV-1", "REV-2", "REV-3"):
             f.cli(
                 "thread",
@@ -235,17 +223,12 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         assert f.status()["budget"]["used"] == 3
         steps.append({"step": 7, "result": "budget stop and refused launch"})
         f.decision(budget=4)
-        f.reply(
-            "REV-4",
-            "DISPOSITION rejected\n\nScripted reconsideration evidence.",
-        )
+        f.reply("REV-4", "Scripted reconsideration evidence.",
+                disposition="rejected")
         assert f.status()["next_action"] == "launch_review"
         f.cli("reviewer", "launch", "--pr", "1")
-        f.reply(
-            "REV-4",
-            "VERIFIED rejection accepted\n\nScripted probe passed.",
-            "reviewer",
-        )
+        f.reply("REV-4", "Scripted probe passed.",
+                verification="rejection-accepted")
         f.review("approved")
         approved = f.status()
         assert approved["next_action"] == "approved"
@@ -300,13 +283,12 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
             "--task", f.task, "--report", f.report,
         )
         f.cli("reviewer", "launch", "--pr", "2")
-        body = Path(f.review_body)
-        body.write_text(body.read_text() +
-                        "\n## Merge hold\n\nItem 3: merge rules.\n")
         f.cli(
             "review", "post", "--as", "reviewer", "--pr", "2",
             "--head", second_head, "--base", review_base,
-            "--verdict", "approved", "--body", f.review_body,
+            "--verdict", "approved", "--summary", f.summary,
+            "--verified-dispositions", f.verified,
+            "--merge-hold", f.write("hold.md", "Item 3: merge rules.\n"),
             "--threads", f.write("second-threads.json", "[]"),
         )
         held = f.cli("status", "--pr", "2")
@@ -331,7 +313,7 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         initialize(f)
         head = f.candidate()
         f.create_pr(issue_task=True)
-        f.decision(body=MERGE_INSTRUCTION + '\n\n> Start issue #1.')
+        f.decision(merge_instruction="record", body="> Start issue #1.")
         f.cli("reviewer", "launch", "--pr", "1")
         f.review("approved")
         f.herdr_settings(prompt_failure=True)

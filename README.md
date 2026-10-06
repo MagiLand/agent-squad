@@ -193,9 +193,16 @@ define the exact grammar. In summary:
 - Formal reviews begin with `AGENT_SQUAD/0.5.0 REVIEW`, identify full head and
   base SHAs, and use `approved`, `changes_requested`, or `needs_human`.
 - Findings have PR-wide `REV-<n>` identifiers and `blocking` or `optional`
-  severity. The Implementer replies with `DISPOSITION fixed <full-sha>`,
-  `DISPOSITION rejected`, or `DISPOSITION needs-human`; the Reviewer records
-  verification. Resolving a GitHub thread alone does not settle its finding.
+  severity. The Implementer replies with `thread reply --disposition fixed
+  --sha <full-sha>`, `--disposition rejected`, or `--disposition needs-human`;
+  the Reviewer records verification with `--verification`. The CLI writes the
+  tagged first line and refuses a body file that begins with one. Resolving a
+  GitHub thread alone does not settle its finding.
+- Agents supply review sections, dispositions, verifications, and standing
+  merge instructions as command options and prose files; the CLI composes the
+  protocol text stored on the forge (`review post --summary`,
+  `--verified-dispositions`, and optional section files; `decision post
+  --merge-instruction record|withdraw`).
 - `DECISION` records human choices, Task amendments, or review-budget
   extensions, plus standing merge instructions and withdrawals. `STOPPED`
   halts automatic review until a later authorized continuation; standing merge
@@ -228,7 +235,7 @@ for the required arguments; repeating plain `review post` creates a new review.
 Forgejo posts the review body first, followed by each finding root. An empty
 `diff_hunk` in the root read-back leaves the finding unanchored; `thread open`
 recovers it at a valid location. Interrupted publication uses the same
-`review post --resume <review-id>` flow and original body/thread files.
+`review post --resume <review-id>` flow and original section and thread files.
 `thread resolve` is unsupported on Forgejo and returns exit 1. Reviewer
 verification replies settle findings without changing forge thread state.
 

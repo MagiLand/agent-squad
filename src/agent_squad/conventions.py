@@ -20,6 +20,12 @@ SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 NUMBER = r"[1-9][0-9]*"
 FINDING_ID = rf"REV-{NUMBER}"
 VERDICTS = ("approved", "changes_requested", "needs_human")
+DISPOSITIONS = ("fixed", "rejected", "needs-human")
+VERIFICATIONS = {
+    "fixed": "VERIFIED fixed",
+    "rejection-accepted": "VERIFIED rejection accepted",
+    "not-fixed": "NOT FIXED",
+}
 PREFIXES = ("AGENT_SQUAD/", "[REV-", "DISPOSITION", "VERIFIED", "NOT FIXED")
 PATTERNS = {
     "review": re.compile(
@@ -98,6 +104,12 @@ def render_line(kind: str, **fields: object) -> str:
             f'[{fields["category"]}]'
             f' {fields["title"]}'
         )
+    elif kind == "disposition":
+        line = f'DISPOSITION {fields["disposition"]}'
+        if fields.get("sha") is not None:
+            line += f' {fields["sha"]}'
+    elif kind == "verification":
+        line = VERIFICATIONS.get(str(fields["verification"]), "")
     else:
         raise AgentSquadError(f"cannot compose {kind} header")
     parsed = parse_line(line)
@@ -711,8 +723,10 @@ def derive(
             repair = (
                 f"agent-squad review post --as reviewer --pr {pr.number}"
                 f' --resume {e.id} --head {fields["head"]} --base'
-                f' {fields["base"]} --verdict {fields["verdict"]} --body'
-                " <file> --threads <file>"
+                f' {fields["base"]} --verdict {fields["verdict"]} --summary'
+                " <file> --verified-dispositions <file> [--merge-hold <file>]"
+                " [--standards <file>] [--spec <file>] [--evidence <file>]"
+                " --threads <file>"
                 if entry["current"]
                 else (
                     "agent-squad thread open --as implementer --pr"

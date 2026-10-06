@@ -24,11 +24,12 @@ agent-squad pr create --as implementer --issue 42 --report "$REPORT"
 
 Suppose the returned PR is 43. Unless the Developer retained the merge or a
 review-before-merge hold applies, the Implementer records the actual start
-instruction in a general decision. `$DECISION` begins with exactly
-`Standing merge instruction: merge when approved.` and quotes that instruction.
+instruction in a general decision. `$DECISION` quotes that instruction; the
+CLI opens the decision with `Standing merge instruction: merge when approved.`
 
 ```sh
-agent-squad decision post --as implementer --pr 43 --finding none --body "$DECISION"
+agent-squad decision post --as implementer --pr 43 --finding none \
+  --merge-instruction record --body "$DECISION"
 agent-squad reviewer launch --pr 43
 ```
 
@@ -45,9 +46,12 @@ reads authoritative state:
 agent-squad status --pr 43 --json
 ```
 
-Valid findings receive fixes or evidence-backed dispositions. Fixes are
-committed, pushed and reported; a fresh Reviewer verifies them. Optional
-findings receive a disposition even when left unchanged. On Forgejo the
+Valid findings receive fixes or evidence-backed dispositions, posted with
+`thread reply --disposition` and a prose body file; the CLI writes the tagged
+first line. Fixes are committed, pushed and reported; a fresh Reviewer verifies
+them with `thread reply --verification`. Optional findings receive a
+disposition even when left unchanged, with `--not-pursued` and a reason or
+`--deferred-to <issue>`. On Forgejo the
 Reviewer skips `thread resolve`, which is unsupported; verification replies
 establish settlement. For interrupted publication it uses `review post
 --resume <review-id>` with the original full command inputs. A pending draft

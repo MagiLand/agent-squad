@@ -92,11 +92,11 @@ At `pr create` and after every push, apply section 8's review-before-merge rule
 to the whole PR. Name any applicable item and its reason under “Areas worth
 extra review”. Right after creation, unless the Developer kept the merge
 (for example “don't merge” or “I'll merge”) or a hold applies, record a general
-`decision post --as implementer --pr <PR> --finding none --body <file>` whose
-body opens with exactly `Standing merge instruction: merge when approved.`,
-followed by the Developer's start instruction quoted. A later general decision
-opening with `Standing merge instruction withdrawn.` withdraws it. Post that
-withdrawal when the Developer explicitly asks, or on your own when a hold arises
+`decision post --as implementer --pr <PR> --finding none --merge-instruction
+record --body <file>` whose body file quotes the Developer's start
+instruction; the CLI writes the instruction's fixed opening sentence. A later
+general decision posted with `--merge-instruction withdraw` withdraws it. Post
+that withdrawal when the Developer explicitly asks, or on your own when a hold arises
 after recording the instruction. A `REVIEW_RESULT` notification cannot itself
 revoke an existing standing instruction or be quoted as evidence that the Developer
 requested withdrawal. These decisions carry no Task amendment or `budget=`;
@@ -169,27 +169,28 @@ evidence appears.
 Write reply bodies in `<scratch_root>/issue-<N>`.
 Reply on every unsettled thread, blocking or optional, with
 `agent-squad thread reply --as implementer --pr <PR> --finding REV-<n>
---body <file>`. The file's first line must be one of:
+--disposition <value> --body <file>`. The body file holds prose only; the CLI
+writes the protocol text and refuses a body that begins with it. Choose:
 
-- `DISPOSITION fixed <full-sha>`: explain the fix and give the exact verification
-  command. The commit must be reachable from the new head and not from the head
-  where the finding was raised.
-- `DISPOSITION rejected`: for a blocking thread, cite concrete existing code,
+- `--disposition fixed --sha <full-sha>`: explain the fix and give the exact
+  verification command. The commit must be reachable from the new head and not
+  from the head where the finding was raised.
+- `--disposition rejected`: for a blocking thread, cite concrete existing code,
   tests, or evidence that demonstrates the finding is wrong. On an optional
-  thread, the second non-empty line must start with `Not pursued:` and the
-  reason, or `Deferred to #<issue>:` naming an open issue of the same repository.
-  `thread reply` refuses any other rejection body and reads the referenced
-  issue to reject a missing or closed issue or a pull request.
-- `DISPOSITION needs-human`: name the decision requiring Developer authority;
+  thread, add `--not-pursued` and start the body with the reason, or add
+  `--deferred-to <issue>` naming an open issue of the same repository.
+  `thread reply` refuses an optional rejection without one of them and reads
+  the referenced issue to reject a missing or closed issue or a pull request.
+- `--disposition needs-human`: name the decision requiring Developer authority;
   follow section 7 before seeking another review.
 
-On an optional thread, `thread reply` refuses an Implementer reply whose
-first line is not a `DISPOSITION`.
+On an optional thread, `thread reply` refuses an Implementer reply without
+`--disposition`.
 
 An optional thread never blocks approval, but it blocks `reviewer launch`
 and `pr merge` until it carries a disposition newer than its latest
-verification, unless it is settled. The existing rules for `fixed <full-sha>`
-and `needs-human` apply to every thread.
+verification, unless it is settled. The existing rules for `--disposition
+fixed` and `needs-human` apply to every thread.
 
 After `NOT FIXED`, supply a new disposition. After fixes, run relevant tests,
 commit, push, and update `pr report`. Reapply the hold rule to the whole PR
