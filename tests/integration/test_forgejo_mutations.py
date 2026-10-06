@@ -325,6 +325,93 @@ class ForgejoMutationTests(unittest.TestCase):
                 self.assertEqual((after["issues"], after["prs"]),
                                  (before["issues"], before["prs"]))
 
+    def test_issue_create_files_one_marked_issue_for_triage(self):
+        f = self.f
+        model = f.read_model()
+        model["issues"]["4"] = dict(
+            model["issues"]["1"], id=4, number=4, state="closed",
+            title="Retry cleanup", conversation=[],
+        )
+        model["prs"]["1"]["title"] = "Retry cleanup"
+        model["prs"]["9"] = dict(
+            model["prs"]["1"], id=9, number=9, state="closed",
+        )
+        f.save_model(model)
+        before = f.read_model()
+        note = f.write("follow-up.md", "Retry the cleanup read.\n")
+        result = f.cli("issue", "create", "--as", "implementer",
+                       "--title", "Retry cleanup", "--body", note,
+                       "--from-pr", "1")
+        after = f.read_model()
+        body = (
+            "AGENT_SQUAD/0.5.0 NOTE role=implementer\n\n"
+            "Follow-up from pull request #1.\n\n"
+            "Retry the cleanup read."
+        )
+        self.assertEqual(result, {
+            "issue": 10, "title": "Retry cleanup",
+            "labels": ["needs-triage"],
+        })
+        stored = after["issues"]["10"]
+        self.assertEqual(
+            (stored["state"], stored["body"], stored["user"]["login"],
+             stored["labels"]),
+            ("open", body, "developer", [{"id": 41, "name": "needs-triage"}]),
+        )
+        self.assertEqual(after["prs"], before["prs"])
+        [write] = self.writes(len(before["calls"]))
+        self.assertEqual(
+            (write["method"], write["path"], write["Authorization"],
+             write["body"]),
+            ("POST", "/instance/api/v1/repos/MagiLand/trial/issues",
+             "token fake-token-developer",
+             {"title": "Retry cleanup", "body": body, "labels": [41]}),
+        )
+        self.assertIn(
+            "/instance/api/v1/repos/MagiLand/trial/issues?state=open"
+            "&type=issues&limit=50&page=1",
+            [c["path"] for c in after["calls"][len(before["calls"]):]],
+        )
+        self.assertEqual(f.cli("issue", "view", "--issue", "10")["labels"],
+                         ["needs-triage"])
+        for options, expected, message in (
+            (("--title", " Retry cleanup "), 1,
+             "open issue #10 has the same title"),
+            (("--title", "New work", "--from-pr", "4"), 1,
+             "--from-pr 4 does not exist in the configured repository"),
+            (("--title", "New work", "--from-issue", "99"), 1,
+             "--from-issue 99 does not exist in the configured repository"),
+            ("no label", 1, "repository has no needs-triage label"),
+            # F16 CreateIssue drops labels without issue write permission.
+            ("dropped", 3, "issue #11 was created with labels [] instead of"
+             " only needs-triage"),
+        ):
+            with self.subTest(message=message):
+                if options in ("no label", "dropped"):
+                    model = f.read_model()
+                    if options == "no label":
+                        model["labels"] = [{"id": 1, "name": "bug"}]
+                    else:
+                        model["labels"] = before["labels"]
+                        model["settings"]["drop_issue_labels"] = True
+                    f.save_model(model)
+                    options = ("--title", "New work")
+                start = f.read_model()
+                refused = f.cli("issue", "create", "--as", "implementer",
+                                *options, "--body", note, expected=expected)
+                self.assertIn(message, refused["error"])
+                end = f.read_model()
+                writes = self.writes(len(start["calls"]))
+                if expected == 3:
+                    self.assertEqual(
+                        [(w["method"], w["path"]) for w in writes],
+                        [("POST",
+                          "/instance/api/v1/repos/MagiLand/trial/issues")])
+                    self.assertEqual(end["issues"]["11"]["labels"], [])
+                else:
+                    self.assertEqual(writes, [])
+                    self.assertEqual(end["issues"], start["issues"])
+
     def historical_base(self):
         f = self.f
         f.git("push", "origin", "main:refs/heads/historical-base")

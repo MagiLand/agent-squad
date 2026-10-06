@@ -306,6 +306,52 @@ class ForgeBoundaryTests(unittest.TestCase):
             '/repos/org/repo/pulls/1/reviews?per_page=100&page=2',
         ])
 
+    def test_open_issues_skip_pull_requests_and_read_every_page(
+        self,
+    ) -> None:
+        def row(number: int, **extra: object) -> dict:
+            return dict(forge_evidence(), number=number,
+                        title=f' Title {number} ', **extra)
+
+        first = [row(i) for i in range(1, 100)]
+        first.append(row(100, pull_request={'url': 'pulls/100'}))
+        with patch.object(self.forge, 'api', side_effect=[
+            first, [row(101)],
+        ]) as api:
+            found = self.forge.open_issues()
+        self.assertEqual(sorted(found), [*range(1, 100), 101])
+        self.assertEqual(found[101], ' Title 101 ')
+        self.assertEqual([call.args[0] for call in api.call_args_list], [
+            '/repos/org/repo/issues?state=open&per_page=100&page=1',
+            '/repos/org/repo/issues?state=open&per_page=100&page=2',
+        ])
+
+    def test_labels_read_every_page_and_creation_names_the_label(
+        self,
+    ) -> None:
+        names = [{'name': f'label-{i}'} for i in range(100)]
+        with patch.object(self.forge, 'api', side_effect=[
+            names, [{'name': 'needs-triage'}],
+        ]) as api:
+            labels = self.forge.labels()
+        self.assertEqual(labels[-1], 'needs-triage')
+        self.assertEqual(len(labels), 101)
+        self.assertEqual(api.call_args_list[1].args[0],
+                         '/repos/org/repo/labels?per_page=100&page=2')
+        created = dict(forge_evidence('Body\r\n'), number=7, title='T',
+                       state='open', labels=[{'name': 'needs-triage'}])
+        with patch.object(self.forge, 'api', return_value=created) as api:
+            record = self.forge.create_issue('T', 'Body', 'needs-triage')
+        api.assert_called_once_with(
+            '/repos/org/repo/issues', method='POST',
+            body={'title': 'T', 'body': 'Body', 'labels': ['needs-triage']},
+        )
+        self.assertEqual(record, {
+            'number': 7, 'title': 'T', 'state': 'open',
+            'is_pull_request': False, 'body': 'Body\n',
+            'labels': ['needs-triage'], 'comments': (),
+        })
+
     def test_unsupported_resolution_exits_before_reading_or_mutating(
         self,
     ) -> None:

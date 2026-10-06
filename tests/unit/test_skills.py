@@ -260,3 +260,47 @@ class IssueNoteSkillTests(unittest.TestCase):
                 self.assertIn(rule, implementer)
         self.assertNotIn(
             "issue comment", packaged_skill("squad-reviewer").decode())
+
+
+class IssueCreateSkillTests(unittest.TestCase):
+    def test_followup_issues_wait_for_triage_and_reach_the_developer(
+        self,
+    ) -> None:
+        implementer = " ".join(
+            packaged_skill("squad-implementer").decode().split())
+        workflow = implementer.split("## 2. Implement and publish", 1)[
+            1].split("## 3.", 1)[0]
+        for rule in (
+            "File follow-up work that has independent engineering value and "
+            "lies outside the Task as a new issue with `agent-squad issue "
+            "create --as implementer --title <text> --body <file> "
+            "--from-issue <N> [--from-pr <PR>]`.",
+            "Section 6 decides whether an optional finding justifies such an "
+            "issue.",
+            "the CLI writes the `NOTE` line and the origin line and labels "
+            "the issue `needs-triage`, so it waits for triage and is not a "
+            "Task. Never start work on an issue you filed.",
+            "On exit 3 the issue exists without exactly that label: report "
+            "its number and do not run `issue create` again.",
+            "List every issue you filed in the reports of section 8.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, workflow)
+        finishing = implementer.split("## 8. Approval", 1)[1].split(
+            "## 9.", 1)[0]
+        self.assertEqual(
+            finishing.count("every issue you filed with `issue create`"), 2)
+        # The section 6 thresholds stay word for word.
+        for threshold in (
+            "> Do not automatically create a follow-up issue for an optional "
+            "finding. Follow-up work should exist only when the finding has "
+            "independently worthwhile engineering value,",
+            "> If the current PR itself primarily exists to address optional "
+            "findings from an earlier PR, apply a higher threshold before "
+            "creating further follow-up work.",
+        ):
+            with self.subTest(threshold=threshold):
+                self.assertIn(threshold, implementer)
+        # The Reviewer recommends follow-up work; it never creates issues.
+        self.assertNotIn(
+            "issue create", packaged_skill("squad-reviewer").decode())

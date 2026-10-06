@@ -120,6 +120,29 @@ def parse_review(value: object) -> Review | None:
     )
 
 
+def parse_issue(value: object) -> IssueRecord:
+    data = object_value(value, "issue")
+    evidence = parse_evidence(data)
+    number = positive(data.get("number"), "issue.number")
+    if data.get("state") not in ("open", "closed"):
+        raise ForgeError("issue.state must be open or closed")
+    return {
+        "number": number,
+        "title": text_value(data.get("title"), "issue.title"),
+        "state": data["state"],
+        "is_pull_request": data.get("pull_request") is not None,
+        "body": evidence.body,
+        "labels": [
+            V.require_string(
+                object_value(label, "label").get("name"),
+                "label.name",
+            )
+            for label in array(data.get("labels"), "labels")
+        ],
+        "comments": (),
+    }
+
+
 def parse_pullrequest(value: object) -> PullRequest:
     data = object_value(value, "pull request")
     head = object_value(data.get("head"), "pull request head")
@@ -512,29 +535,52 @@ class Forgejo:
         return tuple(sorted(map(parse_evidence, values), key=lambda c: c.id))
 
     def issue(self, number: int) -> IssueRecord:
-        data = object_value(
-            self.api(f"{self.prefix}/issues/{number}"), "issue"
-        )
-        evidence = parse_evidence(data)
-        if positive(data.get("number"), "issue.number") != number:
+        record = parse_issue(self.api(f"{self.prefix}/issues/{number}"))
+        if record["number"] != number:
             raise ForgeError("issue response has another number")
-        if data.get("state") not in ("open", "closed"):
-            raise ForgeError("issue.state must be open or closed")
-        return {
-            "number": number,
-            "title": text_value(data.get("title"), "issue.title"),
-            "state": data["state"],
-            "is_pull_request": data.get("pull_request") is not None,
-            "body": evidence.body,
-            "labels": [
-                V.require_string(
-                    object_value(label, "label").get("name"),
-                    "label.name",
-                )
-                for label in array(data.get("labels"), "labels")
-            ],
-            "comments": self._conversation(number),
-        }
+        record["comments"] = self._conversation(number)
+        return record
+
+    def open_issues(self) -> dict[int, str]:
+        result = {}
+        query = "state=open&type=issues"
+        for row in self.listing(f"{self.prefix}/issues?{query}"):
+            data = object_value(row, "issue")
+            if data.get("pull_request") is None:
+                number = positive(data.get("number"), "issue.number")
+                result[number] = text_value(data.get("title"), "issue.title")
+        return result
+
+    def _label_ids(self) -> dict[str, int]:
+        result = {}
+        for row in self.listing(f"{self.prefix}/labels"):
+            data = object_value(row, "label")
+            name = V.require_string(data.get("name"), "label.name")
+            result[name] = positive(data.get("id"), "label.id")
+        return result
+
+    def labels(self) -> tuple[str, ...]:
+        return tuple(self._label_ids())
+
+    def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
+        # Creation takes label IDs and silently drops unknown ones (F16).
+        ids = self._label_ids()
+        if label not in ids:
+            raise ForgeError(f"repository has no {label} label")
+        data = object_value(self.api(
+            f"{self.prefix}/issues", method="POST",
+            body={"title": title, "body": body, "labels": [ids[label]]},
+        ), "created issue")
+        record = parse_issue(data)
+        if (
+            parse_evidence(data).author.casefold() != self.account.casefold()
+            or record["body"] != body.replace("\r\n", "\n")
+            or record["title"] != title
+        ):
+            raise ForgeError(
+                f'issue {record["number"]} created; response mismatch'
+            )
+        return record
 
     def pr(self, number: int) -> PullRequest:
         data = self.api(f"{self.prefix}/pulls/{number}")

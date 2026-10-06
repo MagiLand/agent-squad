@@ -114,6 +114,24 @@ def parse_comment(value: object) -> Comment:
     )
 
 
+def parse_issue(value: object) -> IssueRecord:
+    data = object_value(value, "issue")
+    return {
+        "number": positive(data.get("number"), "issue.number"),
+        "title": text_value(data.get("title"), "issue.title"),
+        "state": text_value(data.get("state"), "issue.state"),
+        "is_pull_request": "pull_request" in data,
+        "body": parse_evidence(data).body,
+        "labels": [
+            V.require_string(
+                object_value(label, "label").get("name"), "label.name"
+            )
+            for label in array(data.get("labels"), "labels")
+        ],
+        "comments": (),
+    }
+
+
 def parse_pullrequest(value: object) -> PullRequest:
     data = object_value(value, "pull request")
     head = object_value(data.get("head"), "pull request head")
@@ -359,29 +377,36 @@ class GitHub:
         return permission
 
     def issue(self, number: int) -> IssueRecord:
-        data = object_value(
-            self.api(f"{self.prefix}/issues/{number}"), "issue"
-        )
-        evidence = parse_evidence(data)
-        labels = [
-            V.require_string(
-                object_value(label, "label").get("name"), "label.name"
-            )
-            for label in array(data.get("labels"), "labels")
-        ]
-        comments = tuple(
+        record = parse_issue(self.api(f"{self.prefix}/issues/{number}"))
+        record["comments"] = tuple(
             parse_evidence(c)
             for c in self.listing(f"{self.prefix}/issues/{number}/comments")
         )
-        return {
-            "number": positive(data.get("number"), "issue.number"),
-            "title": text_value(data.get("title"), "issue.title"),
-            "state": text_value(data.get("state"), "issue.state"),
-            "is_pull_request": "pull_request" in data,
-            "body": evidence.body,
-            "labels": labels,
-            "comments": comments,
-        }
+        return record
+
+    def open_issues(self) -> dict[int, str]:
+        result = {}
+        for row in self.listing(f"{self.prefix}/issues?state=open"):
+            data = object_value(row, "issue")
+            # The issues listing also returns pull requests.
+            if "pull_request" not in data:
+                number = positive(data.get("number"), "issue.number")
+                result[number] = text_value(data.get("title"), "issue.title")
+        return result
+
+    def labels(self) -> tuple[str, ...]:
+        return tuple(
+            V.require_string(
+                object_value(label, "label").get("name"), "label.name"
+            )
+            for label in self.listing(f"{self.prefix}/labels")
+        )
+
+    def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
+        return parse_issue(self.api(
+            f"{self.prefix}/issues", method="POST",
+            body={"title": title, "body": body, "labels": [label]},
+        ))
 
     def pr(self, number: int) -> PullRequest:
         return parse_pullrequest(self.api(f"{self.prefix}/pulls/{number}"))

@@ -163,6 +163,12 @@ amendment is recorded, it is recorded again unless you said otherwise or a
 hold applies. Neither standing instruction nor withdrawal lifts a stop or
 answers a pending human decision.
 
+Follow-up work the Implementer finds outside the Task becomes a new issue
+through `issue create`, labelled `needs-triage` and opened with the
+Implementer's `NOTE` line. It waits for your triage; the Implementer never
+starts work on it and lists it in its report. The repository needs a label
+named exactly `needs-triage`; without one the command creates nothing.
+
 A successful Herdr handoff ends the sending agent's step. It becomes idle;
 there is no polling of the receiving agent. The Reviewer posts on the configured forge
 before notifying the Implementer, so a missing notification loses no review.
@@ -265,7 +271,7 @@ shipped command path.
 | Commands | Purpose |
 | --- | --- |
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
-| `issue view`, `issue comment` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue. |
+| `issue view`, `issue comment`, `issue create` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`. |
 | `pr create`, `pr report` | Publish the Task and implementation report; update the report on an open PR. |
 | `pr head`, `pr reviews`, `status` | Read exact revision identities, reviews, and derived workflow state. |
 | `pr merge` | Merge an approved revision and verify integration and owned cleanup. |

@@ -286,6 +286,10 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"name": branch, "commit": {"id": head}}
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
+        if parts[3] == "labels":
+            return 200, self.paged(model.get("labels", []), query)
+        if parts[3] == "issues" and number is None:
+            return self.issues(model, account, body, query)
         if parts[3] == "issues":
             # Forgejo numbers issues and PRs together; this model numbers
             # them apart, so the fixtures' issue 1 and PR 1 share a number.
@@ -310,12 +314,7 @@ class Handler(BaseHTTPRequestHandler):
                     return 201, row
                 return 200, target.get("conversation", [])
             if issue is None and pr is not None:
-                # The issues API serves a PR number as an issue marked as a
-                # PR (synthetic, source-backed like issue GET).
-                fields = ("id", "number", "title", "state", "body", "user",
-                          "created_at")
-                return 200, {**{k: pr[k] for k in fields}, "labels": [],
-                             "pull_request": {"merged": pr["merged"]}}
+                return 200, self.pr_issue(pr)
             return ((200, issue) if issue
                     else (404, {"message": "issue not found"}))
         if parts[3] != "pulls":
@@ -464,6 +463,44 @@ class Handler(BaseHTTPRequestHandler):
                 rows = list(reversed(rows[offset:] + rows[:offset]))
             return 200, rows
         return 404, {"message": "unknown endpoint"}
+
+    @staticmethod
+    def pr_issue(pr: dict) -> dict:
+        # The issues API serves a PR number as an issue marked as a PR
+        # (synthetic, source-backed like issue GET).
+        fields = ("id", "number", "title", "state", "body", "user",
+                  "created_at")
+        return {**{k: pr[k] for k in fields}, "labels": [],
+                "pull_request": {"merged": pr["merged"]}}
+
+    def issues(
+        self, model: dict, account: str, body: object, query: dict,
+    ) -> tuple[int, object]:
+        """Create or list issues (synthetic, source-backed: F16 CreateIssue
+        takes label IDs and silently drops unknown ones; ListIssues filters
+        by state and type)."""
+        issues = model.setdefault("issues", {})
+        prs = model.get("prs", {})
+        if self.command == "POST":
+            # A new issue takes a number above every issue and PR.
+            number = str(max(map(int, [*issues, *prs, "0"])) + 1)
+            labels = [] if model["settings"].get("drop_issue_labels") else [
+                label for label in model.get("labels", [])
+                if label["id"] in body.get("labels", [])
+            ]
+            row = self.record(model, account, body.get("body", ""))
+            row.update(number=int(number), title=body["title"],
+                       state="open", labels=labels, conversation=[])
+            issues[number] = row
+            return 201, row
+        state = query.get("state", ["open"])[0]
+        kind = query.get("type", [None])[0]
+        rows = [] if kind == "pulls" else list(issues.values())
+        if kind != "issues":
+            rows += [self.pr_issue(pr) for pr in prs.values()]
+        rows = [r for r in rows if state in ("all", r["state"])]
+        return 200, self.paged(
+            sorted(rows, key=lambda r: r["number"], reverse=True), query)
 
     @staticmethod
     def paged(rows: list, query: dict) -> list:

@@ -233,6 +233,146 @@ class ForgeCommandTests(unittest.TestCase):
                         [c["arguments"][1] for c in calls],
                     )
 
+    def test_issue_create_files_one_marked_issue_for_triage(self) -> None:
+        f = self.f
+        model = f.read_model()
+        # Neither a closed issue nor an open PR with the title is a
+        # duplicate, and the new number is above every issue and PR.
+        model["issues"]["4"] = dict(
+            model["issues"]["1"], id=4, number=4, state="closed",
+            title="Retry cleanup", conversation=[],
+        )
+        model["prs"]["1"]["title"] = "Retry cleanup"
+        model["prs"]["9"] = dict(
+            model["prs"]["1"], id=9, number=9, state="closed",
+        )
+        f.save_model(model)
+        before = f.read_model()
+        note = f.write("follow-up.md", "\nRetry the cleanup read.\n")
+        result = f.cli("issue", "create", "--as", "implementer",
+                       "--title", "  Retry cleanup ", "--body", note,
+                       "--from-issue", "1", "--from-pr", "1")
+        after = f.read_model()
+        body = (
+            "AGENT_SQUAD/0.5.0 NOTE role=implementer\n\n"
+            "Follow-up from issue #1 and pull request #1.\n\n"
+            "Retry the cleanup read."
+        )
+        self.assertEqual(result, {
+            "issue": 10, "title": "Retry cleanup",
+            "labels": ["needs-triage"],
+        })
+        stored = after["issues"]["10"]
+        self.assertEqual(
+            (stored["title"], stored["state"], stored["body"],
+             stored["user"]["login"], stored["labels"]),
+            ("Retry cleanup", "open", body, "developer",
+             [{"name": "needs-triage"}]),
+        )
+        self.assertEqual(set(after["issues"]) - set(before["issues"]),
+                         {"10"})
+        self.assertEqual(after["prs"], before["prs"])
+        [write] = [c for c in after["calls"][len(before["calls"]):]
+                   if "POST" in c["arguments"]]
+        self.assertEqual(
+            (write["arguments"][1], write["account"], write["GH_TOKEN"],
+             write["body"]),
+            ("/repos/MagiLand/trial/issues", "developer",
+             "fake-token-developer",
+             {"title": "Retry cleanup", "body": body,
+              "labels": ["needs-triage"]}),
+        )
+        # needs-triage keeps the new issue from being a Task (skill rule 1).
+        view = f.cli("issue", "view", "--issue", "10")
+        self.assertEqual(
+            (view["state"], view["is_pull_request"], view["labels"]),
+            ("open", False, ["needs-triage"]),
+        )
+        human = f.run([sys.executable, "-m", "agent_squad", "issue",
+                       "create", "--as", "implementer", "--title", "Other",
+                       "--body", note], cwd=f.worktree)
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertEqual(human.stdout.splitlines()[0],
+                         "Created issue #11 for triage.")
+
+    def test_issue_create_refusals_create_nothing(self) -> None:
+        f = self.f
+        model = f.read_model()
+        model["issues"]["4"] = dict(
+            model["issues"]["1"], id=4, number=4, conversation=[],
+            title="Retry cleanup",
+        )
+        f.save_model(model)
+        note = f.write("follow-up.md", "Retry the cleanup read.\n")
+        empty = f.write("empty.md", "\n \n")
+
+        def create(*options: str, title: str = "New work",
+                   body: str = note, expected: int = 1) -> dict:
+            return f.cli("issue", "create", "--as", "implementer",
+                         "--title", title, "--body", body, *options,
+                         expected=expected)
+
+        for options, kwargs, message, forge_read in (
+            ((), {"title": " \t"}, "title must not be empty", False),
+            ((), {"title": "New\nwork"}, "title must be one line", False),
+            ((), {"body": empty}, "body must not be empty", False),
+            (("--from-issue", "99"), {},
+             "--from-issue 99 does not exist in the configured repository",
+             True),
+            (("--from-pr", "99"), {},
+             "--from-pr 99 does not exist in the configured repository",
+             True),
+            # Issue 4 exists but is not a pull request.
+            (("--from-pr", "4"), {}, "--from-pr 4 does not exist", True),
+            ((), {"title": " Retry cleanup"},
+             "open issue #4 has the same title", True),
+            (("--as", "reviewer"), {"expected": 2}, "invalid choice", False),
+            ("no label", {}, "repository has no needs-triage label", True),
+        ):
+            with self.subTest(message=message):
+                if options == "no label":
+                    model = f.read_model()
+                    model["labels"] = [{"id": 1, "name": "Needs-Triage"}]
+                    f.save_model(model)
+                    options = ()
+                before = f.read_model()
+                refused = create(*options, **kwargs)
+                after = f.read_model()
+                self.assertIn(message, refused["error"])
+                self.assertEqual((after["issues"], after["prs"]),
+                                 (before["issues"], before["prs"]))
+                calls = after["calls"][len(before["calls"]):]
+                if forge_read:
+                    self.assertTrue(calls)
+                    self.assertEqual(
+                        [c for c in calls if "--method" in c["arguments"]
+                         and "GET" not in c["arguments"]], [])
+                else:
+                    self.assertEqual(calls, [])
+
+    def test_issue_create_never_retries_an_issue_missing_its_label(
+        self,
+    ) -> None:
+        # GitHub silently drops the labels of an account without push access.
+        f = self.f
+        f.settings(drop_issue_labels=True)
+        before = f.read_model()
+        refused = f.cli(
+            "issue", "create", "--as", "implementer", "--title", "New work",
+            "--body", f.write("follow-up.md", "Work.\n"), expected=3)
+        after = f.read_model()
+        self.assertIn(
+            "issue #2 was created with labels [] instead of only"
+            " needs-triage; correct its labels on the forge and do not rerun"
+            " issue create", refused["error"])
+        self.assertEqual(set(after["issues"]) - set(before["issues"]), {"2"})
+        self.assertEqual(after["issues"]["2"]["labels"], [])
+        self.assertEqual(
+            [c["arguments"][1] for c in after["calls"][len(before["calls"]):]
+             if "POST" in c["arguments"]],
+            ["/repos/MagiLand/trial/issues"],
+        )
+
     def test_optional_rejection_validates_reason_and_open_followup_issue(
         self,
     ) -> None:

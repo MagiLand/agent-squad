@@ -115,6 +115,18 @@ file in `<scratch_root>/issue-<N>` as prose; the CLI writes the `NOTE` line.
 Do not use it for progress chatter, for questions to the Developer, or for
 anything the PR already records.
 
+File follow-up work that has independent engineering value and lies outside
+the Task as a new issue with `agent-squad issue create --as implementer
+--title <text> --body <file> --from-issue <N> [--from-pr <PR>]`. Section 6
+decides whether an optional finding justifies such an issue. Write the body
+file in `<scratch_root>/issue-<N>` as prose stating the work and why it is
+worth doing; the CLI writes the `NOTE` line and the origin line and labels
+the issue `needs-triage`, so it waits for triage and is not a Task. Never
+start work on an issue you filed. A filed issue may be the open issue that
+`--deferred-to` names (section 5). On exit 3 the issue exists without
+exactly that label: report its number and do not run `issue create` again.
+List every issue you filed in the reports of section 8.
+
 ## 3. Request review
 
 Run `agent-squad reviewer launch --pr <PR>` from the issue worktree.
@@ -276,7 +288,8 @@ Verify approval through `status`, never from the Herdr notification alone.
 Reply on every unsettled thread, blocking or optional, before merging or
 reporting approval. When `next_action` is `approved`, send “approved at
 `<full-sha>`, ready to merge”, listing every optional finding with its ID,
-title, and disposition and any hold's item and reason, then wait. Only the
+title, and disposition, any hold's item and reason, and every issue you filed
+with `issue create`, then wait. Only the
 Developer releases a hold by instructing the merge after seeing it; only then
 pass `--accept-merge-hold`. A standing instruction never releases a hold.
 
@@ -308,8 +321,9 @@ refusal. After a successful merge the PR description is frozen: `pr report`
 refuses a PR that is not open. If the repository runs CI on base-branch pushes,
 wait for its run at the merge commit. Then send one report needing no answer:
 merge commit, method, integration check, CI at the approved head and the push
-run's result, every cleanup step, fast-forward result, and every optional
-finding with ID, title, and disposition. If the push run failed, say so and
+run's result, every cleanup step, fast-forward result, every optional
+finding with ID, title, and disposition, and every issue you filed with
+`issue create`. If the push run failed, say so and
 ask the Developer to choose a fix or a revert; change nothing else. If push
 CI evidence is missing or inaccessible, report that limitation explicitly.
 

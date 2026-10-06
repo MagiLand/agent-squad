@@ -5,6 +5,7 @@ import contextlib
 from dataclasses import replace
 import io
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -14,13 +15,13 @@ add_src_to_path()
 
 from agent_squad.cli import main, positive_argument  # noqa: E402
 from agent_squad.commands import (  # noqa: E402
-    comment_issue, compose_reply, compose_review, load_threads, view_issue,
-    workflow_paths,
+    comment_issue, compose_reply, compose_review, create_issue, load_threads,
+    view_issue, workflow_paths,
 )
 from agent_squad.conventions import validate_review_body  # noqa: E402
-from agent_squad.forge import Evidence  # noqa: E402
+from agent_squad.forge import Evidence, ForgeError  # noqa: E402
 from agent_squad.initialization import (  # noqa: E402
-    AgentSquadError, Repository,
+    AgentSquadError, Repository, RetainedError,
 )
 from tests.forge_support import REVIEW, SUMMARY, finding  # noqa: E402
 from tests.unit.test_conventions import config  # noqa: E402
@@ -422,3 +423,223 @@ class IssueCommentOptionTests(unittest.TestCase):
             self.assertEqual(
                 main([*base, "--as", "implementer", "--body", "b.md"]), 0)
             execute.assert_called_once()
+
+
+class StubCreateForge(StubIssueForge):
+    """Record the reads and the one write of issue create."""
+
+    def __init__(
+        self, *, labels: tuple[str, ...] = ("bug", "needs-triage"),
+        open_issues: dict[int, str] | None = None,
+        created_labels: list[str] | None = None,
+        missing: tuple[str, ...] = (), **record: object,
+    ) -> None:
+        super().__init__(**record)
+        self.repository_labels = labels
+        self.open = {} if open_issues is None else open_issues
+        self.created_labels = created_labels
+        self.missing = missing
+        self.status = 404
+
+    def issue(self, number: int) -> dict:
+        if "issue" in self.missing:
+            self.calls.append(("issue", number))
+            raise ForgeError("issue not found", self.status)
+        return super().issue(number)
+
+    def pr(self, number: int) -> object:
+        self.calls.append(("pr", number))
+        if "pr" in self.missing:
+            raise ForgeError("pull request not found", self.status)
+        return object()
+
+    def labels(self) -> tuple[str, ...]:
+        self.calls.append(("labels",))
+        return self.repository_labels
+
+    def open_issues(self) -> dict[int, str]:
+        self.calls.append(("open_issues",))
+        return self.open
+
+    def create_issue(self, title: str, body: str, label: str) -> dict:
+        self.calls.append(("create_issue", title, body, label))
+        return {
+            "number": 12, "title": title, "state": "open",
+            "is_pull_request": False, "body": body,
+            "labels": (
+                [label] if self.created_labels is None
+                else self.created_labels
+            ),
+            "comments": (),
+        }
+
+
+class IssueCreateTests(unittest.TestCase):
+    NOTE = "AGENT_SQUAD/0.5.0 NOTE role=implementer"
+    READS = [("labels",), ("open_issues",)]
+
+    def test_note_and_origin_lines_precede_the_prose_under_one_label(
+        self,
+    ) -> None:
+        for origin, line in (
+            ({}, None),
+            ({"from_issue": 5}, "Follow-up from issue #5."),
+            ({"from_pr": 9}, "Follow-up from pull request #9."),
+            ({"from_issue": 5, "from_pr": 9},
+             "Follow-up from issue #5 and pull request #9."),
+        ):
+            with self.subTest(origin=origin):
+                forge = StubCreateForge()
+                result = create_issue(
+                    forge, "  Retry cleanup \t", "\n Work.\n\nWhy.\n",
+                    **origin,
+                )
+                body = "\n\n".join(
+                    part for part in (self.NOTE, line, "Work.\n\nWhy.")
+                    if part
+                )
+                reads = (
+                    ([("issue", 5)] if "from_issue" in origin else [])
+                    + ([("pr", 9)] if "from_pr" in origin else [])
+                )
+                self.assertEqual(forge.calls, [
+                    *reads, *self.READS,
+                    ("create_issue", "Retry cleanup", body, "needs-triage"),
+                ])
+                self.assertEqual(result, {
+                    "issue": 12, "title": "Retry cleanup",
+                    "labels": ["needs-triage"],
+                })
+
+    def test_title_and_body_are_refused_before_any_forge_call(self) -> None:
+        for title, body, message in (
+            ("", "Work.", "title must not be empty"),
+            (" \t\n", "Work.", "title must not be empty"),
+            ("Retry\ncleanup", "Work.", "title must be one line"),
+            ("Retry\u2028cleanup", "Work.", "title must be one line"),
+            ("Retry cleanup", " \n\n", "issue create body must not be empty"),
+            ("Retry cleanup", self.NOTE + "\n\nCopied.",
+             "issue create body must start with prose"),
+            ("Retry cleanup", "**[REV-1][optional][tests] Copied",
+             "must start with prose"),
+        ):
+            with self.subTest(title=title, body=body):
+                forge = StubCreateForge()
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    create_issue(forge, title, body, from_issue=5)
+                self.assertEqual(forge.calls, [])
+        reviewer = StubCreateForge(role="reviewer")
+        with self.assertRaises(AgentSquadError):
+            create_issue(reviewer, "Retry cleanup", "Work.")
+        self.assertEqual(reviewer.calls, [])
+
+    def test_missing_origin_label_or_a_duplicate_title_creates_nothing(
+        self,
+    ) -> None:
+        for forge, origin, message, calls in (
+            (StubCreateForge(missing=("issue",)), {"from_issue": 5},
+             "--from-issue 5 does not exist in the configured repository",
+             [("issue", 5)]),
+            (StubCreateForge(missing=("pr",)), {"from_pr": 9},
+             "--from-pr 9 does not exist in the configured repository",
+             [("pr", 9)]),
+            (StubCreateForge(is_pull_request=True), {"from_issue": 5},
+             "--from-issue 5 is a pull request; use --from-pr",
+             [("issue", 5)]),
+            (StubCreateForge(labels=("bug", "Needs-Triage")), {},
+             "repository has no needs-triage label", [("labels",)]),
+            (StubCreateForge(open_issues={3: "Other", 8: " Retry cleanup "}),
+             {}, "open issue #8 has the same title", self.READS),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    create_issue(forge, "Retry cleanup", "Work.", **origin)
+                self.assertEqual(forge.calls, calls)
+        # Only an exact match after trimming counts as the same title.
+        forge = StubCreateForge(open_issues={8: "retry cleanup"})
+        self.assertEqual(
+            create_issue(forge, "Retry cleanup", "Work.")["issue"], 12)
+        # A closed origin is still an origin; other read failures propagate.
+        forge = StubCreateForge(state="closed")
+        create_issue(forge, "Retry cleanup", "Work.", from_issue=5)
+        for missing in ("issue", "pr"):
+            forge = StubCreateForge(missing=(missing,))
+            forge.status = 403
+            with (
+                self.subTest(status=403, missing=missing),
+                self.assertRaisesRegex(ForgeError, "not found") as raised,
+            ):
+                create_issue(forge, "Retry cleanup", "Work.",
+                             from_issue=5, from_pr=9)
+            self.assertEqual(raised.exception.status, 403)
+
+    def test_a_created_issue_without_exactly_the_label_is_not_retried(
+        self,
+    ) -> None:
+        for labels, shown in (
+            ([], "[]"), (["needs-triage", "bug"], "[needs-triage, bug]"),
+            (["bug"], "[bug]"),
+        ):
+            with self.subTest(labels=labels):
+                forge = StubCreateForge(created_labels=labels)
+                with self.assertRaisesRegex(RetainedError, re.escape(
+                    f"issue #12 was created with labels {shown} instead"
+                    " of only needs-triage; correct its labels on the forge"
+                    " and do not rerun issue create"
+                )):
+                    create_issue(forge, "Retry cleanup", "Work.")
+                self.assertEqual(
+                    [c[0] for c in forge.calls],
+                    ["labels", "open_issues", "create_issue"],
+                )
+
+
+class IssueCreateOptionTests(unittest.TestCase):
+    def test_only_the_implementer_with_title_and_body_reaches_execution(
+        self,
+    ) -> None:
+        base = ["issue", "create"]
+        complete = ("--title", "T", "--body", "b.md")
+        for options, error in (
+            (("--as", "reviewer", *complete), "invalid choice"),
+            (complete, "the following arguments are required: --as"),
+            (("--as", "implementer", "--body", "b.md"), "required: --title"),
+            (("--as", "implementer", "--title", "T"), "required: --body"),
+            (("--as", "implementer", *complete, "--from-issue", "0"),
+             "positive decimal integer"),
+            (("--as", "implementer", *complete, "--from-pr", "x"),
+             "positive decimal integer"),
+            (("--as", "implementer", *complete, "--issue", "5"),
+             "unrecognized arguments"),
+            (("--as", "implementer", *complete, "--label", "bug"),
+             "unrecognized arguments"),
+        ):
+            stderr = io.StringIO()
+            with (
+                self.subTest(options=options),
+                patch("agent_squad.cli.execute") as execute,
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main([*base, *options])
+            self.assertEqual(raised.exception.code, 2)
+            execute.assert_not_called()
+            self.assertIn(error, stderr.getvalue())
+        stdout = io.StringIO()
+        with (
+            patch("agent_squad.cli.execute", return_value={
+                "issue": 12, "title": "T", "labels": ["needs-triage"],
+            }) as execute,
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main([
+                *base, "--as", "implementer", *complete,
+                "--from-issue", "5", "--from-pr", "9",
+            ]), 0)
+        args = execute.call_args.args[0]
+        self.assertEqual(
+            (args.role, args.title, args.body, args.from_issue, args.from_pr),
+            ("implementer", "T", "b.md", 5, 9),
+        )
+        self.assertTrue(
+            stdout.getvalue().startswith("Created issue #12 for triage.\n"))

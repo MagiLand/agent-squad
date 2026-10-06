@@ -737,6 +737,75 @@ class MutationContractTests(unittest.TestCase):
         forge.api = Mock()
         return forge
 
+    def test_issue_creation_sends_the_label_id_and_checks_the_response(
+        self,
+    ):
+        forge = self.forge()
+        forge.account = "developer"
+        labels = [{"id": i, "name": f"label-{i}"} for i in range(1, 51)]
+        created = {
+            "id": 70, "number": 7, "title": "T", "state": "open",
+            "body": "Body", "user": {"login": "Developer"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "labels": [{"id": 51, "name": "needs-triage"}],
+        }
+        forge.api.side_effect = [
+            labels, [{"id": 51, "name": "needs-triage"}], created,
+        ]
+        record = forge.create_issue("T", "Body", "needs-triage")
+        self.assertEqual(
+            [c.args[0] for c in forge.api.call_args_list],
+            ["/repos/owner/repo/labels?limit=50&page=1",
+             "/repos/owner/repo/labels?limit=50&page=2",
+             "/repos/owner/repo/issues"],
+        )
+        self.assertEqual(forge.api.call_args.kwargs, {
+            "method": "POST",
+            "body": {"title": "T", "body": "Body", "labels": [51]},
+        })
+        self.assertEqual(
+            (record["number"], record["labels"], record["comments"]),
+            (7, ["needs-triage"], ()),
+        )
+        for field, value in (
+            ("user", {"login": "reviewer"}), ("body", "Other"),
+            ("title", "Other"),
+        ):
+            with self.subTest(field=field):
+                forge.api.side_effect = [
+                    [{"id": 51, "name": "needs-triage"}],
+                    {**created, field: value},
+                ]
+                with self.assertRaisesRegex(
+                    ForgeError, "^issue 7 created; response mismatch$"
+                ):
+                    forge.create_issue("T", "Body", "needs-triage")
+        forge.api.reset_mock()
+        forge.api.side_effect = [[{"id": 52, "name": "Needs-Triage"}]]
+        with self.assertRaisesRegex(
+            ForgeError, "^repository has no needs-triage label$"
+        ):
+            forge.create_issue("T", "Body", "needs-triage")
+        forge.api.assert_called_once_with(
+            "/repos/owner/repo/labels?limit=50&page=1")
+
+    def test_open_issues_ask_for_issues_and_skip_pull_requests(self):
+        forge = self.forge()
+        row = {"number": 3, "title": " Same ", "pull_request": None}
+        forge.api.side_effect = [[
+            row, {**row, "number": 4, "pull_request": {"merged": False}},
+        ]]
+        self.assertEqual(forge.open_issues(), {3: " Same "})
+        forge.api.assert_called_once_with(
+            "/repos/owner/repo/issues?state=open&type=issues&limit=50&page=1")
+        forge.api.side_effect = [[{"id": 1, "name": "bug"}]]
+        self.assertEqual(forge.labels(), ("bug",))
+        for ident in (0, "1", None):
+            with self.subTest(ident=ident):
+                forge.api.side_effect = [[{"id": ident, "name": "bug"}]]
+                with self.assertRaisesRegex(ForgeError, "label.id"):
+                    forge.labels()
+
     def test_single_line_and_range_payload_and_duplicate_starts(self):
         from agent_squad.forge import Anchor
         from agent_squad.forgejo import anchor_payload
