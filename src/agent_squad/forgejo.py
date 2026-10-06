@@ -22,7 +22,6 @@ from urllib.request import (
 
 from .forge import (
     Anchor,
-    Approval,
     Comment,
     Evidence,
     ForgeError,
@@ -505,23 +504,6 @@ class Forgejo:
             return "write"
         return "read" if pull else "none"
 
-    def user_exists(self, login: str) -> bool:
-        try:
-            data = object_value(
-                self.api(f'/users/{quote(login, safe="")}'),
-                "user",
-            )
-        except ForgeError as error:
-            if error.status == 404:
-                return False
-            raise
-        if (
-            V.require_string(data.get("login"), "user.login").casefold()
-            != login.casefold()
-        ):
-            raise ForgeError("user lookup returned another login")
-        return True
-
     def _conversation(self, number: int) -> tuple[Evidence, ...]:
         # This endpoint returns the complete list; do not apply review paging.
         values = array(
@@ -581,24 +563,6 @@ class Forgejo:
             )
         )
 
-    @staticmethod
-    def _approvals(reviews: tuple[Review, ...]) -> tuple[Approval, ...]:
-        return tuple(
-            Approval(
-                r.evidence.author,
-                r.state,
-                r.commit_id,
-                r.dismissed,
-                r.evidence.created_at,
-                r.evidence.id,
-            )
-            for r in reviews
-            if r.state in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED)
-        )
-
-    def approvals(self, number: int) -> tuple[Approval, ...]:
-        return self._approvals(self.reviews(number))
-
     def _comments(
         self,
         number: int,
@@ -625,11 +589,6 @@ class Forgejo:
         pr = self.pr(number)
         reviews = self.reviews(number)
         comments, threads = self._comments(number, reviews)
-        approvals = (
-            self._approvals(reviews)
-            if self.repository.configuration.identity_mode == "single"
-            else ()
-        )
         return Snapshot(
             pr,
             reviews,
@@ -640,7 +599,6 @@ class Forgejo:
             self.can_read_thread_resolution,
             self.can_read_branch_rules,
             "approved",
-            approvals,
             tuple(r.evidence.id for r in reviews
                   if r.state == ReviewState.PENDING
                   and r.evidence.author.casefold() == self.account.casefold()),

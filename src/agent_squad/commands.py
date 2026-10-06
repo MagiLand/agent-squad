@@ -422,7 +422,7 @@ def post_review(
         )
         publication = ReviewPublication(
             head,
-            requested_state(verdict, repository.configuration.identity_mode),
+            requested_state(verdict),
             complete_body,
             complete_body + "\n\n## Unanchored findings\n\n"
             + "\n\n".join(comment.body for comment in comments),

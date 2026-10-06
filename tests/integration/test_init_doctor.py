@@ -1,5 +1,6 @@
 """Prerequisite checks and configuration discovery across worktrees."""
 
+import argparse
 import json
 import os
 import subprocess
@@ -237,31 +238,98 @@ class InitDoctorTests(unittest.TestCase):
             self.assertTrue(f.cli("doctor", "--live-reviewer")["ok"])
 
 
-class SingleInitTests(unittest.TestCase):
-    def test_missing_approver_is_usage_error_and_writes_nothing(self) -> None:
-        with ForgeFixture() as f:
-            result = f.cli('init', '--implementer-account', 'developer',
-                           '--reviewer-account', 'developer',
-                           '--identity-mode', 'single', expected=2)
-            self.assertIn('--approver-account', result['error'])
-            self.assertFalse((f.repo / '.agent-squad/config.json').exists())
+class IdentityConfigurationTests(unittest.TestCase):
+    REMOVED = (
+        "single-identity mode was removed in v0.7.0; move config.json aside"
+        " and rerun agent-squad init with two accounts"
+    )
 
-    def test_single_repeatable_approvers_and_dual_defaults(self) -> None:
+    def test_init_rejects_removed_options_and_equal_accounts(self) -> None:
         with ForgeFixture() as f:
-            f.cli('init', '--implementer-account', 'developer',
-                  '--reviewer-account', 'DEVELOPER',
-                  '--identity-mode', 'single',
-                  '--approver-account', 'human', '--approver-account', 'other')
-            path = f.repo / '.agent-squad/config.json'
-            data = json.loads(path.read_text())
-            self.assertEqual(data['identity_mode'], 'single')
-            self.assertEqual(data['approver_accounts'], ['human', 'other'])
-            original = path.read_bytes()
-            f.initialize()
-            self.assertEqual(path.read_bytes(), original)
+            path = f.repo / ".agent-squad/config.json"
+            for extra in (("--identity-mode", "single"),
+                          ("--identity-mode", "dual"),
+                          ("--approver-account", "human")):
+                with self.subTest(extra=extra):
+                    result = f.cli(
+                        "init", "--implementer-account", "developer",
+                        "--reviewer-account", "reviewer", *extra, expected=2,
+                    )
+                    self.assertIn("unrecognized arguments", result["error"])
+                    self.assertFalse(path.exists())
+            result = f.cli("init", "--implementer-account", "developer",
+                           "--reviewer-account", "DEVELOPER", expected=1)
+            self.assertIn("Implementer and Reviewer accounts must differ",
+                          result["error"])
+            self.assertFalse(path.exists())
+            self.assertEqual(f.read_model()["calls"], [])
+
+    def test_init_writes_neither_legacy_key(self) -> None:
         with ForgeFixture() as f:
             f.initialize()
             data = json.loads(
-                (f.repo / '.agent-squad/config.json').read_text())
-            self.assertEqual(data['identity_mode'], 'dual')
-            self.assertEqual(data['approver_accounts'], [])
+                (f.repo / ".agent-squad/config.json").read_text())
+            self.assertNotIn("identity_mode", data)
+            self.assertNotIn("approver_accounts", data)
+
+    def test_v061_dual_configuration_loads_unchanged(self) -> None:
+        with ForgeFixture() as f:
+            f.initialize()
+            path = f.repo / ".agent-squad/config.json"
+            data = json.loads(path.read_text())
+            data.update(identity_mode="dual", approver_accounts=[])
+            path.write_text(json.dumps(data, indent=2) + "\n")
+            original = path.read_bytes()
+            self.assertTrue(f.cli("doctor")["ok"])
+            self.assertEqual(
+                f.cli("issue", "view", "--issue", "1")["number"], 1)
+            result = f.cli("init", "--implementer-account", "developer",
+                           "--reviewer-account", "reviewer")
+            self.assertFalse(result["created"])
+            self.assertEqual(result["differences"], {})
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_single_configuration_is_refused_by_every_command(self) -> None:
+        from agent_squad.cli import parser
+
+        def leaves(current, prefix=()):
+            children = [a for a in current._actions
+                        if isinstance(a, argparse._SubParsersAction)]
+            if not children:
+                return [(prefix, current)]
+            return [leaf for name, child in children[0].choices.items()
+                    for leaf in leaves(child, (*prefix, name))]
+
+        with ForgeFixture() as f:
+            f.initialize()
+            path = f.repo / ".agent-squad/config.json"
+            data = json.loads(path.read_text())
+            data.update(identity_mode="single", approver_accounts=["human"])
+            data["reviewer"]["forge_account"] = "developer"
+            path.write_text(json.dumps(data, indent=2) + "\n")
+            original = path.read_bytes()
+            calls = len(f.read_model()["calls"])
+            commands = 0
+            for words, command in leaves(parser()):
+                if words == ("skill", "install"):
+                    continue
+                args = list(words)
+                for action in command._actions:
+                    if action.required and action.option_strings:
+                        value = (
+                            action.choices[0] if action.choices
+                            else "1" if action.type is not None
+                            else action.dest
+                        )
+                        args += [action.option_strings[0], value]
+                with self.subTest(command=words):
+                    result = f.cli(*args, expected=1, cwd=f.repo)
+                    text = (
+                        result["diagnostics"][0]["detail"]
+                        if words == ("doctor",) else result["error"]
+                    )
+                    self.assertIn(self.REMOVED, text)
+                    commands += 1
+            self.assertEqual(commands, 22)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(len(f.read_model()["calls"]), calls)

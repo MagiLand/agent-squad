@@ -21,12 +21,8 @@ class ReviewState(StrEnum):
     PENDING = "pending"
 
 
-def requested_state(verdict: str, identity_mode: str = "dual") -> ReviewState:
+def requested_state(verdict: str) -> ReviewState:
     """Map the shared protocol verdict to its neutral publication state."""
-    if identity_mode == "single" and verdict in (
-        "approved", "changes_requested", "needs_human",
-    ):
-        return ReviewState.COMMENTED
     if verdict == "needs_human":
         return ReviewState.COMMENTED
     if verdict in (ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED):
@@ -145,7 +141,6 @@ class Snapshot:
     can_read_thread_resolution: bool = False
     can_read_branch_rules: bool = False
     approved_state_label: str = "approved"
-    human_approvals: tuple[Approval, ...] = ()
     pending_drafts: tuple[int, ...] = ()
     protects_pending_drafts: bool = False
 
@@ -155,16 +150,6 @@ class Anchor:
     path: str
     line: int
     start_line: int | None = None
-
-
-@dataclass(frozen=True)
-class Approval:
-    login: str
-    state: ReviewState
-    commit_id: str
-    dismissed: bool
-    timestamp: str
-    id: int
 
 
 @dataclass(frozen=True)
@@ -234,11 +219,9 @@ class Forge(Protocol):
     def verify_identity(self) -> None: ...
     def repository_record(self) -> dict[str, object]: ...
     def repository_permission(self) -> str: ...
-    def user_exists(self, login: str) -> bool: ...
     def issue(self, number: int) -> IssueRecord: ...
     def pr(self, number: int) -> PullRequest: ...
     def reviews(self, number: int) -> tuple[Review, ...]: ...
-    def approvals(self, number: int) -> tuple[Approval, ...]: ...
     def snapshot(self, number: int) -> Snapshot: ...
     def thread_states(self, number: int) -> tuple[ThreadState, ...]: ...
     def branch_rules(self, branch: str) -> dict[str, object]: ...

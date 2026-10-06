@@ -229,41 +229,53 @@ class ConfigurationTests(unittest.TestCase):
                 decode_json(text)
 
 
-class IdentityModeTests(unittest.TestCase):
-    def single(self):
-        data = config().to_dict()
-        data.update(identity_mode='single', approver_accounts=['human'])
-        data['reviewer']['forge_account'] = 'DEV'
-        return data
+class LegacyIdentityKeyTests(unittest.TestCase):
+    """v0.6.x wrote identity_mode and approver_accounts into every config."""
 
-    def test_old_schema_two_defaults_and_single_roundtrip(self) -> None:
-        data = config().to_dict()
-        data.pop('identity_mode')
-        data.pop('approver_accounts')
-        loaded = Configuration.from_dict(data)
-        self.assertEqual(loaded.identity_mode, 'dual')
-        self.assertEqual(loaded.approver_accounts, ())
-        loaded = Configuration.from_dict(self.single())
-        self.assertEqual(Configuration.from_dict(loaded.to_dict()), loaded)
+    REMOVED = "single-identity mode was removed in v0.7.0"
 
-    def test_mode_conditional_fields_and_types_are_named(self) -> None:
-        for field, value in [
-            ('identity_mode', 'unknown'), ('identity_mode', None),
-            ('identity_mode', True), ('identity_mode', []),
-            ('approver_accounts', []), ('approver_accounts', 'human'),
-            ('approver_accounts', [None]), ('approver_accounts', ['']),
-            ('approver_accounts', ['deV']), ('approver_accounts', ['bad\x00']),
-        ]:
-            with self.subTest(field=field, value=value):
-                data = self.single()
-                data[field] = value
-                with self.assertRaisesRegex(ConfigurationError, field):
+    def test_v061_dual_configuration_loads_unchanged(self) -> None:
+        for legacy in (
+            {"identity_mode": "dual", "approver_accounts": []},
+            {"identity_mode": "dual"},
+            {"approver_accounts": []},
+        ):
+            with self.subTest(legacy=legacy):
+                data = config().to_dict()
+                data.update(legacy)
+                loaded = Configuration.from_dict(data)
+                self.assertEqual(loaded, config())
+                self.assertNotIn("identity_mode", loaded.to_dict())
+                self.assertNotIn("approver_accounts", loaded.to_dict())
+
+    def test_single_identity_values_are_refused_with_one_message(
+        self,
+    ) -> None:
+        single = config().to_dict()
+        single.update(identity_mode="single", approver_accounts=["human"])
+        single["reviewer"]["forge_account"] = "DEV"
+        values = [("identity_mode", value) for value in (
+            "single", "unknown", "Dual", None, True, [],
+        )] + [("approver_accounts", value) for value in (
+            ["human"], ["dev"], [""], "human", None,
+        )]
+        for key, value in values:
+            with self.subTest(key=key, value=value):
+                data = config().to_dict()
+                data[key] = value
+                with self.assertRaisesRegex(ConfigurationError, (
+                    self.REMOVED + "; move config.json aside and rerun"
+                    " agent-squad init with two accounts$"
+                )):
                     Configuration.from_dict(data)
-        data = self.single()
-        data['reviewer']['forge_account'] = 'reviewer'
-        with self.assertRaisesRegex(ConfigurationError, 'identity_mode'):
-            Configuration.from_dict(data)
+        with self.assertRaisesRegex(ConfigurationError, self.REMOVED):
+            Configuration.from_dict(single)
+
+    def test_equal_role_accounts_are_refused(self) -> None:
         data = config().to_dict()
-        data['approver_accounts'] = ['human']
-        with self.assertRaisesRegex(ConfigurationError, 'approver_accounts'):
+        data["reviewer"]["forge_account"] = "DEV"
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "^Implementer and Reviewer accounts must differ$",
+        ):
             Configuration.from_dict(data)

@@ -1,4 +1,4 @@
-"""Scripted baseline smoke plus the single-identity approval scenario."""
+"""Scripted baseline smoke on the fake GitHub and fake Forgejo forges."""
 
 from __future__ import annotations
 
@@ -14,41 +14,32 @@ def initialize(f: ForgeFixture) -> None:
     if not isinstance(f, ForgejoFixture):
         f.initialize()
         return
-    token = f.root / "developer.token"
-    token.write_text("fake-token-developer\n")
-    token.chmod(0o600)
+    tokens = {}
+    for account in ("developer", "reviewer"):
+        tokens[account] = f.root / f"{account}.token"
+        tokens[account].write_text(f"fake-token-{account}\n")
+        tokens[account].chmod(0o600)
     f.cli(
         "init", "--forge", "forgejo", "--base-url", f.server.base_url,
         "--implementer-account", "developer",
-        "--reviewer-account", "developer",
-        "--implementer-token-file", str(token),
-        "--reviewer-token-file", str(token),
-        "--identity-mode", "single", "--approver-account", "human",
+        "--reviewer-account", "reviewer",
+        "--implementer-token-file", str(tokens["developer"]),
+        "--reviewer-token-file", str(tokens["reviewer"]),
     )
 
 
-def human_review(f: ForgeFixture, event: str, *, pr: int = 1,
-                 login: str = "human") -> dict:
-    """Seed scripted browser evidence only in the disposable fake model."""
+def seed_draft(f: ForgeFixture, *, login: str, pr: int = 1) -> dict:
+    """Seed a browser-created pending review only in the fake model."""
     from tests.fixtures.fake_forgejo import Handler
 
     model = f.read_model()
-    row = Handler.record(model, login, "Scripted human review.")
-    row.update(state=event, dismissed=False, submitted_at=row["created_at"],
+    row = Handler.record(model, login, "Scripted pending review.")
+    row.update(state="PENDING", dismissed=False,
+               submitted_at=row["created_at"],
                commit_id=f.git("rev-parse", "HEAD", cwd=f.worktree))
     model["prs"][str(pr)]["reviews"].append(row)
     f.save_model(model)
     return row
-
-
-def require_human(f: ForgeFixture, *, pr: int = 1) -> None:
-    if not isinstance(f, ForgejoFixture):
-        return
-    state = f.cli("status", "--pr", str(pr))
-    assert state["next_action"] == "await_human_approval"
-    assert f.read_model()["prs"][str(pr)]["reviews"][-1]["state"] == "COMMENT"
-    f.cli("pr", "merge", "--as", "implementer", "--pr", str(pr), expected=4)
-    human_review(f, "APPROVED", pr=pr)
 
 
 def run_scenario(fixture: type[ForgeFixture]) -> dict:
@@ -197,24 +188,12 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
                 expected=1 if isinstance(f, ForgejoFixture) else 0,
             )
         f.review("approved")
-        require_human(f)
         approved = f.status()
         assert approved["next_action"] == "approved"
         assert approved["approval"]["approved"]
         assert approved["target"]["head"] == head
         assert all(t["settled"] for t in approved["findings"]
                    if t["severity"] == "blocking")
-        if isinstance(f, ForgejoFixture):
-            requested = human_review(f, "REQUEST_CHANGES")
-            vetoed = f.status()
-            assert not vetoed["approval"]["approved"]
-            veto = vetoed["human_request_changes"][0]
-            assert veto["login"] == "human" and veto["commit_id"] == head
-            assert veto["id"] == requested["id"]
-            f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
-                  expected=4)
-            human_review(f, "APPROVED")
-            assert f.status()["next_action"] == "approved"
         steps.append({"step": 5, "result": "verified and approved"})
         f.cli("reviewer", "close", "--pr", "1")
         head = f.push("value = 1\nsecond = 20\nthird = 30\n")
@@ -268,7 +247,6 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
             "reviewer",
         )
         f.review("approved")
-        require_human(f)
         approved = f.status()
         assert approved["next_action"] == "approved"
         assert approved["budget"] == {
@@ -331,7 +309,6 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
             "--verdict", "approved", "--body", f.review_body,
             "--threads", f.write("second-threads.json", "[]"),
         )
-        require_human(f, pr=2)
         held = f.cli("status", "--pr", "2")
         assert held["next_action"] == "approved"
         refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "2",
@@ -357,7 +334,6 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         f.decision(body=MERGE_INSTRUCTION + '\n\n> Start issue #1.')
         f.cli("reviewer", "launch", "--pr", "1")
         f.review("approved")
-        require_human(f)
         f.herdr_settings(prompt_failure=True)
         f.cli(
             "handoff", "review-result", "--pr", "1", "--head", head,
@@ -432,7 +408,7 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
             # The unusable optional root also needs a valid recovery anchor.
             f.cli("thread", "open", "--as", "implementer", "--pr", "1",
                   "--finding", "REV-2", "--path", "example.py", "--line", "3")
-            draft = human_review(f, "PENDING", login="developer")
+            draft = seed_draft(f, login="reviewer")
             refused = f.review("changes_requested",
                                [finding(title="Interrupted blocking")],
                                expected=4)
@@ -466,7 +442,6 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
     steps.append({"step": 12, "result": "all temporary roots removed"})
     return {
         "forge": "forgejo" if fixture is ForgejoFixture else "github",
-        "identity_mode": "single" if fixture is ForgejoFixture else "dual",
         "ok": True,
         "duration_seconds": round(time.monotonic() - started, 3),
         "scripted": [
@@ -484,49 +459,10 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
     }
 
 
-def run_github_single() -> dict:
-    roots = []
-    commands = []
-    with ForgeFixture() as f:
-        roots.append(f.root)
-        f.single_identity()
-        assert f.cli("doctor")["ok"]
-        f.candidate()
-        f.create_pr()
-        f.decision(body=MERGE_INSTRUCTION)
-        f.review("approved")
-        assert f.status()["next_action"] == "await_human_approval"
-        f.cli("pr", "merge", "--as", "implementer", "--pr", "1", expected=4)
-        requested = f.human_review("REQUEST_CHANGES")
-        state = f.status()
-        assert state["human_request_changes"][0]["id"] == requested["id"]
-        assert state["next_action"] == "await_human_approval"
-        f.push("value = 2\nsecond = 2\nthird = 3\n")
-        assert f.status()["next_action"] == "launch_review"
-        f.cli("reviewer", "launch", "--pr", "1")
-        f.review("approved")
-        assert f.status()["next_action"] == "await_human_approval"
-        f.human_review("APPROVE")
-        state = f.status()
-        assert state["next_action"] == "merge"
-        assert state["human_request_changes"] == []
-        assert state["human_approvals"][0]["dismissed"]
-        assert state["budget"]["used"] == 2
-        result = f.cli("pr", "merge", "--as", "implementer", "--pr", "1",
-                       cwd=f.repo)
-        assert result["integration"] == "verified by ancestry"
-        assert_merge_cleanup(f, 1, "issue-1", issue=1)
-        commands.extend(f.history)
-    assert all(not root.exists() for root in roots)
-
-    return {"ok": True, "command_count": len(commands), "commands": commands}
-
-
 def run_smoke() -> dict:
     scenarios = [run_scenario(ForgeFixture), run_scenario(ForgejoFixture)]
-    single = run_github_single()
     return {
-        "ok": True, "scenarios": scenarios, "github_single": single,
+        "ok": True, "scenarios": scenarios,
         "cleanup": "all owned temporary roots removed",
     }
 

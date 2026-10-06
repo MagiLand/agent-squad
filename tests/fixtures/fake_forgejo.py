@@ -240,10 +240,6 @@ class Handler(BaseHTTPRequestHandler):
             if account in settings.get("user_failure", []):
                 return 401, {"message": "user unavailable: " + auth}
             return 200, {"login": settings.get("login_mismatch", account)}
-        if len(parts) == 2 and parts[0] == "users":
-            if parts[1] in settings.get("missing_users", []):
-                return 404, {"message": "user not found"}
-            return 200, {"login": parts[1]}
         if parts[:3] != ["repos", "MagiLand", "trial"]:
             return 404, {"message": "repository not found"}
         if account in settings.get("repository_denied", []):

@@ -9,7 +9,7 @@ import unittest
 from tests.forge_support import ForgeFixture, ForgejoFixture
 
 
-def init_args(f: ForgejoFixture, *, single: bool = False) -> list[str]:
+def init_args(f: ForgejoFixture) -> list[str]:
     for account in ("developer", "reviewer"):
         token = f.root / f"{account}.token"
         token.write_text(f"fake-token-{account}\n")
@@ -17,12 +17,9 @@ def init_args(f: ForgejoFixture, *, single: bool = False) -> list[str]:
     return [
         "init", "--forge", "forgejo", "--base-url", f.server.base_url + "/",
         "--implementer-account", "developer",
-        "--reviewer-account", "developer" if single else "reviewer",
+        "--reviewer-account", "reviewer",
         "--implementer-token-file", str(f.root / "developer.token"),
-        "--reviewer-token-file",
-        str(f.root / ("developer.token" if single else "reviewer.token")),
-        *(["--identity-mode", "single", "--approver-account", "human",
-           "--approver-account", "other"] if single else []),
+        "--reviewer-token-file", str(f.root / "reviewer.token"),
     ]
 
 
@@ -36,111 +33,74 @@ def without_gh(f: ForgeFixture) -> None:
 
 
 class ForgejoInitDoctorTests(unittest.TestCase):
-    def test_init_both_modes_prefix_no_gh_and_linked_worktree(self) -> None:
-        for single in (False, True):
-            with self.subTest(single=single), ForgejoFixture(
-                path_prefix="/forge/instance",
-            ) as f:
-                args = init_args(f, single=single)
-                without_gh(f)
-                self.assertTrue(f.cli(*args)["created"])
-                config_path = f.repo / ".agent-squad/config.json"
-                config = json.loads(config_path.read_text())
-                self.assertEqual(config["schema_version"], 2)
-                self.assertEqual(config["forge"], {
-                    "kind": "forgejo", "owner": "MagiLand", "repo": "trial",
-                    "base_url": f.server.base_url,
-                })
-                self.assertEqual(config["identity_mode"],
-                                 "single" if single else "dual")
-                self.assertNotIn("fake-token-", config_path.read_text())
-                self.assertEqual(f.read_model()["calls"], [{
-                    "method": "GET",
-                    "path": "/forge/instance/api/v1/repos/MagiLand/trial",
-                    "Authorization": "token fake-token-developer",
-                    "body": None,
-                }])
-                linked = f.root / "linked"
-                f.git("worktree", "add", "--detach", str(linked))
-                for cwd in (f.repo, linked):
-                    result = f.cli("doctor", cwd=cwd)
-                    self.assertTrue(result["ok"])
-                    checks = {d["check"]: d for d in result["diagnostics"]}
-                    self.assertEqual(
-                        checks["forge client"]["detail"], "16.0.3",
-                    )
-                    for name in (
-                        "distinct forge identities",
-                        "Reviewer write permission",
-                    ):
-                        self.assertEqual(checks[name]["severity"],
-                                         "skip" if single else "pass")
-                        if single:
-                            self.assertEqual(checks[name]["detail"],
-                                             "single identity mode")
-                    self.assertNotIn("fake-token-", json.dumps(result))
-                calls = f.read_model()["calls"]
-                self.assertTrue(all(c["method"] == "GET" for c in calls))
-                prefix = "/forge/instance/api/v1"
-                expected_calls = [(prefix + "/repos/MagiLand/trial",
-                                   "token fake-token-developer")]
-                for _ in (f.repo, linked):
-                    expected_calls.extend([
-                        (prefix + "/version", "token fake-token-developer"),
-                        (prefix + "/user", "token fake-token-developer"),
-                        (prefix + "/repos/MagiLand/trial",
-                         "token fake-token-developer"),
-                    ])
-                    if single:
-                        expected_calls.extend([
-                            (prefix + "/repos/MagiLand/trial",
-                             "token fake-token-developer"),
-                            (prefix + "/users/human",
-                             "token fake-token-developer"),
-                            (prefix + "/users/other",
-                             "token fake-token-developer"),
-                        ])
-                    reviewer_token = ("token fake-token-developer" if single
-                                      else "token fake-token-reviewer")
-                    expected_calls.extend([
-                        (prefix + "/user", reviewer_token),
-                        (prefix + "/repos/MagiLand/trial", reviewer_token),
-                    ])
-                    if not single:
-                        expected_calls.append(
-                            (prefix + "/repos/MagiLand/trial", reviewer_token),
-                        )
+    def test_init_prefix_no_gh_and_linked_worktree(self) -> None:
+        with ForgejoFixture(path_prefix="/forge/instance") as f:
+            args = init_args(f)
+            without_gh(f)
+            self.assertTrue(f.cli(*args)["created"])
+            config_path = f.repo / ".agent-squad/config.json"
+            config = json.loads(config_path.read_text())
+            self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(config["forge"], {
+                "kind": "forgejo", "owner": "MagiLand", "repo": "trial",
+                "base_url": f.server.base_url,
+            })
+            self.assertNotIn("fake-token-", config_path.read_text())
+            self.assertEqual(f.read_model()["calls"], [{
+                "method": "GET",
+                "path": "/forge/instance/api/v1/repos/MagiLand/trial",
+                "Authorization": "token fake-token-developer",
+                "body": None,
+            }])
+            linked = f.root / "linked"
+            f.git("worktree", "add", "--detach", str(linked))
+            for cwd in (f.repo, linked):
+                result = f.cli("doctor", cwd=cwd)
+                self.assertTrue(result["ok"])
+                checks = {d["check"]: d for d in result["diagnostics"]}
                 self.assertEqual(
-                    [(c["path"], c["Authorization"]) for c in calls],
-                    expected_calls,
+                    checks["forge client"]["detail"], "16.0.3",
                 )
-                identities = [c["Authorization"] for c in calls
-                              if c["path"].endswith("/user")]
-                expected = ["token fake-token-developer",
-                            "token fake-token-developer" if single
-                            else "token fake-token-reviewer"] * 2
-                self.assertEqual(identities, expected)
-                approvers = [c for c in calls if "/users/" in c["path"]]
-                self.assertEqual(len(approvers), 4 if single else 0)
-                self.assertTrue(all(c["Authorization"] ==
-                                    "token fake-token-developer"
-                                    for c in approvers))
+                for name in (
+                    "distinct forge identities",
+                    "Reviewer write permission",
+                ):
+                    self.assertEqual(checks[name]["severity"], "pass")
+                self.assertNotIn("fake-token-", json.dumps(result))
+            calls = f.read_model()["calls"]
+            self.assertTrue(all(c["method"] == "GET" for c in calls))
+            prefix = "/forge/instance/api/v1"
+            developer = "token fake-token-developer"
+            reviewer = "token fake-token-reviewer"
+            expected_calls = [(prefix + "/repos/MagiLand/trial", developer)]
+            for _ in (f.repo, linked):
+                expected_calls.extend([
+                    (prefix + "/version", developer),
+                    (prefix + "/user", developer),
+                    (prefix + "/repos/MagiLand/trial", developer),
+                    (prefix + "/user", reviewer),
+                    (prefix + "/repos/MagiLand/trial", reviewer),
+                    (prefix + "/repos/MagiLand/trial", reviewer),
+                ])
+            self.assertEqual(
+                [(c["path"], c["Authorization"]) for c in calls],
+                expected_calls,
+            )
 
     def test_existing_config_validated_kept_and_new_differences_reported(
         self,
     ) -> None:
         with ForgejoFixture() as f:
-            args = init_args(f, single=True)
+            args = init_args(f)
             f.cli(*args)
             path = f.repo / ".agent-squad/config.json"
             original = path.read_bytes()
             result = f.cli("init", "--implementer-account", "developer",
-                           "--reviewer-account", "reviewer")
+                           "--reviewer-account", "other")
             self.assertFalse(result["created"])
             self.assertEqual(path.read_bytes(), original)
-            self.assertTrue({"forge", "implementer", "reviewer",
-                             "identity_mode", "approver_accounts"}
-                            <= result["differences"].keys())
+            self.assertEqual({"forge", "implementer", "reviewer"},
+                             result["differences"].keys())
             model = f.read_model()
             model["calls"] = []
             f.save_model(model)
@@ -173,8 +133,7 @@ class ForgejoInitDoctorTests(unittest.TestCase):
             ("forge", "base_url", "https://forge.invalid#f", "--base-url"),
             ("forge", "base_url", "/relative", "--base-url"),
             ("forge", "kind", "github", "--forge"),
-            (None, "identity_mode", "single", "--identity-mode"),
-            (None, "approver_accounts", ["human"], "--approver-account"),
+            ("reviewer", "forge_account", "DEVELOPER", "--reviewer-account"),
         ]
         with ForgejoFixture() as f:
             f.configure()
@@ -183,33 +142,14 @@ class ForgejoInitDoctorTests(unittest.TestCase):
             for section, key, value, flag in cases:
                 with self.subTest(key=key, value=value):
                     args = init_args(f)
-                    if flag in args:
-                        args[args.index(flag) + 1] = value
-                    else:
-                        args += [flag, value[0] if isinstance(value, list)
-                                 else value]
+                    args[args.index(flag) + 1] = value
                     path.unlink(missing_ok=True)
-                    f.cli(*args, expected=2 if value == "single" else 1)
+                    f.cli(*args, expected=1)
                     self.assertFalse(path.exists())
                     data = json.loads(json.dumps(valid))
-                    (data[section] if section else data)[key] = value
+                    data[section][key] = value
                     path.write_text(json.dumps(data))
                     f.cli("issue", "view", "--issue", "1", expected=1)
-                    f.cli("doctor", expected=1)
-                    self.assertEqual(f.read_model()["calls"], [])
-            for account, approver in (("reviewer", "human"),
-                                      ("developer", "DEVELOPER")):
-                with self.subTest(account=account, approver=approver):
-                    args = init_args(f, single=True)
-                    args[args.index("--reviewer-account") + 1] = account
-                    args[args.index("--approver-account") + 1] = approver
-                    path.unlink()
-                    f.cli(*args, expected=1)
-                    data = json.loads(json.dumps(valid))
-                    data.update(identity_mode="single",
-                                approver_accounts=[approver])
-                    data["reviewer"]["forge_account"] = account
-                    path.write_text(json.dumps(data))
                     f.cli("doctor", expected=1)
                     self.assertEqual(f.read_model()["calls"], [])
 

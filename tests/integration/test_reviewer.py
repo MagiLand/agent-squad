@@ -671,8 +671,6 @@ class ReviewerTests(unittest.TestCase):
     ) -> None:
         f = self.f
         original_model = f.read_model()
-        config_path = f.repo / ".agent-squad/config.json"
-        original_config = config_path.read_text()
         original_review = Path(f.review_body).read_text()
         expected_message = (
             f"AGENT_SQUAD/0.5.0 REVIEW_RESULT pr=1 head={self.head}"
@@ -685,20 +683,11 @@ class ReviewerTests(unittest.TestCase):
             ("standing instruction", "merge"),
             ("no instruction", "approved"),
             ("merge hold", "approved"),
-            ("single identity", "await_human_approval"),
         )
         for scenario, next_action in scenarios:
             with self.subTest(scenario=scenario):
                 f.save_model(original_model)
-                config_path.write_text(original_config)
                 Path(f.review_body).write_text(original_review)
-                if scenario == "single identity":
-                    config = json.loads(original_config)
-                    config["identity_mode"] = "single"
-                    config["approver_accounts"] = ["human"]
-                    config["reviewer"]["forge_account"] = "developer"
-                    config_path.write_text(json.dumps(config))
-                    f.settings(human_accounts=["human"])
                 if scenario == "merge hold":
                     body = Path(f.review_body)
                     body.write_text(

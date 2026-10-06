@@ -1,9 +1,9 @@
-# A single-identity review loop
+# A review loop
 
 This example uses the commands shipped in v0.6.0. Start in the primary
 checkout with ordinary Git transport working. Use the GitHub or
-[Forgejo setup](../README.md#forgejo-setup) instructions, selecting `single`
-and a separate person-operated approver. The example's numbers are
+[Forgejo setup](../README.md#forgejo-setup) instructions with two accounts, one
+for the Implementer and one for the Reviewer. The example's numbers are
 placeholders: issue and PR numbers need not match.
 
 The Developer invokes `$squad-implementer` (Codex) or `/squad-implementer`
@@ -35,8 +35,8 @@ agent-squad reviewer launch --pr 43
 A successful launch hands off and the Implementer becomes idle. The fresh
 Reviewer receives fixed full head/base SHAs and a detached checkout. It
 executes its review, publishes findings and notifies the Implementer through
-the CLI. In single mode an agent approval is a `COMMENT` review, with the
-protocol verdict in its body. This is distinct from a human approval.
+the CLI. The review's forge state mirrors the protocol verdict in its body:
+approve, request changes, or a comment for `needs_human`.
 
 On notification, or when the Developer says “check the PR”, the Implementer
 reads authoritative state:
@@ -54,14 +54,13 @@ establish settlement. For interrupted publication it uses `review post
 requires explicit `--discard-draft <draft-id>` after inspection, never an
 implicit deletion.
 
-When status is `await_human_approval`, the Implementer reports:
+When status is `approved` because no standing instruction is in force or a
+merge hold applies, the Implementer reports:
 
-> approved by the agent at `<full-head-sha>`, waiting for approval from `<logins>`
+> approved at `<full-head-sha>`, ready to merge
 
-The person reviews in the browser. A human request-changes is reported with
-its login and commit; the Developer then instructs the next step. After fixes,
-a fresh agent review and a replacement human approval must cover the current
-head. The human tells the Implementer to “check the PR” after acting.
+It lists every optional finding with its disposition and any hold's item and
+reason, then waits for the Developer.
 
 When status permits merge, the Implementer checks all CI at that exact head.
 A reported merge hold still requires the Developer's explicit merge instruction.

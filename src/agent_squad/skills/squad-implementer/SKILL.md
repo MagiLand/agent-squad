@@ -198,16 +198,6 @@ and withdraw the standing instruction if a hold now applies. Use
 is allowed when every unsettled blocking disposition is rejected, or after a
 Task amendment; it is not a substitute for committing and pushing fixes.
 
-In single-identity mode, when `next_action` is `await_human_approval`, report
-“approved by the agent at `<sha>`, waiting for approval from `<logins>`”, using
-the full current head and configured `approver_accounts`, then go idle without
-polling. Resume only on a new user instruction such as “check the PR”, and
-re-read `status`. Report every `human_request_changes` entry's login and commit
-to the Developer and wait for their instruction, as for `needs_human`; human
-reviews are not protocol findings or decisions and do not authorize a Task
-change. This also applies when a human request-changes accompanies another
-next action after the head changes. Never post a human approval yourself.
-
 ## 6. Non-blocking and optional findings
 
    > Treat non-blocking and optional findings as advisory, not mandatory.

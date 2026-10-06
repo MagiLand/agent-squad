@@ -12,15 +12,12 @@ class SmokeTests(unittest.TestCase):
         result = run_smoke()
         self.assertTrue(result["ok"])
         self.assertIn("removed", result["cleanup"])
-        self.assertEqual(
-            [(s["forge"], s["identity_mode"]) for s in result["scenarios"]],
-            [("github", "dual"), ("forgejo", "single")],
-        )
+        self.assertEqual([s["forge"] for s in result["scenarios"]],
+                         ["github", "forgejo"])
         for scenario in result["scenarios"]:
             self.assertTrue(scenario["ok"])
             self.assertEqual([s["step"] for s in scenario["steps"]],
                              list(range(1, 13)))
-        self.assertTrue(result["github_single"]["ok"])
 
     def test_failed_command_removes_the_owned_temporary_root(self) -> None:
         fixtures = []
