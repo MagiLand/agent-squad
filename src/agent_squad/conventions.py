@@ -41,6 +41,7 @@ PATTERNS = {
         rf"{re.escape(TAG)} STOPPED head=(?P<head>{SHA})"
         r" reason=(?P<reason>budget|repeat|scope|design|ambiguity|judgement)"
     ),
+    "note": re.compile(rf"{re.escape(TAG)} NOTE role=(?P<role>implementer)"),
     "finding": re.compile(
         rf"\[(?P<finding>{FINDING_ID})\]"
         r"\[(?P<severity>blocking|optional)\]"
@@ -98,6 +99,8 @@ def render_line(kind: str, **fields: object) -> str:
             line += f' budget={fields["budget"]}'
     elif kind == "stop":
         line = f'{TAG} STOPPED head={fields["head"]} reason={fields["reason"]}'
+    elif kind == "note":
+        line = f'{TAG} NOTE role={fields["role"]}'
     elif kind == "finding":
         line = (
             f'[{fields["finding"]}][{fields["severity"]}]'
@@ -116,6 +119,15 @@ def render_line(kind: str, **fields: object) -> str:
     if parsed is None or parsed.kind != kind:
         raise AgentSquadError(f"invalid {kind} header")
     return line
+
+
+def is_note(body: str) -> bool:
+    """Report whether a comment opens with the Implementer's NOTE line."""
+    try:
+        parsed = parse_line(first_line(body))
+    except AgentSquadError:
+        return False
+    return parsed is not None and parsed.kind == "note"
 
 
 def headings(body: str) -> list[tuple[str, int, int]]:
@@ -426,7 +438,8 @@ def derive(
         except AgentSquadError as error:
             diagnostic("malformed", e, str(error))
             return None
-        if parsed is None:
+        # A NOTE carries no authority anywhere, whoever posts it (§7.1).
+        if parsed is None or parsed.kind == "note":
             return None
         authors = {
             "review": {reviewer},

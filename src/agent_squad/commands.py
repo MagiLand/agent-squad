@@ -15,6 +15,7 @@ from .conventions import (
     derive,
     first_line,
     headings,
+    is_note,
     newer,
     parse_line,
     render_line,
@@ -160,6 +161,40 @@ def workflow_paths(
         "issue_scratch": str(scratch / f"issue-{issue}") if issue else None,
         "base_branch": config.base_branch,
     }
+
+
+def view_issue(repository: Repository, forge: Forge, number: int) -> dict:
+    record = forge.issue(number)
+    return {
+        **record,
+        "comments": [
+            {**asdict(c), "agent_note": is_note(c.body)}
+            for c in record["comments"]
+        ],
+        "paths": workflow_paths(repository, issue=number),
+    }
+
+
+def comment_issue(forge: Forge, number: int, body: str) -> dict:
+    """Post a durable Implementer note under the CLI-written NOTE line."""
+    prose = body.strip()
+    if not prose:
+        raise AgentSquadError("issue comment body must not be empty")
+    # Emphasis does not hide a hand-written tagged line from this check.
+    if first_line(prose).lstrip(" \t*_`").startswith(PREFIXES):
+        raise AgentSquadError(
+            "issue comment body must start with prose; the CLI writes the"
+            " NOTE line"
+        )
+    text = render_line("note", role=forge.role) + "\n\n" + prose
+    record = forge.issue(number)
+    if record["is_pull_request"]:
+        raise AgentSquadError(
+            f"issue comment requires an issue, not pull request #{number}"
+        )
+    if record["state"] != "open":
+        raise AgentSquadError(f"issue comment requires open issue #{number}")
+    return {"issue": number, **asdict(forge.comment(number, text))}
 
 
 def find_finding(state: dict, fid: str) -> dict:

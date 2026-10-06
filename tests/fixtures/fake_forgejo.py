@@ -287,17 +287,35 @@ class Handler(BaseHTTPRequestHandler):
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "issues":
+            # Forgejo numbers issues and PRs together; this model numbers
+            # them apart, so the fixtures' issue 1 and PR 1 share a number.
             issue = model.get("issues", {}).get(number)
             pr = prs.get(number)
             if parts[5:] == ["comments"]:
+                # Decisions and stops on a shared number reach the PR; an
+                # issue note there is refused rather than written to the PR.
                 target = pr or issue
                 if target is None:
                     return 404, {"message": "issue not found"}
                 if self.command == "POST":
+                    note = body["body"].startswith(
+                        "AGENT_SQUAD/0.5.0 NOTE ")
+                    if note and issue is not None and pr is not None:
+                        return 409, {
+                            "message": "fixture issue and PR share number "
+                            + number,
+                        }
                     row = self.record(model, account, body["body"])
                     target.setdefault("conversation", []).append(row)
                     return 201, row
                 return 200, target.get("conversation", [])
+            if issue is None and pr is not None:
+                # The issues API serves a PR number as an issue marked as a
+                # PR (synthetic, source-backed like issue GET).
+                fields = ("id", "number", "title", "state", "body", "user",
+                          "created_at")
+                return 200, {**{k: pr[k] for k in fields}, "labels": [],
+                             "pull_request": {"merged": pr["merged"]}}
             return ((200, issue) if issue
                     else (404, {"message": "issue not found"}))
         if parts[3] != "pulls":

@@ -268,6 +268,63 @@ class ForgejoMutationTests(unittest.TestCase):
         self.assertIn(body, f.status()["decisions"][-1]["body"])
         self.assertIn("Closes #1", f.status()["pr"]["evidence"]["body"])
 
+    def test_issue_comment_posts_one_marked_note_on_the_open_issue(self):
+        f = self.f
+        model = f.read_model()
+        for number, state in (("2", "open"), ("3", "closed")):
+            model["issues"][number] = dict(
+                model["issues"]["1"], id=int(number), number=int(number),
+                state=state, conversation=[],
+            )
+        f.save_model(model)
+        before = f.read_model()
+        note = f.write("note.md", "Root cause: Forgejo deletes in-merge.\n")
+        result = f.cli("issue", "comment", "--as", "implementer",
+                       "--issue", "2", "--body", note)
+        after = f.read_model()
+        body = (
+            "AGENT_SQUAD/0.5.0 NOTE role=implementer\n\n"
+            "Root cause: Forgejo deletes in-merge."
+        )
+        [stored] = after["issues"]["2"]["conversation"]
+        self.assertEqual((stored["body"], stored["user"]["login"]),
+                         (body, "developer"))
+        self.assertEqual((result["issue"], result["id"]), (2, stored["id"]))
+        self.assertEqual(after["prs"], before["prs"])
+        [write] = self.writes(len(before["calls"]))
+        self.assertEqual(
+            (write["method"], write["path"], write["Authorization"]),
+            ("POST", "/instance/api/v1/repos/MagiLand/trial/issues/2/comments",
+             "token fake-token-developer"),
+        )
+        after["issues"]["2"]["conversation"].append(dict(
+            stored, id=stored["id"] + 1, body="Developer: also check X.",
+        ))
+        f.save_model(after)
+        self.assertEqual(
+            [(c["id"], c["agent_note"])
+             for c in f.cli("issue", "view", "--issue", "2")["comments"]],
+            [(stored["id"], True), (stored["id"] + 1, False)],
+        )
+        for issue, message in (
+            ("3", "requires open issue #3"),
+            ("1", "fixture issue and PR share number 1"),
+            ("PR 1", "not pull request #1"),
+        ):
+            with self.subTest(issue=issue):
+                if issue == "PR 1":
+                    model = f.read_model()
+                    del model["issues"]["1"]
+                    f.save_model(model)
+                before = f.read_model()
+                refused = f.cli(
+                    "issue", "comment", "--as", "implementer", "--issue",
+                    issue.removeprefix("PR "), "--body", note, expected=1)
+                after = f.read_model()
+                self.assertIn(message, refused["error"])
+                self.assertEqual((after["issues"], after["prs"]),
+                                 (before["issues"], before["prs"]))
+
     def historical_base(self):
         f = self.f
         f.git("push", "origin", "main:refs/heads/historical-base")

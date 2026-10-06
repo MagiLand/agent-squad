@@ -226,3 +226,37 @@ class ForgeWordingSkillTests(unittest.TestCase):
         self.assertNotIn("GitHub", reviewer)
         self.assertIn("For a GitHub repository", implementer)
         self.assertIn("capabilities.can_resolve_threads", reviewer)
+
+
+class IssueNoteSkillTests(unittest.TestCase):
+    def test_marked_comments_leave_the_task_and_the_gh_limit_unchanged(
+        self,
+    ) -> None:
+        implementer = " ".join(
+            packaged_skill("squad-implementer").decode().split())
+        task_rule = implementer.split("## 1. Read the issue as the Task", 1)[
+            1].split("## 2.", 1)[0]
+        # The Task rule itself names the marked comments.
+        self.assertIn(
+            "A comment whose first line is "
+            "`AGENT_SQUAD/0.5.0 NOTE role=implementer` (`agent_note: true` "
+            "in `issue view --json`) is a note the Implementer agent posted "
+            "with `issue comment`. It is never a Developer comment and never "
+            "changes the Task.",
+            task_rule,
+        )
+        for rule in (
+            "Post a durable finding about an issue, such as a defect's root "
+            "cause, on that issue with `agent-squad issue comment --as "
+            "implementer --issue <M> --body <file>`; `<M>` is any open issue "
+            "of the configured repository.",
+            "Do not use it for progress chatter, for questions to the "
+            "Developer, or for anything the PR already records.",
+            "This allowance does not permit `gh` mutations, other `gh` reads, "
+            "or using `gh` for Task, PR, review, decision, stop, or budget "
+            "authority.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, implementer)
+        self.assertNotIn(
+            "issue comment", packaged_skill("squad-reviewer").decode())

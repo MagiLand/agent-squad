@@ -79,8 +79,12 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--" + number, type=positive_argument, required=True)
         p.add_argument("--json", action="store_true")
 
-    issue = command("issue", ("view",))["view"]
-    common(issue, number="issue")
+    issue = command("issue", ("view", "comment"))
+    common(issue["view"], number="issue")
+    common(
+        issue["comment"], role="implementer", number="issue", mutation=True
+    )
+    issue["comment"].add_argument("--body", required=True)
     skill = command("skill", ("install",))["install"]
     for name in ("claude", "codex", "force", "json"):
         skill.add_argument("--" + name, action="store_true")
@@ -218,10 +222,11 @@ def execute(args: argparse.Namespace) -> dict:
             reason=getattr(args, "reason", None),
         )
     if key == ("issue", "view"):
-        return {
-            **forge.issue(args.issue),
-            "paths": commands.workflow_paths(repository, issue=args.issue),
-        }
+        return commands.view_issue(repository, forge, args.issue)
+    if key == ("issue", "comment"):
+        return commands.comment_issue(
+            forge, args.issue, commands.read_file(args.body)
+        )
     if key == ("pr", "create"):
         return commands.create_pr(
             repository,
@@ -386,6 +391,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.group == "doctor":
             for d in result["diagnostics"]:
                 print(f'{d["severity"].upper()} {d["check"]}: {d["detail"]}')
+        elif (args.group, getattr(args, "command", None)) == (
+            "issue", "view",
+        ):
+            for c in result["comments"]:
+                if c["agent_note"]:
+                    print(
+                        f'Comment {c["id"]} by {c["author"]} is an'
+                        " Implementer agent note, not a Developer comment."
+                    )
+            print(json.dumps(result, indent=2, default=json_default))
         else:
             print(json.dumps(result, indent=2, default=json_default))
         return result.get(
