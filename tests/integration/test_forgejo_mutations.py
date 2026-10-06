@@ -1,4 +1,4 @@
-"""Forgejo write/recovery contracts through the CLI in both identity modes."""
+"""Forgejo write/recovery contracts through the CLI."""
 
 import json
 import sys
@@ -12,22 +12,13 @@ from tests.forge_support import (
 from tests.fixtures.fake_forgejo import Handler
 
 
-class ForgejoMutationCases:
-    single = False
-
+class ForgejoMutationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.f = ForgejoFixture(path_prefix="/instance")
         self.addCleanup(self.f.close)
-        if self.single:
-            self.f.single_identity()
-        else:
-            self.f.initialize()
+        self.f.initialize()
         self.head = self.f.candidate()
         self.f.create_pr()
-
-    @property
-    def reviewer(self):
-        return "developer" if self.single else "reviewer"
 
     def writes(self, start=0):
         return [c for c in self.f.read_model()["calls"][start:]
@@ -36,25 +27,13 @@ class ForgejoMutationCases:
     def seed_draft(self, ident=999, account=None, state="PENDING"):
         model = self.f.read_model()
         model["prs"]["1"]["reviews"].append({
-            "id": ident, "user": {"login": account or self.reviewer},
+            "id": ident, "user": {"login": account or "reviewer"},
             "body": "Human draft content", "state": state,
             "commit_id": self.head, "dismissed": False,
             "submitted_at": "2026-01-01T00:00:01Z",
             "created_at": "2026-01-01T00:00:01Z",
         })
         self.f.save_model(model)
-
-    def human_approve(self):
-        if self.single:
-            # Synthetic person-operated evidence, not an agent identity call.
-            model = self.f.read_model()
-            model["prs"]["1"]["reviews"].append({
-                "id": 900, "user": {"login": "human"}, "body": "Approved",
-                "state": "APPROVED", "commit_id": self.head,
-                "dismissed": False, "submitted_at": "2026-01-01T01:00:00Z",
-                "created_at": "2026-01-01T01:00:00Z",
-            })
-            self.f.save_model(model)
 
     def merge(self, expected=0, *options):
         result = self.f.run([
@@ -82,8 +61,7 @@ class ForgejoMutationCases:
         self.assertNotIn("comments", review["body"])
         self.assertIn("## Unanchored findings", review["body"]["body"])
         self.assertIn("**Verification**", review["body"]["body"])
-        self.assertEqual(review["body"]["event"],
-                         "COMMENT" if self.single else "REQUEST_CHANGES")
+        self.assertEqual(review["body"]["event"], "REQUEST_CHANGES")
         self.assertEqual([c["body"]["new_position"] for c in roots], [1, 2])
         self.assertEqual(
             [c["body"]["extra_lines_count"] for c in roots], [0, 1])
@@ -121,15 +99,14 @@ class ForgejoMutationCases:
             if is_review and call["body"]["body"].startswith("DISPOSITION"):
                 expected = "developer"
             else:
-                expected = self.reviewer if is_review else "developer"
+                expected = "reviewer" if is_review else "developer"
             self.assertEqual(
                 call["Authorization"], "token fake-token-" + expected)
         self.assertNotIn("fake-token-", json.dumps(state))
         self.assertTrue(
             all("GH_TOKEN" not in c for c in f.read_model()["calls"]))
         f.review("approved")
-        self.assertEqual(f.status()["next_action"],
-                         "await_human_approval" if self.single else "approved")
+        self.assertEqual(f.status()["next_action"], "approved")
 
     def test_pending_gate_exact_discard_and_resume_gate(self):
         f = self.f
@@ -144,7 +121,7 @@ class ForgejoMutationCases:
         self.assertEqual(state["pending_drafts"], [999])
         self.assertTrue(state["pending_draft"])
         for ident, owner, state in ((998, "other", "PENDING"),
-                                    (997, self.reviewer, "COMMENT")):
+                                    (997, "reviewer", "COMMENT")):
             self.seed_draft(ident, owner, state)
         for ident in (998, 997, 996):
             error = f.review("approved", discard_draft=ident, expected=1)
@@ -231,17 +208,13 @@ class ForgejoMutationCases:
         self.assertIn(str(rid), error["error"])
         self.assertFalse(f.status()["approval"]["approved"])
         f.settings(unknown_event_pending=False, author_approval_422=True)
-        if not self.single:
-            model = f.read_model()
-            model["prs"]["1"]["user"]["login"] = "reviewer"
-            f.save_model(model)
-            error = f.review("approved", discard_draft=rid, expected=1)
-            from tests.fixtures.fake_forgejo import recording
-            self.assertIn(recording("042-e8-approved.json")["message"],
-                          error["error"])
-        else:
-            f.review("approved", discard_draft=rid)
-            self.assertEqual(f.status()["next_action"], "await_human_approval")
+        model = f.read_model()
+        model["prs"]["1"]["user"]["login"] = "reviewer"
+        f.save_model(model)
+        error = f.review("approved", discard_draft=rid, expected=1)
+        from tests.fixtures.fake_forgejo import recording
+        self.assertIn(recording("042-e8-approved.json")["message"],
+                      error["error"])
 
     def test_task_mirror_retry_report_preservation_and_stop_validation(self):
         f = self.f
@@ -410,7 +383,6 @@ class ForgejoMutationCases:
     ) -> None:
         f = self.f
         f.review("approved")
-        self.human_approve()
         before = f.git("worktree", "list", "--porcelain")
         for fault in ("head_race_409", "merge_405", "merge_422"):
             f.settings(**{fault: True}, protection_403=True)
@@ -425,7 +397,6 @@ class ForgejoMutationCases:
     def test_failed_confirmation_read_keeps_merge_outcome_unknown(self):
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.settings(merge_confirmation_403=True)
         result = self.merge(1)
         self.assertIsNone(result["merged"])
@@ -438,7 +409,6 @@ class ForgejoMutationCases:
     def test_merge_ancestry_and_tracking_cleanup_use_premerge_identity(self):
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.settings(post_merge_head_discrepancy=True)
         result = self.merge()
         self.assertEqual(result["head"], self.head)
@@ -464,7 +434,6 @@ class ForgejoMutationCases:
         config["merge_method"] = "squash"
         path.write_text(json.dumps(config))
         f.review("approved")
-        self.human_approve()
         f.settings(leave_branch=True)
         result = self.merge()
         self.assertEqual(result["integration"], "verified by tree identity")
@@ -476,7 +445,6 @@ class ForgejoMutationCases:
     def test_branch_deletion_failure_retains_tracking_and_worktree(self):
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.settings(leave_branch=True, branch_delete_403=True)
         result = self.merge(3)
         self.assertTrue(result["merged"])
@@ -491,7 +459,6 @@ class ForgejoMutationCases:
     def test_changed_tracking_ref_is_retained(self):
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.git("update-ref", "refs/remotes/origin/issue-1", f.base)
         result = self.merge(3)
         self.assertEqual(result["cleanup"][-1]["step"], "remote-tracking ref")
@@ -502,7 +469,6 @@ class ForgejoMutationCases:
     def test_unreadable_remote_branch_retains_tracking_ref(self) -> None:
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.settings(branch_read_403=True)
         result = self.merge(3)
         self.assertIs(result["merged"], True)
@@ -515,7 +481,6 @@ class ForgejoMutationCases:
     def test_ignored_branch_deletion_is_reported_not_trusted(self) -> None:
         f = self.f
         f.review("approved")
-        self.human_approve()
         f.settings(leave_branch=True, branch_delete_ignored=True)
         result = self.merge(3)
         self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
@@ -550,7 +515,6 @@ class ForgejoMutationCases:
     def test_moved_base_refuses_despite_live_api_base(self):
         f = self.f
         f.review("approved")
-        self.human_approve()
         (f.repo / "base.txt").write_text("base advanced\n")
         f.git("add", "base.txt")
         f.git("commit", "-m", "test: advance base")
@@ -562,6 +526,26 @@ class ForgejoMutationCases:
         state = f.status()
         self.assertEqual(state["target"]["base"], f.base)
         self.assertNotEqual(state["target"]["base_tip"], f.base)
+
+    def test_two_pass_loop_reads_back_dismissal_without_mismatch(self):
+        f = self.f
+        fid = f.review("changes_requested", [finding(line=1)])["findings"][0]
+        head = f.push("value = 10\nsecond = 2\nthird = 3\n")
+        f.reply(fid, f"DISPOSITION fixed {head}\n\nChanged the fixture line.")
+        f.reply(fid, "VERIFIED fixed\nChecked the new head.", role="reviewer")
+        f.review("approved")
+        state = f.status()
+        first, second = (r["id"] for r in state["reviews"])
+        rows = {r["id"]: r for r in review_rows(f)}
+        self.assertEqual((rows[first]["state"], rows[first]["dismissed"]),
+                         ("REQUEST_CHANGES", True))
+        self.assertEqual((rows[second]["state"], rows[second]["dismissed"]),
+                         ("APPROVED", False))
+        self.assertEqual(state["next_action"], "approved")
+        self.assertEqual(state["diagnostics"], [])
+        result = self.merge()
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["head"], head)
 
 
 def post_review(f, account, event, head):
@@ -589,49 +573,6 @@ def review_rows(f, account="developer"):
 def decisions(rows, login):
     return [(r["state"], r["dismissed"], r["official"]) for r in rows
             if r["user"]["login"] == login and r["state"] != "COMMENT"]
-
-
-class DualForgejoMutationTests(ForgejoMutationCases, unittest.TestCase):
-    def test_two_pass_loop_reads_back_dismissal_without_mismatch(self):
-        f = self.f
-        fid = f.review("changes_requested", [finding(line=1)])["findings"][0]
-        head = f.push("value = 10\nsecond = 2\nthird = 3\n")
-        f.reply(fid, f"DISPOSITION fixed {head}\n\nChanged the fixture line.")
-        f.reply(fid, "VERIFIED fixed\nChecked the new head.", role="reviewer")
-        f.review("approved")
-        state = f.status()
-        first, second = (r["id"] for r in state["reviews"])
-        rows = {r["id"]: r for r in review_rows(f)}
-        self.assertEqual((rows[first]["state"], rows[first]["dismissed"]),
-                         ("REQUEST_CHANGES", True))
-        self.assertEqual((rows[second]["state"], rows[second]["dismissed"]),
-                         ("APPROVED", False))
-        self.assertEqual(state["next_action"], "approved")
-        self.assertEqual(state["diagnostics"], [])
-        result = self.merge()
-        self.assertIs(result["merged"], True)
-        self.assertEqual(result["head"], head)
-
-
-class SingleForgejoMutationTests(ForgejoMutationCases, unittest.TestCase):
-    single = True
-
-    def test_latest_human_review_still_decides_after_dismissal(self):
-        f = self.f
-        f.review("approved")
-        post_review(f, "human", "REQUEST_CHANGES", self.head)
-        post_review(f, "human", "APPROVED", self.head)
-        self.assertEqual(decisions(review_rows(f), "human"),
-                         [("REQUEST_CHANGES", True, False),
-                          ("APPROVED", False, True)])
-        state = f.status()
-        self.assertEqual(state["next_action"], "approved")
-        self.assertEqual(state["human_request_changes"], [])
-        requested = post_review(f, "human", "REQUEST_CHANGES", self.head)
-        state = f.status()
-        self.assertEqual(state["next_action"], "await_human_approval")
-        self.assertEqual([r["id"] for r in state["human_request_changes"]],
-                         [requested["id"]])
 
 
 class FakeForgejoSupersededReviewTests(unittest.TestCase):

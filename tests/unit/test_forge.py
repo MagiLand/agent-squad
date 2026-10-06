@@ -248,10 +248,6 @@ class ForgeBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(verdict=verdict):
                 self.assertEqual(review_event(requested_state(verdict)), event)
-                self.assertEqual(
-                    review_event(requested_state(verdict, "single")),
-                    "COMMENT",
-                )
         with self.assertRaisesRegex(ForgeError, 'cannot publish'):
             review_event(ReviewState.PENDING)
 
@@ -298,80 +294,13 @@ class ForgeBoundaryTests(unittest.TestCase):
                     user={'login': author}, commit_id=H,
                     submitted_at=timestamp)
 
-    def test_approvals_include_all_authors_dismissals_and_sort_by_time_and_id(
-        self,
-    ) -> None:
-        from agent_squad.forge import ReviewState
-
-        records = [
-            self.record(21, 'APPROVED', 'author'),
-            self.record(20, 'DISMISSED', 'reviewer'),
-            self.record(19, 'DISMISSED', 'human'),
-            self.record(18, 'COMMENTED'),
-            self.record(17, 'PENDING'),
-            self.record(16, 'CHANGES_REQUESTED', 'someone-else',
-                        '2026-01-01T00:00:09.900Z'),
-            self.record(15, 'DISMISSED'),
-        ]
-        events = [
-            {'event': 'review_dismissed', 'actor': {'login': 'dismisser'},
-             'dismissed_review': {'review_id': str(ident), 'state': state}}
-            for ident, state in ((20, 'approved'), (19, 'changes_requested'),
-                                 (15, 'commented'))
-        ]
-        events.append({'event': 'labeled'})
-        with patch.object(
-            self.forge, 'listing', side_effect=[records, events],
-        ) as listing:
-            approvals = self.forge.approvals(1)
-        self.assertEqual([a.id for a in approvals], [16, 19, 20, 21])
-        self.assertEqual([a.login for a in approvals],
-                         ['someone-else', 'human', 'reviewer', 'author'])
-        self.assertEqual([a.state for a in approvals], [
-            ReviewState.CHANGES_REQUESTED, ReviewState.CHANGES_REQUESTED,
-            ReviewState.APPROVED, ReviewState.APPROVED,
-        ])
-        self.assertEqual([a.dismissed for a in approvals],
-                         [False, True, True, False])
-        self.assertTrue(all(a.commit_id == H for a in approvals))
-        self.assertEqual(approvals[2].timestamp, records[1]['submitted_at'])
-        self.assertEqual(listing.call_args_list[1].args,
-                         ('/repos/org/repo/issues/1/events',))
-
-    def test_approvals_missing_ambiguous_or_invalid_dismissal_history_fails(
-        self,
-    ) -> None:
-        def event(state='approved', ident=10):
-            return {'event': 'review_dismissed',
-                    'dismissed_review': {'review_id': ident, 'state': state}}
-
-        for events, message in (
-            ([], 'missing dismissal history'),
-            ([event(ident=11)], 'missing dismissal history'),
-            ([event(), event('changes_requested')],
-             'ambiguous dismissal history'),
-            ([event('pending')], 'invalid dismissed review original state'),
-            ([event(ident=True)], 'must be an integer'),
-        ):
-            with (
-                self.subTest(events=events),
-                patch.object(self.forge, 'listing', side_effect=[
-                    [self.record(9, 'APPROVED'), self.record(10, 'DISMISSED')],
-                    events,
-                ]),
-                self.assertRaisesRegex(ForgeError, message),
-            ):
-                self.forge.approvals(1)
-
-    def test_approvals_read_every_page_without_unneeded_event_reads(
-        self,
-    ) -> None:
+    def test_reviews_read_every_page(self) -> None:
         records = [self.record(i, 'APPROVED') for i in range(1, 101)]
         with patch.object(self.forge, 'api', side_effect=[
             records, [self.record(101, 'CHANGES_REQUESTED')],
         ]) as api:
-            approvals = self.forge.approvals(1)
-        self.assertEqual(len(approvals), 101)
+            reviews = self.forge.reviews(1)
+        self.assertEqual(len(reviews), 101)
         self.assertEqual([call.args[0] for call in api.call_args_list], [
             '/repos/org/repo/pulls/1/reviews?per_page=100&page=1',
             '/repos/org/repo/pulls/1/reviews?per_page=100&page=2',
@@ -466,83 +395,15 @@ class ForgeBoundaryTests(unittest.TestCase):
         self.assertFalse(result['merged'])
         forge.branch_rules.assert_not_called()
 
-    def test_snapshot_skips_unreadable_resolution_and_unused_approvals(
-        self,
-    ) -> None:
+    def test_snapshot_skips_unreadable_resolution(self) -> None:
         self.forge.can_read_thread_resolution = False
         with (
             patch.object(self.forge, 'pr', return_value=snapshot().pr),
             patch.object(self.forge, 'reviews', return_value=()),
             patch.object(self.forge, 'listing', return_value=[]),
             patch.object(self.forge, 'thread_states') as threads,
-            patch.object(self.forge, 'approvals') as approvals,
         ):
             result = self.forge.snapshot(1)
         self.assertFalse(result.can_read_thread_resolution)
         self.assertEqual(result.threads, ())
         threads.assert_not_called()
-        approvals.assert_not_called()
-
-
-class SingleIdentityAdapterTests(unittest.TestCase):
-    def test_snapshot_reads_approval_history_once_only_in_single_mode(
-        self,
-    ) -> None:
-        from dataclasses import replace
-        from agent_squad.forge import Approval, ReviewState
-        c = config()
-        c = replace(c, identity_mode="single", approver_accounts=("human",),
-                    reviewer=replace(c.reviewer, forge_account="dev"))
-        repository = Repository(
-            Path("/repo"), Path("/repo"), Path("/repo/.git"), c)
-        forge = GitHub(repository, "implementer")
-        record = Approval("human", ReviewState.APPROVED, H, False,
-                          "2026-01-01T00:00:20Z", 20)
-        with (
-            patch.object(forge, "pr", return_value=snapshot().pr),
-            patch.object(forge, "reviews", return_value=()),
-            patch.object(forge, "listing", return_value=[]),
-            patch.object(forge, "thread_states", return_value=()),
-            patch.object(
-                forge, "approvals", return_value=(record,),
-            ) as approvals,
-        ):
-            result = forge.snapshot(1)
-        approvals.assert_called_once_with(1)
-        self.assertEqual(result.human_approvals, (record,))
-
-    def test_approver_lookup_validates_identity_and_quotes_path(self) -> None:
-        forge = GitHub(Repository(Path("/repo"), Path("/repo"),
-                                  Path("/repo/.git"), config()), "implementer")
-        with patch.object(
-            forge, "api", return_value={"login": "Human"},
-        ) as api:
-            self.assertIs(forge.user_exists("human"), True)
-        api.assert_called_once_with("users/human")
-        for response in ({}, {"login": "someone"}, {"login": False}):
-            with self.subTest(response=response):
-                with patch.object(forge, "api", return_value=response):
-                    with self.assertRaises(ForgeError):
-                        forge.user_exists("human")
-        with patch.object(
-            forge, "api", return_value={"login": "a/b?c"},
-        ) as api:
-            self.assertIs(forge.user_exists("a/b?c"), True)
-        api.assert_called_once_with("users/a%2Fb%3Fc")
-
-    def test_approver_lookup_distinguishes_absence_from_access_failure(
-        self,
-    ) -> None:
-        forge = GitHub(Repository(Path("/repo"), Path("/repo"),
-                                  Path("/repo/.git"), config()), "implementer")
-        with patch.object(forge, "api", side_effect=ForgeError(
-            "user not found", 404,
-        )):
-            self.assertIs(forge.user_exists("missing"), False)
-        for status in (401, 403, 500, None):
-            error = ForgeError("lookup failed", status)
-            with self.subTest(status=status):
-                with patch.object(forge, "api", side_effect=error):
-                    with self.assertRaises(ForgeError) as raised:
-                        forge.user_exists("human")
-                self.assertIs(raised.exception, error)

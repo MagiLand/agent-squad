@@ -48,10 +48,6 @@ def parser() -> argparse.ArgumentParser:
     )
     for name in ("base-url", "implementer-token-file", "reviewer-token-file"):
         init.add_argument("--" + name)
-    init.add_argument(
-        "--identity-mode", choices=("dual", "single"), default="dual",
-    )
-    init.add_argument("--approver-account", action="append", default=[])
     for name in ("owner", "repo", "base-branch"):
         init.add_argument("--" + name)
     init.add_argument("--json", action="store_true")
@@ -161,8 +157,6 @@ def execute(args: argparse.Namespace) -> dict:
             owner=args.owner,
             repo=args.repo,
             base_branch=args.base_branch,
-            identity_mode=args.identity_mode,
-            approver_accounts=tuple(args.approver_account),
             forge=args.forge,
             base_url=args.base_url,
             implementer_token_file=args.implementer_token_file,
@@ -312,9 +306,6 @@ def json_default(value: object) -> object:
 def main(argv: list[str] | None = None) -> int:
     root = parser()
     args = root.parse_args(argv)
-    if (args.group == "init" and args.identity_mode == "single"
-            and not args.approver_account):
-        root.error("--identity-mode single requires --approver-account")
     if args.group == "init" and args.forge == "forgejo":
         for name in (
             "base_url", "implementer_token_file", "reviewer_token_file",

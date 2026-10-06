@@ -23,13 +23,12 @@ version `0.5.0` and tag `AGENT_SQUAD/0.5.0`. Both wheel and sdist are inspected.
 Packaging needs the declared setuptools build backend; if absent, that test
 is skipped and must be run in a prepared environment before claiming proof.
 
-The smoke runner executes all twelve steps of §16.3 twice: GitHub in dual
-mode and Forgejo in single mode. Its JSON contains `ok`, `scenarios`,
-`github_single` (the retained GitHub single-mode regression), and `cleanup`.
-Each scenario identifies `forge`, `identity_mode`, `duration_seconds`,
-`scripted`, `command_count`, `commands` (arguments and observed exits),
-`steps` (number and successful result), and `cleanup`. CLI command counts
-are reported per scenario; they are not HTTP request counts.
+The smoke runner executes all twelve steps of §16.3 twice, on GitHub and on
+Forgejo, each with two accounts. Its JSON contains `ok`, `scenarios`, and
+`cleanup`. Each scenario identifies `forge`, `duration_seconds`, `scripted`,
+`command_count`, `commands` (arguments and observed exits), `steps` (number
+and successful result), and `cleanup`. CLI command counts are reported per
+scenario; they are not HTTP request counts.
 
 | Step | Evidence asserted by the runner |
 | --- | --- |
@@ -37,13 +36,13 @@ are reported per scenario; they are not HTTP request counts.
 | 2 | A dedicated issue worktree is committed and pushed; PR sections and head match. |
 | 3 | A fresh Reviewer publishes two blocking findings and one optional finding, then hands off. |
 | 4 | A needs-human disposition blocks launch until a finding-specific decision; fixed/rejected dispositions are recorded. |
-| 5 | The fix is pushed and reported; a fresh Reviewer verifies dispositions, resolves supported threads, and approves the exact head. Forgejo requires a separate scripted human approval; a human veto then invalidates it until replacement approval. |
+| 5 | The fix is pushed and reported; a fresh Reviewer verifies dispositions, resolves supported threads, and approves the exact head. |
 | 6 | A later push invalidates approval and requires review. |
 | 7 | The third review requests changes; a budget stop is posted and handed off; launch returns exit 4. |
 | 8 | A decision extends the budget to four; the fourth review approves with no budget remaining. |
 | 9 | Merge refuses a moved base, then accepts it explicitly and verifies ancestry; a second PR squash verifies tree identity on an unmoved base. Both remove their owned resources. |
 | 10 | Notification fails after a published review; status still identifies that review and approval. |
-| 11 | GitHub batch rejection or Forgejo empty-diff-hunk read-back preserves findings; thread open and explicit resume recover roots without duplicate reviews. Forgejo also refuses and explicitly discards a shared-account pending draft. |
+| 11 | GitHub batch rejection or Forgejo empty-diff-hunk read-back preserves findings; thread open and explicit resume recover roots without duplicate reviews. Forgejo also refuses and explicitly discards a pending draft owned by the Reviewer's account. |
 | 12 | No runtime files are tracked, no review worktrees remain, and all owned temporary roots are gone. Removal failure reports the retained root. |
 
 The runner creates isolated working repositories and bare origins. It uses
@@ -73,28 +72,19 @@ disposable worktree creation/removal, and orphaned resources. The optional
 live probe adds startup, readiness, trust behavior, and safe close. It sends
 no review request and cannot prove a review loop by itself.
 
-Before v0.6.0 release, §16.4 requires these trials, with exact runtime,
-review, human action and integration identities recorded:
-
-| Trial | Required live proof |
-| --- | --- |
-| 1: GitHub regression | The merged Increment 1 runtime drives #57 through the normal loop; later PRs continue the regression. |
-| 2: GitHub single identity | Shared agent account and separate person-operated approver; human request-changes, fix, fresh review, replacement approval, verified merge. |
-| 3: Local Forgejo | Disposable Podman image `codeberg.org/forgejo/forgejo:16.0.3`, digest recorded; single session, fresh Reviewer per pass, human request-changes/fix, interrupted publication killed after the body and resumed once, human-approved merge and independent cleanup checks. |
-| 4: VPS Forgejo | HTTPS, SSH pushes, opposite agent direction, human colleague approval and branch protection; server and CLI refusals before human approval, then the real trial's approved merge. Issue #61 used temporary administration for provisioning under the recorded amendment; review-loop agents used the scoped non-administrator account. |
-
-For issue #61, the Developer approved temporary provisioning of the disposable
-VPS instance and a split approval test: a separate direct API probe tests
-server protection, while an agent-approved supplemental PR tests the CLI's
-missing-human-approval refusal. Both probes close without merging; the real
-trial requires human approval and an explicit merge instruction. The
-[evidence record](verification/2026-09-29-issue-61.md) records these amendments,
-the original unexecuted negative command, and the completed trial results.
-These trial-specific permissions do not change the default setup rules.
+The v0.6.0 release trials, recorded in the
+[#61 evidence](verification/2026-09-29-issue-61.md), ran the GitHub regression
+and two Forgejo trials (a disposable local container and a network instance)
+in the identity mode that v0.7.0 removed
+([specification §20](agent-squad-spec.md#20-decision-history)). Their
+transport, publication, recovery, and merge observations remain evidence within
+their stated scope; their approval path is not current behavior. The
+trial-specific permissions recorded there do not change the default setup
+rules.
 
 The API experiments in [#54](verification/2026-09-25-issue-54.md) and setup
 checks in [#60](verification/2026-09-27-issue-60.md) use a real 16.0.3 container,
-but do not establish trials 3 or 4. Record the container digest, actual server
+but do not establish a live review loop. For a Forgejo trial, record the container digest, actual server
 version, merge method, whether branch deletion was explicit or already done,
 and whether issue GET and PR-body PATCH were exercised. Keep unexercised
 paths marked unverified. Two-account Forgejo is fake-tested but has no release
@@ -116,12 +106,10 @@ Both Forgejo trials completed and their disposable instances were removed.
 The observed Herdr Reviewer startup defect is tracked in
 [#100](https://github.com/MagiLand/agent-squad/issues/100). The Developer chose
 separate tracking and kept release acceptance pending a verified fix.
-The committed [#57 record](verification/2026-09-26-issue-57.md#live-trials)
-defers trial 2 to follow-up evidence; it does not claim that trial completed.
 
 [Issue #46 evidence](verification/2026-09-16-issue-46.md) records the prior
 v0.5.0 release trials. It establishes both agent directions for that release,
-not the new Forgejo or single-identity behavior.
+not Forgejo behavior.
 
 CI's pull-request `smoke` group runs both forge scenarios. The source-export
 variant remains in `main-only`, executed on main pushes and nightly runs.

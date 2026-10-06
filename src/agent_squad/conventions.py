@@ -8,7 +8,7 @@ import re
 from typing import Callable
 
 from .forge import (
-    Approval, Comment, Evidence, ReviewState, Snapshot, requested_state,
+    Comment, Evidence, ReviewState, Snapshot, requested_state,
 )
 from .initialization import AgentSquadError, Configuration, Worktree
 
@@ -376,39 +376,6 @@ def evidence_dict(evidence: Evidence) -> dict:
     return asdict(evidence)
 
 
-def human_approval_state(
-    approvals: tuple[Approval, ...], config: Configuration, head: str,
-) -> tuple[list[dict], list[dict], list[str]]:
-    """Select each person's latest decision before checking its eligibility."""
-    accounts = {login.casefold() for login in config.approver_accounts}
-    records = sorted(
-        (a for a in approvals if a.login.casefold() in accounts),
-        key=lambda a: (
-            datetime.fromisoformat(a.timestamp.replace("Z", "+00:00")), a.id,
-        ),
-    )
-    latest = {a.login.casefold(): a for a in records}
-    requests = [
-        asdict(a) for a in latest.values()
-        if a.state == ReviewState.CHANGES_REQUESTED
-    ]
-    approved = any(
-        a.state == ReviewState.APPROVED and a.commit_id == head
-        and not a.dismissed for a in latest.values()
-    )
-    reasons = []
-    if not approved:
-        reasons.append(
-            f"no current, undismissed human approval at PR head {head} from "
-            + ", ".join(config.approver_accounts)
-        )
-    reasons.extend(
-        f'human request-changes by {a["login"]} at {a["commit_id"]}'
-        for a in requests
-    )
-    return [asdict(a) for a in records], requests, reasons
-
-
 def derive(
     snapshot: Snapshot,
     config: Configuration,
@@ -425,7 +392,6 @@ def derive(
     diagnostics = []
     implementer = config.implementer.forge_account.casefold()
     reviewer = config.reviewer.forge_account.casefold()
-    single = config.identity_mode == "single"
     developers = {a.casefold() for a in config.developer_accounts} | {
         implementer
     }
@@ -579,11 +545,6 @@ def derive(
         if parsed is None:
             continue
         fields = parsed.fields
-        if single and review.state == ReviewState.PENDING:
-            diagnostic(
-                "forge_state_mismatch", e,
-                f'{review.state_label} does not mirror {fields["verdict"]}',
-            )
         try:
             listed = validate_review_body(e.body)
             if (
@@ -647,9 +608,7 @@ def derive(
         latest_review = review
         # A dismissal is not a state (§7.3, §11.0): Forgejo dismisses a
         # reviewer's earlier decisions when the reviewer submits a new one.
-        if review.state != requested_state(
-            fields["verdict"], config.identity_mode,
-        ):
+        if review.state != requested_state(fields["verdict"]):
             diagnostic(
                 "forge_state_mismatch",
                 e,
@@ -859,13 +818,10 @@ def derive(
     }
     approving_state = (
         latest_review is not None
-        and latest_review.state == requested_state(
-            "approved", config.identity_mode,
-        )
+        and latest_review.state == requested_state("approved")
     )
     state_reason = (
         "latest review was dismissed on the forge" if approving_state
-        else "forge review state is not commented" if single
         else f"forge review state is not {snapshot.approved_state_label}"
     )
     approval_reasons = []
@@ -892,28 +848,11 @@ def derive(
     approval_reasons.extend(
         reason for passed, reason in conditions if not passed
     )
-    agent_approved = not approval_reasons
-    human_fields = {}
-    human_reasons = []
-    if single:
-        human_approvals, requests, human_reasons = human_approval_state(
-            snapshot.human_approvals, config, pr.head,
-        )
-        human_fields = {
-            "identity_mode": config.identity_mode,
-            "approver_accounts": list(config.approver_accounts),
-            "human_approvals": human_approvals,
-            "human_request_changes": requests,
-        }
-        approval_reasons.extend(human_reasons)
     approved = not approval_reasons
     action_conditions = [
         ("merged", pr.merged),
         ("closed", pr.state == "closed"),
-        ("address_findings", agent_approved and gates["unaddressed_findings"]),
-        ("await_human_approval", single and agent_approved
-         and bool(human_reasons) and not gates["stopped"]
-         and not gates["needs_decision"]),
+        ("address_findings", approved and gates["unaddressed_findings"]),
         ("merge", approved and merge_instruction is not None
          and merge_hold is None and not gates["stopped"]
          and not gates["needs_decision"]),
@@ -940,7 +879,6 @@ def derive(
         "merged": ["PR is merged"],
         "closed": ["PR is closed without a merge"],
         "approved": ["all six approval conditions hold"],
-        "await_human_approval": human_reasons,
         "merge": ["approved with a standing merge instruction and no hold"],
         "stopped": ["STOPPED is newer than the latest ordinary DECISION"],
         "needs_decision": [
@@ -967,7 +905,6 @@ def derive(
     )
     return {
         "next_action": action,
-        **human_fields,
         "reasons": reasons,
         "target": {
             "pr": pr.number,

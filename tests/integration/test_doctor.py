@@ -789,49 +789,29 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(cycle.readlink(), Path("cycle"))
 
 
-class SingleDoctorTests(unittest.TestCase):
-    def test_shared_permission_and_every_approver_lookup(self) -> None:
+class IdentityDoctorTests(unittest.TestCase):
+    def test_identity_checks_are_unconditional(self) -> None:
         with ForgeFixture() as f:
-            f.single_identity()
-            path = f.repo / '.agent-squad/config.json'
-            config = json.loads(path.read_text())
-            config['approver_accounts'].append('other')
-            path.write_text(json.dumps(config))
+            f.initialize()
             result = f.cli('doctor')
-            self.assertTrue(result['ok'])
             checks = {d['check']: d for d in result['diagnostics']}
-            self.assertEqual(checks['Reviewer write permission']['severity'], 'skip')
-            for name in (
-                'shared account push permission', 'approver human exists',
-                'approver other exists',
-            ):
-                self.assertEqual(checks[name]['severity'], 'pass')
-            f.settings(missing_users=['other'], permission='read')
+            for name in ('Reviewer write permission',
+                         'distinct forge identities'):
+                self.assertEqual(checks[name]['severity'], 'pass', name)
+            self.assertFalse([c for c in checks if 'approver' in c
+                              or c.startswith('shared account')])
+            f.settings(permission='read')
             result = f.cli('doctor', expected=1)
             checks = {d['check']: d for d in result['diagnostics']}
             self.assertEqual(
-                checks['approver other exists']['severity'], 'fail')
+                checks['Reviewer write permission']['severity'], 'fail')
+            f.settings(permission='write', token_failure=['reviewer'])
+            result = f.cli('doctor', expected=1)
+            checks = {d['check']: d for d in result['diagnostics']}
             self.assertEqual(
-                checks['approver other exists']['detail'],
-                'approver account does not exist: other',
-            )
-            self.assertEqual(
-                checks['approver human exists']['severity'], 'pass')
-            self.assertEqual(
-                checks['shared account push permission']['severity'], 'fail',
-            )
-            self.assertNotIn('fake-token-', json.dumps(result))
-
-    def test_dual_check_list_retains_reviewer_permission_without_approvers(
-        self,
-    ) -> None:
-        with ForgeFixture() as f:
-            f.initialize()
-            checks = {d['check'] for d in f.cli('doctor')['diagnostics']}
-            self.assertIn('Reviewer write permission', checks)
-            self.assertNotIn('shared account push permission', checks)
-            self.assertEqual({c for c in checks if c.startswith('approver ')},
-                             {'approver accounts'})
+                (checks['distinct forge identities']['severity'],
+                 checks['distinct forge identities']['detail']),
+                ('fail', 'cannot verify both configured logins'))
 
 
 class ForgejoDoctorTests(unittest.TestCase):
@@ -872,27 +852,6 @@ class ForgejoDoctorTests(unittest.TestCase):
                 and d["severity"] == "fail"
                 for d in result["diagnostics"]
             )
-        )
-
-    def test_single_mode_shared_push_and_approver_existence(self) -> None:
-        self.f.single_identity()
-        result = self.f.cli("doctor")
-        checks = {d["check"]: d for d in result["diagnostics"]}
-        self.assertEqual(checks["Reviewer write permission"]["severity"], "skip")
-        self.assertEqual(
-            checks["shared account push permission"]["severity"], "pass"
-        )
-        self.assertEqual(checks["approver human exists"]["severity"], "pass")
-        self.f.settings(permission="read", missing_users=["human"])
-        result = self.f.cli("doctor", expected=1)
-        failed = {
-            d["check"]
-            for d in result["diagnostics"]
-            if d["severity"] == "fail"
-        }
-        self.assertTrue(
-            {"shared account push permission", "approver human exists"}
-            <= failed
         )
 
     def test_invalid_token_and_old_server_have_specific_diagnostics(

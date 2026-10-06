@@ -219,18 +219,10 @@ class DeveloperDecisionSkillTests(unittest.TestCase):
                 self.assertIn(rule, implementer)
 
 
-class SingleIdentitySkillTests(unittest.TestCase):
-    def test_human_wait_and_mode_appropriate_publication_are_packaged(
-        self,
-    ) -> None:
+class ForgeWordingSkillTests(unittest.TestCase):
+    def test_forge_neutral_wording_is_packaged(self) -> None:
         implementer = packaged_skill("squad-implementer").decode()
         reviewer = packaged_skill("squad-reviewer").decode()
-        self.assertIn("await_human_approval", implementer)
-        self.assertIn("go idle without\npolling", implementer)
-        self.assertIn("human_request_changes", implementer)
-        self.assertIn("Never post a human approval yourself", implementer)
-        self.assertIn("single-identity mode every tagged verdict", reviewer)
-        self.assertIn("do not\nblock this agent review", reviewer)
         self.assertNotIn("GitHub", reviewer)
         self.assertIn("For a GitHub repository", implementer)
         self.assertIn("capabilities.can_resolve_threads", reviewer)

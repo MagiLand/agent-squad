@@ -86,13 +86,6 @@ compliance with repository standards and the Task. Verify material claims in
 the implementation report. Present the axes under `## Standards` and `## Spec`
 in the published review. Publish substantive findings on the forge PR only.
 
-The CLI selects the mode-appropriate forge event for `review post`: in
-single-identity mode every tagged verdict is posted as a comment; in dual mode
-approval and request-changes verdicts use their corresponding formal events.
-Keep the intended verdict in the tagged header. A pending or missing human
-approval and a human request-changes are outside protocol findings and do not
-block this agent review.
-
 ## 6. Severity and follow-up policy
 
    > A substantive actionable finding is one that reasonably requires resolution before the reviewed revision should be approved, such as a correctness defect, regression risk, security or reliability concern, meaningful maintainability problem, violated requirement, or other material engineering issue.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import os
 import re
@@ -11,7 +10,7 @@ import subprocess
 from urllib.parse import quote, urlencode
 
 from .forge import (
-    Anchor, Approval, Comment, Evidence, ForgeError, IssueRecord, MergeResult,
+    Anchor, Comment, Evidence, ForgeError, IssueRecord, MergeResult,
     PullRequest, Review, ReviewPublication, ReviewState, Role, Snapshot,
     ThreadState, V, array, boolean, object_value, oid, positive, text_value,
 )
@@ -359,19 +358,6 @@ class GitHub:
             raise ForgeError("invalid collaborator permission")
         return permission
 
-    def user_exists(self, login: str) -> bool:
-        try:
-            response = self.api(f'users/{quote(login, safe="")}')
-        except ForgeError as error:
-            if error.status == 404:
-                return False
-            raise
-        data = object_value(response, "user")
-        actual = V.require_string(data.get("login"), "user.login")
-        if actual.casefold() != login.casefold():
-            raise ForgeError("user lookup returned another login")
-        return True
-
     def issue(self, number: int) -> IssueRecord:
         data = object_value(
             self.api(f"{self.prefix}/issues/{number}"), "issue"
@@ -405,62 +391,6 @@ class GitHub:
             parse_review(r)
             for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
         )
-
-    def approvals(self, number: int) -> tuple[Approval, ...]:
-        reviews = self.reviews(number)
-        dismissed_ids = {r.evidence.id for r in reviews if r.dismissed}
-        originals: dict[int, ReviewState] = {}
-        if dismissed_ids:
-            for value in self.listing(f"{self.prefix}/issues/{number}/events"):
-                event = object_value(value, "issue event")
-                if event.get("event") != "review_dismissed":
-                    continue
-                record = object_value(
-                    event.get("dismissed_review"), "dismissed review",
-                )
-                ident = record.get("review_id")
-                # The documented event contract uses a decimal string; the
-                # API also returns numeric review IDs. Never coerce booleans.
-                if isinstance(ident, str) and re.fullmatch(
-                    r"[1-9][0-9]*", ident
-                ):
-                    ident = int(ident)
-                ident = positive(ident, "dismissed review ID")
-                if ident not in dismissed_ids:
-                    continue
-                value = record.get("state")
-                if value not in ("approved", "changes_requested", "commented"):
-                    raise ForgeError("invalid dismissed review original state")
-                state = ReviewState(value)
-                if ident in originals and originals[ident] != state:
-                    raise ForgeError(
-                        f"ambiguous dismissal history for review {ident}"
-                    )
-                originals[ident] = state
-            missing = dismissed_ids - originals.keys()
-            if missing:
-                raise ForgeError(
-                    "missing dismissal history for review "
-                    + ", ".join(map(str, sorted(missing)))
-                )
-        result = []
-        for review in reviews:
-            state = (
-                originals[review.evidence.id] if review.dismissed
-                else review.state
-            )
-            if state not in (
-                ReviewState.APPROVED, ReviewState.CHANGES_REQUESTED,
-            ):
-                continue
-            evidence = review.evidence
-            result.append(Approval(
-                evidence.author, state, review.commit_id, review.dismissed,
-                evidence.created_at, evidence.id,
-            ))
-        return tuple(sorted(result, key=lambda r: (
-            datetime.fromisoformat(r.timestamp.replace("Z", "+00:00")), r.id,
-        )))
 
     def snapshot(self, number: int) -> Snapshot:
         pr = self.pr(number)
@@ -499,9 +429,6 @@ class GitHub:
             self.can_read_thread_resolution,
             self.can_read_branch_rules,
             "APPROVED",
-            (self.approvals(number)
-             if self.repository.configuration.identity_mode == "single"
-             else ()),
             tuple(r.evidence.id for r in reviews
                   if r.state == ReviewState.PENDING
                   and r.evidence.author.casefold() == self.account.casefold()),

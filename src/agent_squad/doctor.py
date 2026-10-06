@@ -324,7 +324,6 @@ def diagnose(
 
     check("remote base branch", base_branch)
     forges = {}
-    approvers_ok = False
     for role in ("implementer", "reviewer"):
         try:
             forge = make_forge(repository, role)
@@ -344,7 +343,7 @@ def diagnose(
                 forge.repository_record()
 
             check(f"{role} repository access", readable)
-            if role == "reviewer" and config.identity_mode == "dual":
+            if role == "reviewer":
                 def reviewer_write() -> str:
                     permission = forge.repository_permission()
                     if permission not in ("write", "admin"):
@@ -355,47 +354,13 @@ def diagnose(
                     return permission
 
                 check("Reviewer write permission", reviewer_write)
-            if role == "implementer" and config.identity_mode == "single":
-                def shared_push() -> str:
-                    permission = forge.repository_permission()
-                    if permission not in ("write", "admin"):
-                        raise AgentSquadError(
-                            "shared account requires repository push"
-                            " permission"
-                        )
-                    return permission
 
-                check("shared account push permission", shared_push)
-
-                def approver_exists(login: str) -> None:
-                    if not forge.user_exists(login):
-                        raise AgentSquadError(
-                            f"approver account does not exist: {login}"
-                        )
-
-                approvers_ok = True
-                for login in config.approver_accounts:
-                    approvers_ok &= check(
-                        f"approver {login} exists",
-                        lambda login=login: approver_exists(login),
-                    )
-
-    if config.identity_mode == "single":
-        for name in ("distinct forge identities", "Reviewer write permission"):
-            add(name, "skip", "single identity mode")
-        add(
-            "approver accounts", "pass" if approvers_ok else "fail",
-            "every independent approver exists" if approvers_ok
-            else "cannot verify every configured approver",
-        )
-    else:
-        add(
-            "distinct forge identities",
-            "pass" if len(forges) == 2 else "fail",
-            "both distinct configured logins verified" if len(forges) == 2
-            else "cannot verify both configured logins",
-        )
-        add("approver accounts", "pass", "empty as required in dual mode")
+    add(
+        "distinct forge identities",
+        "pass" if len(forges) == 2 else "fail",
+        "both distinct configured logins verified" if len(forges) == 2
+        else "cannot verify both configured logins",
+    )
 
     client = herdr_client or HerdrClient(
         repository.root, repository=repository

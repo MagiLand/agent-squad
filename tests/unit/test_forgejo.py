@@ -113,15 +113,6 @@ class URLConfigurationTests(unittest.TestCase):
                     Configuration.from_dict(data)
                 self.assertNotIn("private", str(caught.exception))
 
-    def test_single_mode_may_share_one_token_file(self) -> None:
-        data = forgejo_config().to_dict()
-        data.update(identity_mode="single", approver_accounts=["human"])
-        data["reviewer"].update(
-            forge_account=data["implementer"]["forge_account"],
-            token_file=data["implementer"]["token_file"],
-        )
-        self.assertEqual(Configuration.from_dict(data).identity_mode, "single")
-
 
 class TokenFileTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -265,12 +256,15 @@ class TransportTests(unittest.TestCase):
     def test_path_prefix_headers_encoding_timeout_and_reads_skip_verification(
         self,
     ) -> None:
-        self.open.return_value = self.response({"login": "human/name"})
-        self.assertTrue(self.forge.user_exists("human/name"))
+        self.open.return_value = self.response(
+            {"name": "issue/name", "commit": {"id": "a" * 40}},
+        )
+        self.assertEqual(self.forge.branch_head("issue/name"), "a" * 40)
         request = self.open.call_args.args[0]
         self.assertEqual(
             request.full_url,
-            "https://forge.example/sub/path/api/v1/users/human%2Fname",
+            "https://forge.example/sub/path/api/v1/repos/org/repo/branches/"
+            "issue%2Fname",
         )
         self.assertEqual(
             request.get_header("Authorization"), "token synthetic-secret"
