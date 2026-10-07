@@ -66,7 +66,7 @@ def parser() -> argparse.ArgumentParser:
         p: argparse.ArgumentParser,
         *,
         role: str | None = None,
-        number: str = "pr",
+        number: str | None = "pr",
         mutation: bool = False,
     ) -> None:
         p.set_defaults(forge_mutation=mutation)
@@ -76,15 +76,23 @@ def parser() -> argparse.ArgumentParser:
             choices=[role] if role else ["implementer", "reviewer"],
             required=mutation,
         )
-        p.add_argument("--" + number, type=positive_argument, required=True)
+        if number:
+            p.add_argument(
+                "--" + number, type=positive_argument, required=True
+            )
         p.add_argument("--json", action="store_true")
 
-    issue = command("issue", ("view", "comment"))
+    issue = command("issue", ("view", "comment", "create"))
     common(issue["view"], number="issue")
     common(
         issue["comment"], role="implementer", number="issue", mutation=True
     )
     issue["comment"].add_argument("--body", required=True)
+    common(issue["create"], role="implementer", number=None, mutation=True)
+    for name in ("title", "body"):
+        issue["create"].add_argument("--" + name, required=True)
+    for name in ("from-issue", "from-pr"):
+        issue["create"].add_argument("--" + name, type=positive_argument)
     skill = command("skill", ("install",))["install"]
     for name in ("claude", "codex", "force", "json"):
         skill.add_argument("--" + name, action="store_true")
@@ -226,6 +234,14 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("issue", "comment"):
         return commands.comment_issue(
             forge, args.issue, commands.read_file(args.body)
+        )
+    if key == ("issue", "create"):
+        return commands.create_issue(
+            forge,
+            args.title,
+            commands.read_file(args.body),
+            from_issue=args.from_issue,
+            from_pr=args.from_pr,
         )
     if key == ("pr", "create"):
         return commands.create_pr(
@@ -400,6 +416,11 @@ def main(argv: list[str] | None = None) -> int:
                         f'Comment {c["id"]} by {c["author"]} is an'
                         " Implementer agent note, not a Developer comment."
                     )
+            print(json.dumps(result, indent=2, default=json_default))
+        elif (args.group, getattr(args, "command", None)) == (
+            "issue", "create",
+        ):
+            print(f'Created issue #{result["issue"]} for triage.')
             print(json.dumps(result, indent=2, default=json_default))
         else:
             print(json.dumps(result, indent=2, default=json_default))

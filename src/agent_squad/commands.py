@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import re
+from typing import TypeVar
 
 from .anchors import Anchor, commentable_lines, validate_anchor
 from .conventions import (
@@ -50,6 +52,9 @@ from .validation import JsonValidator
 from .herdr import HerdrClient, HerdrError, reviewer_name
 
 V = JsonValidator(AgentSquadError)
+T = TypeVar("T")
+# The one label of an issue the Implementer files (#112); not configurable.
+TRIAGE_LABEL = "needs-triage"
 
 
 def read_file(path: str) -> str:
@@ -175,17 +180,23 @@ def view_issue(repository: Repository, forge: Forge, number: int) -> dict:
     }
 
 
-def comment_issue(forge: Forge, number: int, body: str) -> dict:
-    """Post a durable Implementer note under the CLI-written NOTE line."""
+def note_prose(body: str, command: str) -> str:
+    """Return the stripped prose that follows a CLI-written NOTE line."""
     prose = body.strip()
     if not prose:
-        raise AgentSquadError("issue comment body must not be empty")
+        raise AgentSquadError(f"{command} body must not be empty")
     # Emphasis does not hide a hand-written tagged line from this check.
     if first_line(prose).lstrip(" \t*_`").startswith(PREFIXES):
         raise AgentSquadError(
-            "issue comment body must start with prose; the CLI writes the"
+            f"{command} body must start with prose; the CLI writes the"
             " NOTE line"
         )
+    return prose
+
+
+def comment_issue(forge: Forge, number: int, body: str) -> dict:
+    """Post a durable Implementer note under the CLI-written NOTE line."""
+    prose = note_prose(body, "issue comment")
     text = render_line("note", role=forge.role) + "\n\n" + prose
     record = forge.issue(number)
     if record["is_pull_request"]:
@@ -195,6 +206,69 @@ def comment_issue(forge: Forge, number: int, body: str) -> dict:
     if record["state"] != "open":
         raise AgentSquadError(f"issue comment requires open issue #{number}")
     return {"issue": number, **asdict(forge.comment(number, text))}
+
+
+def read_origin(read: Callable[[int], T], option: str, number: int) -> T:
+    try:
+        return read(number)
+    except ForgeError as error:
+        if error.status != 404:
+            raise
+        raise AgentSquadError(
+            f"{option} {number} does not exist in the configured repository"
+        ) from None
+
+
+def create_issue(
+    forge: Forge,
+    title: str,
+    body: str,
+    *,
+    from_issue: int | None = None,
+    from_pr: int | None = None,
+) -> dict:
+    """File follow-up work for triage under the CLI-written NOTE line."""
+    title = title.strip()
+    if not title:
+        raise AgentSquadError("issue create title must not be empty")
+    if len(title.splitlines()) > 1:
+        raise AgentSquadError("issue create title must be one line")
+    prose = note_prose(body, "issue create")
+    text = render_line("note", role=forge.role)
+    origins = []
+    if from_issue is not None:
+        if read_origin(forge.issue, "--from-issue", from_issue)[
+            "is_pull_request"
+        ]:
+            raise AgentSquadError(
+                f"--from-issue {from_issue} is a pull request; use --from-pr"
+            )
+        origins.append(f"issue #{from_issue}")
+    if from_pr is not None:
+        read_origin(forge.pr, "--from-pr", from_pr)
+        origins.append(f"pull request #{from_pr}")
+    if origins:
+        text += "\n\nFollow-up from " + " and ".join(origins) + "."
+    # Check before writing: a forge may drop or create an unknown label.
+    if TRIAGE_LABEL not in forge.labels():
+        raise AgentSquadError(f"repository has no {TRIAGE_LABEL} label")
+    for number, existing in sorted(forge.open_issues().items()):
+        if existing.strip() == title:
+            raise AgentSquadError(f"open issue #{number} has the same title")
+    created = forge.create_issue(title, text + "\n\n" + prose, TRIAGE_LABEL)
+    if created["labels"] != [TRIAGE_LABEL]:
+        # Never create a second issue to repair the first one.
+        raise RetainedError(
+            f'issue #{created["number"]} was created with labels'
+            f' [{", ".join(created["labels"])}] instead of only'
+            f" {TRIAGE_LABEL}; correct its labels on the forge and do not"
+            " rerun issue create"
+        )
+    return {
+        "issue": created["number"],
+        "title": created["title"],
+        "labels": created["labels"],
+    }
 
 
 def find_finding(state: dict, fid: str) -> dict:

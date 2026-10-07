@@ -92,6 +92,11 @@ class ForgeFixture:
                     "settings": {},
                     "calls": [],
                     "prs": {},
+                    # Repository labels; issues carry their own label lists.
+                    "labels": [
+                        {"id": 41, "name": "needs-triage"},
+                        {"id": 42, "name": "ready-for-agent"},
+                    ],
                     "issues": {
                         "1": {
                             "id": 1,

@@ -249,28 +249,58 @@ if kind in ("branches", "rules"):
     if kind == "branches":
         output(settings.get("protection", {}))
     output(paged(settings.get("rules", []), query))
+if kind == "labels":
+    output(paged(model.get("labels", []), query))
 if kind == "issues":
     # GitHub numbers issues and PRs together; this model numbers them apart,
     # so the fixtures' issue 1 and PR 1 share a number.
+    def as_issue(key):
+        if key in model["issues"]:
+            return model["issues"][key]
+        # The issues API serves a PR number as an issue marked as a PR.
+        pull = prs[key]
+        return {
+            **{k: pull[k] for k in (
+                "id", "number", "title", "state", "body", "user",
+                "created_at",
+            )},
+            "labels": [],
+            "pull_request": {
+                "url": "https://api.github.com/repos/"
+                + "/".join(parts[1:3]) + f"/pulls/{key}",
+            },
+        }
+
+    if number is None:
+        if method == "POST":
+            # A new issue takes a number above every issue and PR, as on
+            # GitHub. Only existing labels apply; whether GitHub creates a
+            # missing one is unverified (spec section 19).
+            number = str(max(map(int, [*model["issues"], *prs, "0"])) + 1)
+            names = [] if settings.get("drop_issue_labels") else [
+                label["name"] for label in model.get("labels", [])
+                if label["name"] in payload.get("labels", [])
+            ]
+            issue = record(payload.get("body"))
+            issue.update(
+                number=int(number), title=payload["title"], state="open",
+                labels=[{"name": name} for name in names], conversation=[],
+            )
+            model["issues"][number] = issue
+            output(issue)
+        state = query.get("state", ["open"])[0]
+        keys = sorted({*model["issues"], *prs}, key=int, reverse=True)
+        output(paged(
+            [as_issue(k) for k in keys
+             if state in ("all", as_issue(k)["state"])],
+            query,
+        ))
     issue = model["issues"].get(number)
     pull = prs.get(number)
     if len(parts) == 5:
-        if issue is None and pull is not None:
-            # The issues API serves a PR number as an issue marked as a PR.
-            output({
-                **{k: pull[k] for k in (
-                    "id", "number", "title", "state", "body", "user",
-                    "created_at",
-                )},
-                "labels": [],
-                "pull_request": {
-                    "url": "https://api.github.com/repos/"
-                    + "/".join(parts[1:3]) + f"/pulls/{number}",
-                },
-            })
-        if issue is None:
+        if issue is None and pull is None:
             fail("issue not found", 404)
-        output(issue)
+        output(as_issue(number))
     if parts[5:] == ["comments"]:
         # Decisions and stops on a shared number reach the PR; an issue note
         # there is refused rather than silently written to the PR.
@@ -314,6 +344,8 @@ if number is None:
             query,
         )
     )
+if number not in prs:
+    fail("pull request not found", 404)
 pr = refresh(prs[number])
 if len(parts) == 5:
     if method == "PATCH":
