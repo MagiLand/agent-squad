@@ -113,7 +113,20 @@ class CIGroupingTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 15\n", macos)
         self.assertIn("  pull_request:\n", workflow)
         self.assertIn("  push:\n    branches: [main]\n", workflow)
-        self.assertRegex(workflow, r"(?m)^  schedule:\n    - cron: '.+'$")
+        # The scheduled run only catches changes outside the repository
+        # (runner image, setuptools, Python patch), so once a week suffices.
+        schedule = re.search(r"(?m)^  schedule:\n((?:    .*\n)*)", workflow)
+        self.assertIsNotNone(schedule, "Expected a schedule trigger")
+        entries = re.findall(r"^    - (.*)$", schedule[1], re.MULTILINE)
+        self.assertEqual(len(entries), 1, "Expected one schedule entry")
+        cron = re.fullmatch(r"cron: '([^']*)'", entries[0])
+        self.assertIsNotNone(cron, "Expected a single-quoted cron entry")
+        fields = cron[1].split()
+        self.assertEqual(len(fields), 5, "Expected five cron fields")
+        self.assertEqual(fields[2:4], ["*", "*"],
+                         "Day-of-month and month must be '*'")
+        self.assertRegex(fields[4], r"^(?:[0-6]|SUN|MON|TUE|WED|THU|FRI|SAT)$",
+                         "Day-of-week must name a single day")
         self.assertIn("permissions:\n  contents: read\n", workflow)
 
 
