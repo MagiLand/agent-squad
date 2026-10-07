@@ -87,9 +87,9 @@ checks in [#60](verification/2026-09-27-issue-60.md) use a real 16.0.3 container
 but do not establish a live review loop. For a Forgejo trial, record the container digest, actual server
 version, merge method, whether branch deletion was explicit or already done,
 and whether issue GET and PR-body PATCH were exercised. Keep unexercised
-paths marked unverified. Two-account Forgejo is fake-tested but has no release
-live trial; [#98](https://github.com/MagiLand/agent-squad/issues/98) tracks that
-trial. [#99](https://github.com/MagiLand/agent-squad/issues/99) tracks standalone
+paths marked unverified. The [#98 record](verification/2026-10-07-issue-98.md)
+establishes one supervised two-account loop on a local 16.0.3 container in one
+agent direction; its limitations stay unverified. [#99](https://github.com/MagiLand/agent-squad/issues/99) tracks standalone
 specification consolidation.
 
 Any deliberately seeded input or failed notification must be identified as

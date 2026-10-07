@@ -101,9 +101,15 @@ Create each role's token in Forgejo with exactly `write:repository`,
 Do not use a symlink. The CLI stores only the path, checks the file on each
 configuration load and token read, and never creates or repairs token files.
 
-Forgejo is implemented and covered by the fake server, but its live review
-loop with two accounts is **unverified**. Grant the Reviewer account repository
-write access:
+Forgejo is implemented and covered by the fake server. One supervised live
+review loop with two accounts ran on a local Forgejo 16.0.3 instance, with
+Claude Code implementing and Codex reviewing. It covered a blocking review,
+verified fixes, an exact-head approval that satisfied a one-approval branch
+rule, a merge and cleanup; see the
+[#98 record](docs/verification/2026-10-07-issue-98.md). HTTPS and SSH
+transport, other Forgejo versions, the opposite agent direction, squash merges
+and explicit branch deletion remain **unverified** with two accounts. Grant
+the Reviewer account repository write access:
 
 ```bash
 agent-squad init --forge forgejo --base-url https://forge.example/instance \
