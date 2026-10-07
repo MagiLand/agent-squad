@@ -113,11 +113,18 @@ class CIGroupingTests(unittest.TestCase):
         self.assertIn("    timeout-minutes: 15\n", macos)
         self.assertIn("  pull_request:\n", workflow)
         self.assertIn("  push:\n    branches: [main]\n", workflow)
+        self.assert_one_weekly_schedule(workflow)
+        self.assertIn("permissions:\n  contents: read\n", workflow)
+
+    def assert_one_weekly_schedule(self, workflow: str) -> None:
         # The scheduled run only catches changes outside the repository
         # (runner image, setuptools, Python patch), so once a week suffices.
-        schedule = re.search(r"(?m)^  schedule:\n((?:    .*\n)*)", workflow)
+        # The block ends at the next key indented by at most two spaces;
+        # blank and comment lines inside it do not end it.
+        schedule = re.search(
+            r"(?m)^  schedule:\n((?:(?! {0,2}[^\s#-]).*\n)*)", workflow)
         self.assertIsNotNone(schedule, "Expected a schedule trigger")
-        entries = re.findall(r"^    - (.*)$", schedule[1], re.MULTILINE)
+        entries = re.findall(r"^[ \t]*- (.*)$", schedule[1], re.MULTILINE)
         self.assertEqual(len(entries), 1, "Expected one schedule entry")
         cron = re.fullmatch(r"cron: '([^']*)'", entries[0])
         self.assertIsNotNone(cron, "Expected a single-quoted cron entry")
@@ -127,7 +134,48 @@ class CIGroupingTests(unittest.TestCase):
                          "Day-of-month and month must be '*'")
         self.assertRegex(fields[4], r"^(?:[0-6]|SUN|MON|TUE|WED|THU|FRI|SAT)$",
                          "Day-of-week must name a single day")
-        self.assertIn("permissions:\n  contents: read\n", workflow)
+
+    def test_schedule_guard_accepts_only_one_single_day_entry(self) -> None:
+        weekly = "    - cron: '17 5 * * 1'\n"
+        daily = "    - cron: '17 5 * * *'\n"
+        comment = "  # second schedule\n"
+        accepted = {
+            "numeric weekday": [weekly],
+            "named weekday": ["    - cron: '17 5 * * MON'\n"],
+            "blank line before the entry": ["\n", weekly],
+            "comment before the entry": [comment, weekly],
+            "blank line after the entry": [weekly, "\n"],
+        }
+        rejected = {
+            "daily": [daily],
+            "no entry": [],
+            "adjacent second entry": [weekly, daily],
+            "second entry after a blank line": [weekly, "\n", daily],
+            "second entry after a whitespace line": [weekly, "   \n", daily],
+            "second entry after a comment": [weekly, comment, daily],
+            "second entry indented two spaces": [
+                weekly, "  - cron: '17 5 * * *'\n"],
+            "double-quoted entry": ["    - cron: \"17 5 * * 1\"\n"],
+            "four fields": ["    - cron: '17 5 * 1'\n"],
+            "six fields": ["    - cron: '17 5 * * 1 1'\n"],
+            "restricted day of month": ["    - cron: '17 5 1 * 1'\n"],
+            "restricted month": ["    - cron: '17 5 * 1 1'\n"],
+            "weekday range": ["    - cron: '17 5 * * 1-5'\n"],
+            "weekday list": ["    - cron: '17 5 * * 1,4'\n"],
+            "weekday step": ["    - cron: '17 5 * * */2'\n"],
+        }
+
+        def workflow(lines: list[str]) -> str:
+            return ("on:\n  push:\n    branches: [main]\n  schedule:\n"
+                    + "".join(lines) + "permissions:\n  contents: read\n")
+
+        for label, lines in accepted.items():
+            with self.subTest(accepted=label):
+                self.assert_one_weekly_schedule(workflow(lines))
+        for label, lines in rejected.items():
+            with self.subTest(rejected=label):
+                with self.assertRaises(AssertionError):
+                    self.assert_one_weekly_schedule(workflow(lines))
 
 
 class GroupRunnerTests(unittest.TestCase):
