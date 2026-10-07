@@ -119,15 +119,20 @@ class CIGroupingTests(unittest.TestCase):
     def assert_one_weekly_schedule(self, workflow: str) -> None:
         # The scheduled run only catches changes outside the repository
         # (runner image, setuptools, Python patch), so once a week suffices.
-        # The block ends at the next key indented by at most two spaces;
-        # blank and comment lines inside it do not end it.
+        # Rather than count YAML entry forms, accept one explicit form: one
+        # schedule key whose block, up to the next key indented by at most
+        # two spaces, holds only blank lines, comments, and one cron line.
+        self.assertEqual(
+            len(re.findall(r"""\bschedule['"]?[ \t]*:""", workflow)), 1,
+            "Expected one schedule key")
         schedule = re.search(
             r"(?m)^  schedule:\n((?:(?! {0,2}[^\s#-]).*\n)*)", workflow)
         self.assertIsNotNone(schedule, "Expected a schedule trigger")
-        entries = re.findall(r"^[ \t]*- (.*)$", schedule[1], re.MULTILINE)
-        self.assertEqual(len(entries), 1, "Expected one schedule entry")
-        cron = re.fullmatch(r"cron: '([^']*)'", entries[0])
-        self.assertIsNotNone(cron, "Expected a single-quoted cron entry")
+        lines = [line for line in schedule[1].splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(len(lines), 1, "Expected one schedule entry line")
+        cron = re.fullmatch(r"    - cron: '([^']*)'", lines[0])
+        self.assertIsNotNone(cron, "Expected a one-line single-quoted cron")
         fields = cron[1].split()
         self.assertEqual(len(fields), 5, "Expected five cron fields")
         self.assertEqual(fields[2:4], ["*", "*"],
@@ -145,6 +150,9 @@ class CIGroupingTests(unittest.TestCase):
             "blank line before the entry": ["\n", weekly],
             "comment before the entry": [comment, weekly],
             "blank line after the entry": [weekly, "\n"],
+            "whitespace line after the entry": [weekly, "   \n"],
+            "unindented comment after the entry": [weekly, "# note\n"],
+            "commented-out second entry": [weekly, "    # " + daily[4:]],
         }
         rejected = {
             "daily": [daily],
@@ -155,6 +163,20 @@ class CIGroupingTests(unittest.TestCase):
             "second entry after a comment": [weekly, comment, daily],
             "second entry indented two spaces": [
                 weekly, "  - cron: '17 5 * * *'\n"],
+            "second entry indented with a tab": [
+                weekly, "\t- cron: '17 5 * * *'\n"],
+            "second entry with a bare dash": [
+                weekly, "    -\n", "      cron: '17 5 * * *'\n"],
+            "second entry as an alias": [
+                "    - &weekly {cron: '17 5 * * 1'}\n", "    - *weekly\n"],
+            "second schedule key": [weekly, "  schedule:\n", daily],
+            "second schedule key in flow style": [
+                weekly, "on: {schedule: [{cron: '17 5 * * *'}]}\n"],
+            "flow sequence": [
+                "    [{cron: '17 5 * * 1'}, {cron: '17 5 * * *'}]\n"],
+            "weekly entry with a bare dash": [
+                "    -\n", "      cron: '17 5 * * 1'\n"],
+            "entry indented two spaces": ["  - cron: '17 5 * * 1'\n"],
             "double-quoted entry": ["    - cron: \"17 5 * * 1\"\n"],
             "four fields": ["    - cron: '17 5 * 1'\n"],
             "six fields": ["    - cron: '17 5 * * 1 1'\n"],
