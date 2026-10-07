@@ -893,6 +893,33 @@ class MutationContractTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, status)
             self.assertEqual(forge.api.call_count, 1)
 
+    def test_failed_branch_delete_is_decided_by_a_fresh_read(self):
+        """#120: a deletion by anyone else after the read answers 500."""
+        endpoint = "/repos/owner/repo/branches/feat%2Ftopic"
+        present = {"name": "feat/topic", "commit": {"id": "a" * 40}}
+        forge = self.forge()
+        forge.api.side_effect = [
+            present, ForgeError("absent branch deletion", 500),
+            ForgeError("absent", 404),
+        ]
+        with patch("time.sleep") as sleep:
+            forge.delete_branch("feat/topic", "a" * 40)
+        sleep.assert_not_called()
+        self.assertEqual(
+            [(c.args[0], c.kwargs.get("method", "GET"))
+             for c in forge.api.call_args_list],
+            [(endpoint, "GET"), (endpoint, "DELETE"), (endpoint, "GET")],
+        )
+        forge.api.reset_mock()
+        forge.api.side_effect = [
+            present, ForgeError("absent branch deletion", 500), present,
+        ]
+        with self.assertRaises(ForgeError) as caught:
+            forge.delete_branch("feat/topic", "a" * 40)
+        self.assertEqual(str(caught.exception), "absent branch deletion")
+        self.assertEqual(caught.exception.status, 500)
+        self.assertEqual(forge.api.call_count, 3)
+
     def test_failed_merge_confirmation_cannot_look_like_a_refused_post(self):
         forge = self.forge()
         for status in (403, 404, 409, 422):

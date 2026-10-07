@@ -315,8 +315,11 @@ check and retains resources when integration cannot be verified.
 
 After verified integration, the command removes only its owned implementation
 branch/worktree, Reviewer resources, and per-PR and per-issue scratch
-directories. It confirms the remote branch is absent, then removes its local
-`refs/remotes/origin/<branch>` only if that ref still equals the approved head.
+directories. On GitHub, when the repository deletes merged head branches
+automatically, it first waits up to 30 seconds for that deletion and deletes
+the branch itself only if GitHub has not. It confirms the remote branch is
+absent, then removes its local `refs/remotes/origin/<branch>` only if that ref
+still equals the approved head.
 A changed ref or uncertain remote result retains resources and is reported. After cleanup, even if some resources were retained, it
 fast-forwards the primary checkout to the exact verified base commit when the
 PR targets the configured base branch, that branch is checked out, and tracked

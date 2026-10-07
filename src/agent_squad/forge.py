@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Protocol, TypedDict, runtime_checkable
+from typing import Callable, Literal, Protocol, TypedDict, runtime_checkable
 import re
 
 from .initialization import AgentSquadError, Repository
@@ -261,6 +261,38 @@ class Forge(Protocol):
     def comment(self, number: int, body: str) -> Evidence: ...
     def resolve(self, node_id: str) -> dict[str, object]: ...
     def merge(self, number: int, head: str, method: str) -> MergeResult: ...
+
+
+def branch_present(forge: Forge, branch: str, expected_head: str) -> bool:
+    """Read the branch; refuse one that moved from the approved head."""
+    head = forge.branch_head(branch)
+    if head is not None and head != expected_head:
+        raise ForgeError("remote branch no longer matches approved head")
+    return head is not None
+
+
+def delete_and_confirm(
+    forge: Forge, branch: str, expected_head: str,
+    delete: Callable[[], object],
+) -> None:
+    """Send one DELETE for a branch read at the approved head, then read it.
+
+    A DELETE that loses a race with another deletion fails (GitHub 404 or
+    422, Forgejo 500), so only the fresh read decides (#120).
+    """
+    try:
+        delete()
+    except ForgeError as error:
+        try:
+            if not branch_present(forge, branch, expected_head):
+                return
+        except ForgeError as read_error:
+            raise ForgeError(
+                f"{error}; after the failed DELETE: {read_error}"
+            ) from None
+        raise
+    if branch_present(forge, branch, expected_head):
+        raise ForgeError(f"remote branch remains: {branch}")
 
 
 def make_forge(repository: Repository, role: Role) -> Forge:

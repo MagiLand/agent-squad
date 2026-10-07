@@ -271,6 +271,11 @@ class Handler(BaseHTTPRequestHandler):
             branch = parts[4]
             if settings.get("branch_read_403"):
                 return 403, {"message": "branch unreadable"}
+            if (self.command == "DELETE"
+                    and settings.get("branch_removed_before_delete")):
+                # Another deletion completes between the read and the DELETE.
+                self.git(model, "update-ref", "-d", f"refs/heads/{branch}")
+                self._branch_refs = None
             head = self.branch(model, branch)
             if self.command == "DELETE":
                 if settings.get("branch_delete_403"):

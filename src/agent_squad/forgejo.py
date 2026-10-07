@@ -37,6 +37,8 @@ from .forge import (
     V,
     array,
     boolean,
+    branch_present,
+    delete_and_confirm,
     object_value,
     oid,
     positive,
@@ -921,14 +923,10 @@ class Forgejo:
         return oid(commit.get("id"), "branch commit ID")
 
     def delete_branch(self, branch: str, expected_head: str) -> None:
-        head = self.branch_head(branch)
-        if head is None:
-            return
-        if head != expected_head:
-            raise ForgeError("remote branch no longer matches approved head")
-        self.api(
-            f"{self.prefix}/branches/{quote(branch, safe='')}",
-            method="DELETE",
-        )
-        if self.branch_head(branch) is not None:
-            raise ForgeError(f"remote branch remains: {branch}")
+        # The merge deletes the branch before it answers (F16), so there is
+        # no deletion to wait for.
+        if branch_present(self, branch, expected_head):
+            delete_and_confirm(self, branch, expected_head, lambda: self.api(
+                f"{self.prefix}/branches/{quote(branch, safe='')}",
+                method="DELETE",
+            ))
