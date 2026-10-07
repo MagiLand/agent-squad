@@ -345,7 +345,7 @@ The automated suite runs the twelve-step smoke scenario twice, on fake GitHub
 and on a loopback fake Forgejo server, each with two accounts. Both use
 temporary repositories and fake Herdr; they never call models or a real forge.
 Source-export smoke runs both forges without `.git`; CI reserves that duplicate
-export run for main/nightly.
+export run for main pushes and the weekly schedule.
 `make doctor` checks your real configured environment. Live reviews, decisions,
 and merges are separate evidence in [workflow verification](docs/workflow-verification.md).
 Agent Squad's own implementation PRs use this review loop. Release acceptance

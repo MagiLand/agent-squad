@@ -112,7 +112,7 @@ v0.5.0 release trials. It establishes both agent directions for that release,
 not Forgejo behavior.
 
 CI's pull-request `smoke` group runs both forge scenarios. The source-export
-variant remains in `main-only`, executed on main pushes and nightly runs.
+variant remains in `main-only`, executed on main pushes and weekly runs.
 `make test` continues to run the full suite, including both variants. This
 increment changes no CI actions, permissions, or triggers.
 
