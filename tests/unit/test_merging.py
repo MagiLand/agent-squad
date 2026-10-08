@@ -15,6 +15,16 @@ add_src_to_path()
 IMPLEMENTATION = Worktree(Path("/owned"), H, "refs/heads/feature")
 
 
+def cleanup_repository():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        primary=Path("/primary"),
+        configuration=SimpleNamespace(worktree_root="worktrees"),
+        resolve_root=lambda value: Path("/primary") / value,
+    )
+
+
 class MergeRulesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = {
@@ -125,7 +135,7 @@ class TrackingCleanupTests(unittest.TestCase):
         from unittest.mock import Mock
         from agent_squad.merging import cleanup_merge
 
-        repository = SimpleNamespace(primary=Path("/primary"))
+        repository = cleanup_repository()
         forge = Mock()
         forge.branch_head.return_value = H
         with patch("agent_squad.merging.owned_implementation",
@@ -145,7 +155,7 @@ class TrackingCleanupTests(unittest.TestCase):
         from unittest.mock import Mock
         from agent_squad.merging import cleanup_merge
 
-        repository = SimpleNamespace(primary=Path("/primary"))
+        repository = cleanup_repository()
         forge = Mock()
         forge.branch_head.return_value = None
         with patch("agent_squad.merging.owned_implementation",
@@ -176,7 +186,7 @@ class TrackingCleanupTests(unittest.TestCase):
                        "agent_squad.merging.list_worktrees",
                        return_value=[IMPLEMENTATION]):
             result = cleanup_merge(
-                SimpleNamespace(primary=Path("/primary")), 1, H, "feature",
+                cleanup_repository(), 1, H, "feature",
                 1, forge,
             )
         self.assertEqual(result, [{

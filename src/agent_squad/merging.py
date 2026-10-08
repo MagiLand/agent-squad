@@ -319,9 +319,14 @@ def cleanup_merge(
         steps.append({"step": name, "ok": True, "detail": detail})
         return True
 
+    root = repository.resolve_root(repository.configuration.worktree_root)
+    implementation = root / f"issue-{issue}"
+
     def registered() -> bool:
+        # A worktree at the issue path that was detached or switched to
+        # another branch is still present and must prove its ownership.
         return any(
-            w.branch == f"refs/heads/{branch}"
+            w.branch == f"refs/heads/{branch}" or w.root == implementation
             for w in list_worktrees(repository.primary)
         )
 
@@ -372,8 +377,6 @@ def cleanup_merge(
     if not step("remote-tracking ref", remove_tracking):
         return steps
 
-    root = repository.resolve_root(repository.configuration.worktree_root)
-
     def review_worktrees() -> list:
         return [
             w for w in list_worktrees(repository.primary)
@@ -384,8 +387,13 @@ def cleanup_merge(
 
     # Resolve the Implementer's session while the implementation worktree is
     # still registered: the Implementer may be working in it (§8.2). A refusal
-    # is remembered by the client and fails the Reviewer step below.
-    client = HerdrClient(repository.primary, repository=repository)
+    # is remembered by the client and fails the Reviewer step below. After an
+    # earlier attempt removed that worktree, only its vacant path counts.
+    vacant = not (implementation.exists() or implementation.is_symlink())
+    client = HerdrClient(
+        repository.primary, repository=repository,
+        removed_worktrees=(implementation,) if vacant else (),
+    )
     if review_worktrees():
         try:
             client.session()

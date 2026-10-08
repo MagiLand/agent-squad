@@ -22,11 +22,24 @@ from agent_squad.merging import (
 )
 
 
+def run_pr(
+    test: unittest.TestCase, f: ForgeFixture, command: str, expected: int,
+) -> dict:
+    result = f.run([
+        sys.executable, "-m", "agent_squad", "pr", command,
+        "--as", "implementer", "--pr", "1", "--json",
+    ], cwd=f.repo)
+    test.assertEqual(result.returncode, expected,
+                     result.stdout + result.stderr)
+    return (
+        json.loads(result.stdout) if result.stdout
+        else {"error": result.stderr}
+    )
+
+
 class ExternalWorktreeMergeTests(unittest.TestCase):
-    def test_cleanup_resolves_session_before_removing_implementation(
-        self,
-    ) -> None:
-        """PR #108 REV-1: the Implementer works in the issue worktree."""
+    def external(self) -> tuple[ForgeFixture, Path]:
+        """The Implementer works in an issue worktree outside the primary."""
         f = ForgeFixture()
         self.addCleanup(f.close)
         f.initialize()
@@ -41,6 +54,13 @@ class ExternalWorktreeMergeTests(unittest.TestCase):
         f.herdr_settings(implementer={"cwd": str(f.worktree)})
         review = Path(f.cli("reviewer", "launch", "--pr", "1")["worktree"])
         f.review("approved")
+        return f, review
+
+    def test_cleanup_resolves_session_before_removing_implementation(
+        self,
+    ) -> None:
+        """PR #108 REV-1: the Implementer works in the issue worktree."""
+        f, review = self.external()
         model = f.herdr_model()
         model["calls"] = []
         f.save_herdr(model)
@@ -57,6 +77,36 @@ class ExternalWorktreeMergeTests(unittest.TestCase):
             sum(c == ["session", "list", "--json"] for c in model["calls"]),
             1,
         )
+
+    def test_resumed_cleanup_finds_the_implementer_in_its_removed_worktree(
+        self,
+    ) -> None:
+        """PR #134 REV-2: only the record's vacant issue path is admitted."""
+        f, review = self.external()
+        f.herdr_settings(snapshot_failure=True)
+        result = run_pr(self, f, "merge", 3)
+        self.assertEqual(result["cleanup"][-1]["step"], "review worktree")
+        self.assertFalse(f.worktree.exists())
+        f.herdr_settings(snapshot_failure=False)
+        sibling = f.worktree.parent / "issue-2"
+        for cwd, recreate in ((sibling, False), (f.worktree, True)):
+            with self.subTest(cwd=cwd.name, recreated=recreate):
+                if recreate:
+                    f.worktree.mkdir()
+                f.herdr_settings(implementer={"cwd": str(cwd)})
+                result = run_pr(self, f, "cleanup", 3)
+                self.assertEqual(
+                    result["cleanup"][-1]["step"], "review worktree")
+                self.assertIn("no running Herdr session",
+                              result["cleanup"][-1]["detail"])
+                self.assertTrue(review.exists())
+        f.worktree.rmdir()
+        result = run_pr(self, f, "cleanup", 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertFalse(review.exists())
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+        self.assertFalse((f.repo / ".git/agent-squad-merge-pr1.json").exists())
 
 
 class MergeTests(unittest.TestCase):
@@ -1093,16 +1143,7 @@ class ResumedCleanupTests(unittest.TestCase):
         self.record = self.f.repo / ".git/agent-squad-merge-pr1.json"
 
     def pr(self, command: str, expected: int = 0) -> dict:
-        result = self.f.run([
-            sys.executable, "-m", "agent_squad", "pr", command,
-            "--as", "implementer", "--pr", "1", "--json",
-        ], cwd=self.f.repo)
-        self.assertEqual(result.returncode, expected,
-                         result.stdout + result.stderr)
-        return (
-            json.loads(result.stdout) if result.stdout
-            else {"error": result.stderr}
-        )
+        return run_pr(self, self.f, command, expected)
 
     def merge(self, expected: int = 0) -> dict:
         return self.pr("merge", expected)
@@ -1350,6 +1391,26 @@ class ResumedCleanupTests(unittest.TestCase):
         self.assertEqual(len(result["cleanup"]), 1)
         self.assertTrue(unowned.exists())
         self.assertEqual(f.git("rev-parse", "refs/heads/issue-1"), self.head)
+
+    def test_resumed_run_retains_a_detached_or_switched_worktree(
+        self,
+    ) -> None:
+        """PR #134 REV-1: the issue path still holds a registered worktree."""
+        f = self.f
+        self.stop_at_remote_branch()
+        writes = len(self.writes())
+        for args in (("checkout", "--detach"), ("switch", "-c", "other")):
+            with self.subTest(args=args):
+                f.git(*args, cwd=f.worktree)
+                result = self.cleanup(expected=3)
+                self.assert_incomplete(result, "implementation ownership")
+                self.assertEqual(len(result["cleanup"]), 1)
+                self.assertTrue(f.worktree.exists())
+                self.assertEqual(
+                    f.git("rev-parse", "refs/heads/issue-1"), self.head)
+                self.assertEqual(len(self.writes()), writes)
+                f.git("switch", "issue-1", cwd=f.worktree)
+        self.assert_finished(self.cleanup())
 
     def test_resumed_run_retains_an_unowned_review_worktree(self) -> None:
         f = self.f
