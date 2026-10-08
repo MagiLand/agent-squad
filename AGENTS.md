@@ -10,6 +10,7 @@ Implementation should follow the specification's focused increments. Production 
 
 Preserve these repository-level commands:
 
+- `make venv` — create `.venv` with Python 3.11 and setuptools using `uv`; the other targets then use its interpreter.
 - `make test` — run the deterministic automated suite.
 - `make smoke` — exercise the self-contained disposable-repository workflow.
 - `make doctor` — check local Git, filesystem, and Herdr prerequisites.

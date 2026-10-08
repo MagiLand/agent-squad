@@ -356,10 +356,16 @@ no record; `doctor` reports its leftover resources.
 ## Verify this project
 
 ```bash
+make venv
 make test
 make smoke
 make doctor
 ```
+
+`make venv` needs [`uv`](https://docs.astral.sh/uv/). It creates `.venv` with
+Python 3.11, which CI's pull-request jobs use, and installs setuptools so the
+packaging test runs instead of being skipped. When `.venv` exists, the other
+targets use its interpreter; set `PYTHON` to choose another one.
 
 The automated suite runs the twelve-step smoke scenario twice, on fake GitHub
 and on a loopback fake Forgejo server, each with two accounts. Both use
