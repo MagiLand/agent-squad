@@ -8,7 +8,7 @@ from tests._support import add_src_to_path
 
 add_src_to_path()
 
-from agent_squad.conventions import (
+from agent_squad.conventions import (  # noqa: E402
     MERGE_INSTRUCTION,
     MERGE_WITHDRAWAL,
     allocate_id,
@@ -24,7 +24,7 @@ from agent_squad.conventions import (
     validate_review_body,
     validate_section,
 )
-from agent_squad.forge import (
+from agent_squad.forge import (  # noqa: E402
     Comment,
     Evidence,
     PullRequest,
@@ -33,8 +33,17 @@ from agent_squad.forge import (
     Snapshot,
     ThreadState,
 )
-from agent_squad.initialization import AgentSquadError, Configuration, Worktree
-from tests.forge_support import TASK, REPORT, REVIEW, FINDING_BODY
+from agent_squad.initialization import (  # noqa: E402
+    AgentSquadError,
+    Configuration,
+    Worktree,
+)
+from tests.forge_support import (  # noqa: E402
+    TASK,
+    REPORT,
+    REVIEW,
+    FINDING_BODY,
+)
 
 A, H, J = "a" * 40, "b" * 40, "c" * 40
 
@@ -439,9 +448,11 @@ class StandingMergeTests(unittest.TestCase):
         self.assertEqual(state["merge_instruction"], instruction)
 
         # Model a separate Developer request recorded by the Implementer.
-        history = replace(history, conversation=(*history.conversation, decision(
-            13, body=MERGE_WITHDRAWAL +
-            '\n\nThe Developer instructed:\n> Withdraw merge authority.')))
+        history = replace(history, conversation=(
+            *history.conversation, decision(
+                13, body=MERGE_WITHDRAWAL +
+                '\n\nThe Developer instructed:\n'
+                '> Withdraw merge authority.')))
         state = derive_state(history)
         self.assertEqual(state["next_action"], "approved")
         self.assertTrue(state["approval"]["approved"])

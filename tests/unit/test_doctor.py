@@ -13,9 +13,12 @@ from tests._support import PROJECT_ROOT, add_src_to_path
 
 add_src_to_path()
 
-from agent_squad.doctor import check_code_review, writable_directory
-from agent_squad.herdr import HerdrClient, HerdrError
-from agent_squad.initialization import AgentSquadError
+from agent_squad.doctor import (  # noqa: E402
+    check_code_review,
+    writable_directory,
+)
+from agent_squad.herdr import HerdrClient, HerdrError  # noqa: E402
+from agent_squad.initialization import AgentSquadError  # noqa: E402
 
 
 class DirectoryProbeTests(unittest.TestCase):

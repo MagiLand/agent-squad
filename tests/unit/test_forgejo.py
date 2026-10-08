@@ -16,14 +16,14 @@ from tests.unit.test_conventions import config
 
 add_src_to_path()
 
-from tests.fixtures.fake_forgejo import Handler, recording
-from agent_squad.initialization import (
+from tests.fixtures.fake_forgejo import Handler, recording  # noqa: E402
+from agent_squad.initialization import (  # noqa: E402
     Configuration,
     ConfigurationError,
     Repository,
     Worktree,
 )
-from agent_squad.forgejo import (
+from agent_squad.forgejo import (  # noqa: E402
     Forgejo,
     hunk_anchor,
     parse_comments,
@@ -32,7 +32,7 @@ from agent_squad.forgejo import (
     parse_review,
     read_token,
 )
-from agent_squad.forge import ForgeError
+from agent_squad.forge import ForgeError  # noqa: E402
 
 
 def forgejo_config():
@@ -560,7 +560,8 @@ class BranchLookupTests(unittest.TestCase):
 
 
 class RecordedParserTests(unittest.TestCase):
-    def test_full_pr_parsing_still_requires_valid_commit_metadata(self) -> None:
+    def test_full_pr_parsing_still_requires_valid_commit_metadata(
+            self) -> None:
         for field in ("base.sha", "head.sha", "merge_base",
                       "merge_commit_sha"):
             for value in ("", None, "invalid"):

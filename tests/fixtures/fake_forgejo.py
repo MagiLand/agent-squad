@@ -224,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
             return 404, {"message": "unknown instance path"}
         parts = [
             unquote(p)
-            for p in parsed.path[len(api_prefix) :].strip("/").split("/")
+            for p in parsed.path[len(api_prefix):].strip("/").split("/")
         ]
         query = parse_qs(parsed.query)
         account = (auth or "").removeprefix("token fake-token-")
@@ -511,7 +511,7 @@ class Handler(BaseHTTPRequestHandler):
     def paged(rows: list, query: dict) -> list:
         size = int(query.get("limit", ["50"])[0])
         page = int(query.get("page", ["1"])[0])
-        return rows[(page - 1) * size : page * size]
+        return rows[(page - 1) * size:page * size]
 
 
 class FakeForgejo:

@@ -13,7 +13,7 @@ from tests._support import PROJECT_ROOT, add_src_to_path
 
 add_src_to_path()
 
-from agent_squad.herdr import (
+from agent_squad.herdr import (  # noqa: E402
     HerdrClient,
     HerdrError,
     HerdrSessionError,
@@ -22,7 +22,7 @@ from agent_squad.herdr import (
     reviewer_name,
     stopped_message,
 )
-from agent_squad.initialization import AgentKind, AgentSquadError
+from agent_squad.initialization import AgentKind, AgentSquadError  # noqa: E402
 
 H, B = "a" * 40, "b" * 40
 

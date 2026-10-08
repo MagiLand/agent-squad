@@ -6,13 +6,13 @@ import unittest
 from tests._support import add_src_to_path
 
 add_src_to_path()
-from agent_squad.anchors import (
+from agent_squad.anchors import (  # noqa: E402
     Anchor,
     parse_diff,
     unquote_path,
     validate_anchor,
 )
-from agent_squad.initialization import AgentSquadError
+from agent_squad.initialization import AgentSquadError  # noqa: E402
 
 
 class AnchorTests(unittest.TestCase):

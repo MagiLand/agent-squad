@@ -161,7 +161,7 @@ def section(body: str, name: str) -> str | None:
         raise AgentSquadError(f"duplicate ## {name} section")
     i = matches[0]
     end = found[i + 1][1] if i + 1 < len(found) else len(body)
-    return body[found[i][1] : end].strip()
+    return body[found[i][1]:end].strip()
 
 
 def section_content(body: str, name: str) -> str:

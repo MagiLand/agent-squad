@@ -392,9 +392,10 @@ class ForgeBoundaryTests(unittest.TestCase):
         from dataclasses import replace
         from tests.unit.test_conventions import review, root
 
-        original = snapshot(reviews=(review(10, 'changes_requested',
-            findings='REV-1 [blocking] Finding'),),
-                            comments=(root(),))
+        original = snapshot(
+            reviews=(review(10, 'changes_requested',
+                            findings='REV-1 [blocking] Finding'),),
+            comments=(root(),))
         readable = derive_state(original)
         unknown = derive_state(replace(
             original, can_read_thread_resolution=False,
