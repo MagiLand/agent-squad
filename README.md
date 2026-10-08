@@ -280,7 +280,7 @@ shipped command path.
 | `issue view`, `issue comment`, `issue create` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`. |
 | `pr create`, `pr report` | Publish the Task and implementation report; update the report on an open PR. |
 | `pr head`, `pr reviews`, `status` | Read exact revision identities, reviews, and derived workflow state. |
-| `pr merge` | Merge an approved revision and verify integration and owned cleanup. |
+| `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
 | `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
 | `reviewer launch`, `reviewer adopt`, `reviewer close` | Start a fresh Reviewer, adopt after a human startup answer, or close owned resources. |
 | `review post` | Publish or resume the formal review and findings. |
@@ -335,6 +335,23 @@ use the configured base branch. The Implementer reports the result and never
 runs the fallback command itself.
 The command never switches branches, creates a local merge commit, runs
 `git clean`, or removes an unrelated worktree.
+
+Before it sends the merge request, `pr merge` saves the identities cleanup
+needs in a merge record in the repository's common Git directory: the
+approved head, both branches, the merge method, and the issue number. If the
+merge outcome is unknown, integration could not be verified, or a cleanup step
+failed, the result names the command that finishes the job:
+
+```bash
+agent-squad pr cleanup --as implementer --pr 43
+```
+
+It never merges again. It verifies integration against the recorded head,
+runs the remaining cleanup steps with the same guards (a resource that is
+already gone counts as done), fast-forwards the primary checkout, and deletes
+the record once every step succeeded. The Implementer runs it once without
+asking and reports a second failure to you. A PR merged outside `pr merge` has
+no record; `doctor` reports its leftover resources.
 
 ## Verify this project
 

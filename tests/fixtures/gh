@@ -379,6 +379,16 @@ if parts[5] == "merge":
 
     if method != "PUT":
         fail("merge requires PUT", 400)
+
+    def lost():
+        # A transport failure carries no HTTP status: the outcome is unknown.
+        save()
+        print("gh: connection reset by peer", file=sys.stderr)
+        raise SystemExit(1)
+
+    # merge_response_lost: "before" loses the request, "after" the answer.
+    if settings.get("merge_response_lost") == "before":
+        lost()
     if settings.get("merge_refusal"):
         fail(settings["merge_refusal"], 405)
     if settings.get("merge_not_confirmed"):
@@ -425,6 +435,8 @@ if parts[5] == "merge":
                 "ref": f"refs/heads/{pr['head']['ref']}", "reads": deletion,
             }
     pr.update(merged=True, state="closed", merge_commit_sha=merge_commit)
+    if settings.get("merge_response_lost") == "after":
+        lost()
     output(
         {"merged": True, "sha": merge_commit, "message": "merged fixture"}
     )

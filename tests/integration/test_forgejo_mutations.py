@@ -548,9 +548,63 @@ class ForgejoMutationTests(unittest.TestCase):
         self.assertIsNone(result["merged"])
         self.assertTrue(result["resources_retained"])
         self.assertIn("merge submitted; confirmation failed", result["error"])
+        self.assertEqual(result["cleanup_command"],
+                         "agent-squad pr cleanup --as implementer --pr 1")
         self.assertTrue(f.worktree.exists())
         self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
         self.assertTrue(f.read_model()["prs"]["1"]["merged"])
+        # #121: pr cleanup finishes the merge from the merge record.
+        f.settings(merge_confirmation_403=False)
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["fast_forward"]["result"], "fast-forwarded")
+        self.assertEqual(f.git("rev-parse", "HEAD"), result["merge_commit"])
+        self.assertFalse(f.worktree.exists())
+        self.assertEqual(f.git("branch", "--list", "issue-1"), "")
+        self.assertFalse((f.repo / ".git/agent-squad-merge-pr1.json").exists())
+
+    def cleanup(self, expected=0):
+        start = len(self.f.read_model()["calls"])
+        result = self.f.run([
+            sys.executable, "-m", "agent_squad", "pr", "cleanup", "--as",
+            "implementer", "--pr", "1", "--json",
+        ], cwd=self.f.repo)
+        self.assertEqual(result.returncode, expected,
+                         result.stdout + result.stderr)
+        self.assertFalse(any(c["path"].endswith("/merge")
+                             for c in self.f.read_model()["calls"][start:]))
+        return json.loads(result.stdout)
+
+    def test_cleanup_uses_the_recorded_head_and_branch_after_merge(self):
+        """#121: the merged PR reports a synthetic ref and an older head."""
+        f = self.f
+        f.review("approved")
+        f.settings(post_merge_head_discrepancy=True)
+        scratch = f.repo / ".agent-squad/review-scratch/pr1"
+        scratch.parent.mkdir(parents=True)
+        target = f.root / "foreign-scratch"
+        target.mkdir()
+        scratch.symlink_to(target, target_is_directory=True)
+        result = self.merge(3)
+        self.assertEqual(result["cleanup"][-1]["step"], "scratch directory")
+        self.assertFalse(f.worktree.exists())
+        merged = f.cli("pr", "head", "--pr", "1", cwd=f.repo)
+        self.assertEqual(merged["head_branch"], "synthetic-pull-ref")
+        self.assertNotEqual(merged["head"], self.head)
+        scratch.unlink()
+        start = len(f.read_model()["calls"])
+        result = self.cleanup()
+        self.assertEqual(result["head"], self.head)
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["cleanup"][0]["detail"], "already removed")
+        calls = f.read_model()["calls"][start:]
+        self.assertIn("/branches/issue-1", " ".join(c["path"] for c in calls))
+        self.assertNotIn("synthetic", json.dumps(calls))
+        self.assertEqual(
+            [c for c in calls if c["method"] != "GET"], [])
+        self.assertFalse((f.repo / ".git/agent-squad-merge-pr1.json").exists())
 
     def test_merge_ancestry_and_tracking_cleanup_use_premerge_identity(self):
         f = self.f

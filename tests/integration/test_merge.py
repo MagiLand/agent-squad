@@ -1005,13 +1005,21 @@ class MergeTests(unittest.TestCase):
     def test_missing_implementation_ownership_never_deletes_by_path_alone(
         self,
     ) -> None:
+        """#121: unproven ownership leaves no issue for the merge record."""
         admin = Path(self.f.git(
             "rev-parse", "--absolute-git-dir", cwd=self.f.worktree))
         (admin / "agent-squad-implementation.json").unlink()
-        result = self.merge(expected=3)
-        self.assertEqual(result["cleanup"][-1]["step"],
-                         "implementation ownership")
-        self.assertFalse(result["cleanup"][-1]["ok"])
+        result = self.merge(expected=1)
+        self.assertIs(result["merged"], False)
+        self.assertIn("no merge request sent", result["error"])
+        self.assertIn("cannot prove implementation ownership",
+                      result["error"])
+        self.assertEqual(result["merge_record"]["result"], "not written")
+        self.assertIsNone(result["cleanup_command"])
+        self.assertFalse(Path(result["merge_record"]["path"]).exists())
+        self.assertFalse(any(c["arguments"][1].endswith("/merge")
+                             for c in self.f.read_model()["calls"]))
+        self.assertFalse(self.f.read_model()["prs"]["1"]["merged"])
         self.assertTrue(self.f.worktree.exists())
         self.assertNotEqual(self.f.git(
             "ls-remote", "--heads", "origin", "issue-1"), "")
@@ -1068,3 +1076,381 @@ class MergeTests(unittest.TestCase):
         f.push("value = 20\nsecond = 2\nthird = 3\n")
         self.assertIn("not at the PR head", self.merge(expected=4)["error"])
         self.assertFalse(f.read_model()["prs"]["1"]["merged"])
+
+
+class ResumedCleanupTests(unittest.TestCase):
+    """#121: pr cleanup finishes a merge that pr merge started."""
+
+    COMMAND = "agent-squad pr cleanup --as implementer --pr 1"
+
+    def setUp(self) -> None:
+        self.f = ForgeFixture()
+        self.addCleanup(self.f.close)
+        self.f.initialize()
+        self.head = self.f.candidate()
+        self.f.create_pr()
+        self.f.review("approved")
+        self.record = self.f.repo / ".git/agent-squad-merge-pr1.json"
+
+    def pr(self, command: str, expected: int = 0) -> dict:
+        result = self.f.run([
+            sys.executable, "-m", "agent_squad", "pr", command,
+            "--as", "implementer", "--pr", "1", "--json",
+        ], cwd=self.f.repo)
+        self.assertEqual(result.returncode, expected,
+                         result.stdout + result.stderr)
+        return (
+            json.loads(result.stdout) if result.stdout
+            else {"error": result.stderr}
+        )
+
+    def merge(self, expected: int = 0) -> dict:
+        return self.pr("merge", expected)
+
+    def merge_calls(self) -> int:
+        return sum(c["arguments"][1].endswith("/merge")
+                   for c in self.f.read_model()["calls"])
+
+    def writes(self) -> list:
+        return [
+            c for c in self.f.read_model()["calls"]
+            if "--method" in c["arguments"]
+            and c["arguments"][c["arguments"].index("--method") + 1] != "GET"
+        ]
+
+    def cleanup(self, expected: int = 0) -> dict:
+        merges = self.merge_calls()
+        result = self.pr("cleanup", expected)
+        self.assertEqual(self.merge_calls(), merges)
+        return result
+
+    def assert_incomplete(self, result: dict, step: str) -> None:
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["cleanup"][-1]["step"], step)
+        self.assertFalse(result["cleanup"][-1]["ok"])
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertEqual(result["cleanup_command"], self.COMMAND)
+        self.assertTrue(self.record.exists())
+
+    def assert_finished(self, result: dict) -> None:
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertIsNone(result["cleanup_command"])
+        self.assertFalse(self.record.exists())
+        MergeTests.assert_removed(self)
+
+    def assert_unchanged(self, worktrees: str, writes: int) -> None:
+        self.assertEqual(
+            self.f.git("worktree", "list", "--porcelain"), worktrees)
+        self.assertEqual(len(self.writes()), writes)
+        self.assertEqual(
+            self.f.git("rev-parse", "refs/heads/issue-1"), self.head)
+
+    def stop_at_remote_branch(self) -> None:
+        self.f.settings(branch_delete_403=True)
+        self.assert_incomplete(self.merge(expected=3), "remote branch")
+        self.f.settings(branch_delete_403=False)
+
+    def test_record_keeps_premerge_identities_until_cleanup_finishes(
+        self,
+    ) -> None:
+        f = self.f
+        f.settings(branch_delete_403=True)
+        self.assert_incomplete(self.merge(expected=3), "remote branch")
+        self.assertEqual(json.loads(self.record.read_text()), {
+            "schema_version": 1, "common": str(f.repo / ".git"), "pr": 1,
+            "head": self.head, "head_branch": "issue-1",
+            "base_branch": "main", "merge_method": "merge",
+            "moved_base": False, "issue": 1,
+        })
+        refused = self.merge(expected=4)
+        self.assertIn("PR is not open", refused["error"])
+        self.assertIn(self.COMMAND, refused["error"])
+        f.settings(branch_delete_403=False)
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["head"], self.head)
+        self.assertEqual(result["merge_commit"],
+                         f.read_model()["prs"]["1"]["merge_commit_sha"])
+        self.assertEqual(result["fast_forward"]["result"], "up to date")
+        self.assert_finished(result)
+        self.assertNotIn("pr cleanup", self.merge(expected=4)["error"])
+
+    def test_resumes_after_untracked_file_blocked_the_worktree(self) -> None:
+        f = self.f
+        (f.worktree / "untracked.txt").write_text("retain")
+        self.assert_incomplete(
+            self.merge(expected=3), "implementation worktree")
+        (f.worktree / "untracked.txt").unlink()
+        result = self.cleanup()
+        self.assertEqual(
+            [s["detail"] for s in result["cleanup"][:5]],
+            [str(f.worktree), "confirmed absent: issue-1", "already absent",
+             str(f.worktree), "issue-1"],
+        )
+        self.assert_finished(result)
+
+    def test_resumes_after_the_ownership_record_was_removed(self) -> None:
+        """The triage probe: a PR scratch symlink after branch removal."""
+        f = self.f
+        root = f.repo / ".agent-squad/review-scratch"
+        scratch, issue_scratch = root / "pr1", root / "issue-1"
+        issue_scratch.mkdir(parents=True)
+        (issue_scratch / "report.md").write_text("draft")
+        target = f.root / "foreign-scratch"
+        target.mkdir()
+        scratch.symlink_to(target, target_is_directory=True)
+        self.assert_incomplete(self.merge(expected=3), "scratch directory")
+        self.assertFalse(f.worktree.exists())
+        self.assertEqual(f.git("branch", "--list", "issue-1"), "")
+        self.assertTrue(issue_scratch.exists())
+        scratch.unlink()
+        result = self.cleanup()
+        self.assertEqual([s["detail"] for s in result["cleanup"]], [
+            "already removed", "confirmed absent: issue-1",
+            "already absent", "already absent", "already absent",
+            str(scratch), str(issue_scratch),
+        ])
+        self.assertTrue(target.exists())
+        self.assert_finished(result)
+
+    def test_resumes_after_herdr_refused_the_reviewer_cleanup(self) -> None:
+        f = self.f
+        review = f.cli(
+            "review-worktree", "create", "--pr", "1", "--head", self.head)
+        f.herdr_settings(snapshot_failure=True)
+        self.assert_incomplete(self.merge(expected=3), "review worktree")
+        self.assertTrue(Path(review["path"]).exists())
+        f.herdr_settings(snapshot_failure=False)
+        result = self.cleanup()
+        self.assertEqual(result["cleanup"][5]["step"], "review worktree")
+        self.assertFalse(Path(review["path"]).exists())
+        self.assert_finished(result)
+
+    def test_resumes_after_the_merge_answer_was_lost(self) -> None:
+        f = self.f
+        f.settings(merge_response_lost="after")
+        result = self.merge(expected=1)
+        self.assertIsNone(result["merged"])
+        self.assertEqual(result["cleanup_command"], self.COMMAND)
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertTrue(f.read_model()["prs"]["1"]["merged"])
+        self.assertTrue(f.worktree.exists())
+        self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["fast_forward"]["result"], "fast-forwarded")
+        self.assertEqual(result["fast_forward"]["to"], result["merge_commit"])
+        self.assert_finished(result)
+
+    def test_resumes_after_the_fetch_failed(self) -> None:
+        f = self.f
+
+        def fail_fetch(root, *arguments):
+            if arguments[:1] == ("fetch",):
+                raise AgentSquadError("fetch failed")
+            return git_output(root, *arguments)
+
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch("agent_squad.merging.git_output",
+                       side_effect=fail_fetch):
+                result = merge_pr(
+                    repository, GitHub(repository, "implementer"), 1
+                )
+        self.assertEqual(result["exit_code"], 1)
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["integration"], "fetch failed")
+        self.assertEqual(result["cleanup"], [])
+        self.assertEqual(result["cleanup_command"], self.COMMAND)
+        self.assertTrue(self.record.exists())
+        self.assertTrue(f.worktree.exists())
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["fast_forward"]["result"], "fast-forwarded")
+        self.assert_finished(result)
+
+    def test_missing_record_refuses_without_changes(self) -> None:
+        worktrees = self.f.git("worktree", "list", "--porcelain")
+        writes = len(self.writes())
+        result = self.cleanup(expected=4)
+        self.assertIn("only finishes a merge started by pr merge",
+                      result["error"])
+        self.assert_unchanged(worktrees, writes)
+        self.assertFalse(self.f.read_model()["prs"]["1"]["merged"])
+
+    def test_open_pr_refuses_and_a_later_merge_replaces_the_record(
+        self,
+    ) -> None:
+        f = self.f
+        f.settings(merge_response_lost="before")
+        result = self.merge(expected=1)
+        self.assertIsNone(result["merged"])
+        self.assertEqual(result["cleanup_command"], self.COMMAND)
+        stale = self.record.read_text()
+        worktrees = f.git("worktree", "list", "--porcelain")
+        writes = len(self.writes())
+        refused = self.cleanup(expected=4)
+        self.assertIn("PR #1 is not merged; merge record kept",
+                      refused["error"])
+        self.assertEqual(self.record.read_text(), stale)
+        self.assert_unchanged(worktrees, writes)
+        f.settings(merge_response_lost=None)
+        self.assertEqual(self.merge()["merge_record"]["result"], "deleted")
+        self.assertFalse(self.record.exists())
+
+    def test_failed_integration_retains_resources_and_record(self) -> None:
+        f = self.f
+        MergeTests.method(self, "squash")
+        f.settings(wrong_merge_tree=True)
+        result = self.merge(expected=1)
+        self.assertIn("tree differs", result["integration"])
+        self.assertEqual(result["cleanup_command"], self.COMMAND)
+        worktrees = f.git("worktree", "list", "--porcelain")
+        writes = len(self.writes())
+        result = self.cleanup(expected=1)
+        self.assertIn("tree differs", result["integration"])
+        self.assertEqual(result["cleanup"], [])
+        self.assertTrue(result["resources_retained"])
+        self.assertEqual(result["fast_forward"]["result"], "skipped")
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertTrue(self.record.exists())
+        self.assert_unchanged(worktrees, writes)
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+
+    def test_resumed_run_retains_a_moved_tracking_ref(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        f.git("update-ref", "refs/remotes/origin/issue-1", f.base)
+        self.assert_incomplete(self.cleanup(expected=3),
+                               "remote-tracking ref")
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), f.base)
+        self.assertTrue(f.worktree.exists())
+
+    def test_resumed_run_retains_a_moved_local_branch(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        f.git("worktree", "remove", str(f.worktree))
+        f.git("branch", "-f", "issue-1", f.base)
+        self.assert_incomplete(self.cleanup(expected=3), "local branch")
+        self.assertEqual(f.git("rev-parse", "refs/heads/issue-1"), f.base)
+
+    def test_resumed_run_retains_an_unowned_implementation_worktree(
+        self,
+    ) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        f.git("worktree", "remove", str(f.worktree))
+        unowned = f.root / "unowned"
+        f.git("worktree", "add", str(unowned), "issue-1")
+        result = self.cleanup(expected=3)
+        self.assert_incomplete(result, "implementation ownership")
+        self.assertEqual(len(result["cleanup"]), 1)
+        self.assertTrue(unowned.exists())
+        self.assertEqual(f.git("rev-parse", "refs/heads/issue-1"), self.head)
+
+    def test_resumed_run_retains_an_unowned_review_worktree(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        path = f.worktree.parent / f"reviewer-pr1-{self.head[:7]}"
+        f.git("worktree", "add", "--detach", str(path), self.head)
+        self.assert_incomplete(self.cleanup(expected=3), "review worktree")
+        self.assertTrue(path.exists())
+
+    def test_resumed_run_retains_a_scratch_symlink(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        scratch = f.repo / ".agent-squad/review-scratch/pr1"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        target = f.root / "foreign-scratch"
+        target.mkdir()
+        (target / "keep").write_text("retained")
+        scratch.symlink_to(target, target_is_directory=True)
+        self.assert_incomplete(self.cleanup(expected=3), "scratch directory")
+        self.assertTrue(scratch.is_symlink())
+        self.assertEqual((target / "keep").read_text(), "retained")
+
+    def test_unusable_record_is_refused_before_any_forge_call(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        original = json.loads(self.record.read_text())
+        foreign = f.root / "foreign-record.json"
+        foreign.write_text(json.dumps(original))
+        variants = {
+            "not JSON": "{",
+            "not an object": "[]",
+            "missing field": {
+                k: v for k, v in original.items() if k != "issue"},
+            "extra field": dict(original, extra=1),
+        }
+        for key, value in (
+            ("schema_version", 2), ("schema_version", True),
+            ("common", str(f.origin)), ("common", None), ("pr", 2),
+            ("pr", True),
+            ("head", self.head[:7]), ("head", self.head.upper()),
+            ("head_branch", ""), ("head_branch", "a..b"),
+            ("base_branch", "main.lock"), ("merge_method", "rebase"),
+            ("moved_base", "false"), ("issue", 0), ("issue", True),
+        ):
+            variants[f"{key}={value!r}"] = dict(original, **{key: value})
+        worktrees = f.git("worktree", "list", "--porcelain")
+        for name, value in [("symlink", None), *variants.items()]:
+            with self.subTest(record=name):
+                self.record.unlink()
+                if value is None:
+                    self.record.symlink_to(foreign)
+                else:
+                    self.record.write_text(
+                        value if isinstance(value, str)
+                        else json.dumps(value))
+                before = os.readlink(self.record) if value is None else (
+                    self.record.read_text())
+                calls = len(f.read_model()["calls"])
+                result = self.cleanup(expected=1)
+                self.assertIn("pr cleanup refused", result["error"])
+                self.assertEqual(len(f.read_model()["calls"]), calls)
+                self.assertEqual(
+                    f.git("worktree", "list", "--porcelain"), worktrees)
+                self.assertEqual(
+                    os.readlink(self.record) if value is None
+                    else self.record.read_text(), before)
+        self.assertEqual(json.loads(foreign.read_text()), original)
+        self.record.unlink()
+        self.record.write_text(json.dumps(original))
+        self.assert_finished(self.cleanup())
+
+    def test_refused_merge_and_complete_cleanup_leave_no_record(self) -> None:
+        f = self.f
+        f.settings(merge_refusal="Required human approval is missing")
+        result = self.merge(expected=1)
+        self.assertIs(result["merged"], False)
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertIsNone(result["cleanup_command"])
+        self.assertFalse(self.record.exists())
+        f.settings(merge_refusal=None)
+        self.assert_finished(self.merge())
+
+    def test_unwritable_record_sends_no_merge_request(self) -> None:
+        f = self.f
+        self.record.mkdir()
+        result = self.merge(expected=1)
+        self.assertIs(result["merged"], False)
+        self.assertIn("no merge request sent", result["error"])
+        self.assertEqual(result["merge_record"]["result"], "not written")
+        self.assertEqual(self.merge_calls(), 0)
+        self.assertFalse(f.read_model()["prs"]["1"]["merged"])
+        self.assertEqual(list(self.record.parent.glob(
+            f".{self.record.name}.*")), [])
+        self.assertTrue(f.worktree.exists())
+
+    def test_merge_replaces_an_earlier_record_without_following_it(
+        self,
+    ) -> None:
+        f = self.f
+        foreign = f.root / "foreign-record.json"
+        foreign.write_text("keep")
+        self.record.symlink_to(foreign)
+        self.assert_finished(self.merge())
+        self.assertEqual(foreign.read_text(), "keep")

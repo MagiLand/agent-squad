@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import tempfile
 from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
+from .conventions import SHA
 from .forge import ForgeError, Forge
 from .herdr import HerdrClient, HerdrError
 from .initialization import (
@@ -25,6 +28,10 @@ from .initialization import (
 from .reviewer import ReviewWorktree, close_reviewer
 
 IMPLEMENTATION_OWNER = "agent-squad-implementation.json"
+MERGE_RECORD_FIELDS = frozenset({
+    "schema_version", "common", "pr", "head", "head_branch", "base_branch",
+    "merge_method", "moved_base", "issue",
+})
 
 FastForwardResult = TypedDict("FastForwardResult", {
     "result": Literal["fast-forwarded", "up to date", "skipped", "refused"],
@@ -143,6 +150,105 @@ def owned_implementation(
     return path, issue
 
 
+def cleanup_command(pr: int) -> str:
+    return f"agent-squad pr cleanup --as implementer --pr {pr}"
+
+
+def merge_record_path(repository: Repository, pr: int) -> Path:
+    # The common Git directory outlives every worktree and is never committed.
+    return repository.common / f"agent-squad-merge-pr{pr}.json"
+
+
+def write_merge_record(
+    repository: Repository, pr: int, target: dict, method: str, moved: bool,
+) -> dict:
+    """Save the identities a later pr cleanup needs (#121).
+
+    Only a validated ownership record supplies the issue number, and the
+    implementation worktree that holds it is removed during cleanup.
+    """
+    _, issue = owned_implementation(
+        repository, pr, target["head_branch"], target["head"]
+    )
+    record = {
+        "schema_version": 1,
+        "common": str(repository.common),
+        "pr": pr,
+        "head": target["head"],
+        "head_branch": target["head_branch"],
+        "base_branch": target["base_branch"],
+        "merge_method": method,
+        "moved_base": moved,
+        "issue": issue,
+    }
+    path = merge_record_path(repository, pr)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=repository.common, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+        # Replaces an earlier record, or a symlink, without following it.
+        os.replace(temporary, path)
+    except OSError:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return record
+
+
+def load_merge_record(repository: Repository, pr: int) -> dict:
+    path = merge_record_path(repository, pr)
+    if path.is_symlink():
+        raise AgentSquadError(
+            f"pr cleanup refused: merge record is a symlink: {path}"
+        )
+    if not path.exists():
+        raise GateError(
+            f"pr cleanup refused: no merge record for PR #{pr}; pr cleanup"
+            " only finishes a merge started by pr merge"
+        )
+    try:
+        record = decode_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise AgentSquadError(
+            f"pr cleanup refused: unreadable merge record: {path}: {error}"
+        ) from None
+    if not (
+        isinstance(record, dict)
+        and set(record) == MERGE_RECORD_FIELDS
+        and type(record["schema_version"]) is int
+        and record["schema_version"] == 1
+        and type(record["pr"]) is int
+        and isinstance(record["head"], str)
+        and re.fullmatch(SHA, record["head"]) is not None
+        and record["merge_method"] in ("merge", "squash")
+        and type(record["moved_base"]) is bool
+        and type(record["issue"]) is int
+        and record["issue"] >= 1
+        and all(
+            isinstance(record[key], str) and record[key]
+            and run_git(
+                repository.primary, "check-ref-format",
+                f"refs/heads/{record[key]}",
+            ).returncode == 0
+            for key in ("head_branch", "base_branch")
+        )
+    ):
+        raise AgentSquadError(
+            f"pr cleanup refused: malformed merge record: {path}"
+        )
+    if record["common"] != str(repository.common):
+        raise AgentSquadError(
+            "pr cleanup refused: merge record names another repository:"
+            f" {record['common']}"
+        )
+    if record["pr"] != pr:
+        raise AgentSquadError(
+            f"pr cleanup refused: merge record names PR #{record['pr']}"
+        )
+    return record
+
+
 def check_merge_gate(
     state: dict, *, accept_moved_base: bool, accept_merge_hold: bool = False,
 ) -> bool:
@@ -193,9 +299,15 @@ def verify_integration(
 
 
 def cleanup_merge(
-    repository: Repository, pr: int, head: str, branch: str, forge: Forge
+    repository: Repository, pr: int, head: str, branch: str, issue: int,
+    forge: Forge,
 ) -> list[dict]:
-    """Stop on a failed step; preserve unrelated or replaced resources."""
+    """Stop on a failed step; preserve unrelated or replaced resources.
+
+    The identities come from the merge record, so a repeated run finishes
+    after an earlier one removed the implementation worktree and its
+    ownership record. A resource that is already gone counts as done.
+    """
     steps: list[dict] = []
 
     def step(name: str, operation: Callable[[], object]) -> bool:
@@ -207,9 +319,24 @@ def cleanup_merge(
         steps.append({"step": name, "ok": True, "detail": detail})
         return True
 
+    def registered() -> bool:
+        return any(
+            w.branch == f"refs/heads/{branch}"
+            for w in list_worktrees(repository.primary)
+        )
+
+    def owned() -> Path:
+        path, owner = owned_implementation(repository, pr, branch, head)
+        if owner != issue:
+            raise RetainedError(
+                f"implementation ownership names issue #{owner}, the merge"
+                f" record #{issue}: {path}"
+            )
+        return path
+
     # Check ownership before any deletion, then recheck at removal time.
-    if not step("implementation ownership", lambda: str(
-        owned_implementation(repository, pr, branch, head)[0]
+    if not step("implementation ownership", lambda: (
+        str(owned()) if registered() else "already removed"
     )):
         return steps
 
@@ -265,12 +392,10 @@ def cleanup_merge(
         except HerdrError:
             pass
 
-    issue: int
-
     def remove_implementation() -> str:
-        nonlocal issue
-        # Keep the validated issue before removal deletes the ownership record.
-        path, issue = owned_implementation(repository, pr, branch, head)
+        if not registered():
+            return "already absent"
+        path = owned()
         # Preserve uncommitted implementation work, including untracked data.
         git_output(repository.primary, "worktree", "remove", str(path))
         if path.exists() or any(
@@ -284,20 +409,27 @@ def cleanup_merge(
 
     def remove_branch() -> str:
         ref = f"refs/heads/{branch}"
-        # Compare-and-delete preserves a branch that advanced during cleanup,
-        # and works for squash, whose approved head is not a merge ancestor.
-        git_output(repository.primary, "update-ref", "-d", ref, head)
-        if not run_git(
+        present = run_git(
             repository.primary, "show-ref", "--verify", "--quiet", ref
-        ).returncode:
-            raise RetainedError(f"local branch remains: {branch}")
+        )
+        if present.returncode not in (0, 1):
+            raise RetainedError(present.stderr.strip())
+        if present.returncode == 0:
+            # Compare-and-delete preserves a branch that advanced during
+            # cleanup, and works for squash, whose approved head is not a
+            # merge ancestor. Git refuses it for an absent ref.
+            git_output(repository.primary, "update-ref", "-d", ref, head)
+            if not run_git(
+                repository.primary, "show-ref", "--verify", "--quiet", ref
+            ).returncode:
+                raise RetainedError(f"local branch remains: {branch}")
         removed = run_git(
             repository.primary, "config", "--remove-section",
             f"branch.{branch}",
         )
         if removed.returncode and "no such section" not in removed.stderr:
             raise RetainedError(removed.stderr.strip())
-        return branch
+        return branch if present.returncode == 0 else "already absent"
 
     if not step("local branch", remove_branch):
         return steps
@@ -405,6 +537,60 @@ def fast_forward_primary(
     return result
 
 
+def complete_merge(
+    repository: Repository, forge: Forge, record: dict,
+    merge_commit: str | None, result: dict,
+) -> dict:
+    """Run steps 3-5 of §7.10 from the merge record, then delete it."""
+    pr = record["pr"]
+    base = record["base_branch"]
+    try:
+        if merge_commit is None:
+            raise AgentSquadError("the merged PR reports no merge commit")
+        git_output(
+            repository.primary, "fetch", "origin",
+            f"+refs/heads/{base}:refs/remotes/origin/{base}",
+        )
+        tip = git_output(
+            repository.primary, "rev-parse", f"refs/remotes/origin/{base}",
+        )
+        result["integration"] = verify_integration(
+            repository.primary, record["merge_method"], record["head"],
+            merge_commit, tip, moved_base=record["moved_base"],
+        )
+    except (AgentSquadError, OSError, ValueError) as error:
+        return {
+            **result, "exit_code": 1, "integration": str(error),
+            "cleanup": [], "resources_retained": True,
+            "cleanup_command": cleanup_command(pr),
+        }
+    try:
+        result["cleanup"] = cleanup_merge(
+            repository, pr, record["head"], record["head_branch"],
+            record["issue"], forge,
+        )
+    except (AgentSquadError, OSError, ValueError) as error:
+        result["cleanup"] = [{
+            "step": "cleanup inventory", "ok": False, "detail": str(error),
+        }]
+    result["fast_forward"] = fast_forward_primary(
+        repository.primary, repository.configuration.base_branch, tip,
+        verified_branch=base,
+    )
+    complete = all(s["ok"] for s in result["cleanup"])
+    if complete:
+        try:
+            merge_record_path(repository, pr).unlink(missing_ok=True)
+            result["merge_record"]["result"] = "deleted"
+        except OSError as error:
+            complete = False
+            result["merge_record"]["reason"] = str(error)
+    result["exit_code"] = 0 if complete else 3
+    if not complete:
+        result["cleanup_command"] = cleanup_command(pr)
+    return result
+
+
 def merge_pr(
     repository: Repository, forge: Forge, pr: int,
     *, accept_moved_base: bool = False, accept_merge_hold: bool = False,
@@ -417,10 +603,19 @@ def merge_pr(
     # Re-read authority after the potentially slow rules lookup.
     snapshot = forge.snapshot(pr)
     state = state_for(repository, snapshot)
-    moved = check_merge_gate(
-        state, accept_moved_base=accept_moved_base,
-        accept_merge_hold=accept_merge_hold,
-    )
+    try:
+        moved = check_merge_gate(
+            state, accept_moved_base=accept_moved_base,
+            accept_merge_hold=accept_merge_hold,
+        )
+    except GateError as error:
+        path = merge_record_path(repository, pr)
+        if state["pr"]["merged"] and (path.exists() or path.is_symlink()):
+            raise GateError(
+                f"{error}; to finish the merge pr merge started, run"
+                f" {cleanup_command(pr)}"
+            ) from None
+        raise
     target = state["target"]
     method = repository.configuration.merge_method
     result = {
@@ -432,13 +627,38 @@ def merge_pr(
             "reason": "merge integration has not been verified",
             "command": None,
         },
+        "merge_record": {
+            "path": str(merge_record_path(repository, pr)),
+            "result": "not written", "reason": None,
+        },
+        "cleanup_command": None,
     }
+    try:
+        record = write_merge_record(repository, pr, target, method, moved)
+    except (AgentSquadError, OSError, ValueError) as error:
+        result["merge_record"]["reason"] = str(error)
+        return {
+            **result, "exit_code": 1, "merged": False,
+            "error": (
+                f"no merge request sent: merge record not written: {error}"
+            ),
+            "resources_retained": True,
+        }
+    result["merge_record"]["result"] = "kept"
     try:
         merged = forge.merge(pr, target["head"], method)
     except AgentSquadError as error:
         refused = isinstance(error, ForgeError) and error.status in (
             400, 401, 403, 404, 405, 409, 422,
         )
+        if refused:
+            try:
+                merge_record_path(repository, pr).unlink(missing_ok=True)
+                result["merge_record"]["result"] = "deleted"
+            except OSError as unlink_error:
+                result["merge_record"]["reason"] = str(unlink_error)
+        else:
+            result["cleanup_command"] = cleanup_command(pr)
         return {
             **result, "exit_code": 1,
             "merged": False if refused else None, "error": str(error),
@@ -446,38 +666,33 @@ def merge_pr(
         }
     result.update(
         merged=True, merge_commit=merged["sha"], message=merged["message"])
-    try:
-        git_output(
-            repository.primary, "fetch", "origin",
-            f"+refs/heads/{target['base_branch']}:"
-            f"refs/remotes/origin/{target['base_branch']}",
+    return complete_merge(repository, forge, record, merged["sha"], result)
+
+
+def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
+    """Finish a merge that pr merge started; never send a merge request."""
+    record = load_merge_record(repository, pr)
+    merged = forge.pr(pr)
+    if not merged.merged:
+        raise GateError(
+            f"pr cleanup refused: PR #{pr} is not merged; merge record kept:"
+            f" {merge_record_path(repository, pr)}"
         )
-        tip = git_output(
-            repository.primary, "rev-parse",
-            f"refs/remotes/origin/{target['base_branch']}",
-        )
-        result["integration"] = verify_integration(
-            repository.primary, method, target["head"], merged["sha"], tip,
-            moved_base=moved,
-        )
-    except (AgentSquadError, OSError, ValueError) as error:
-        return {
-            **result, "exit_code": 1, "integration": str(error),
-            "cleanup": [], "resources_retained": True,
-        }
-    try:
-        result["cleanup"] = cleanup_merge(
-            repository, pr, target["head"], target["head_branch"], forge
-        )
-    except (AgentSquadError, OSError, ValueError) as error:
-        result["cleanup"] = [{
-            "step": "cleanup inventory", "ok": False, "detail": str(error),
-        }]
-    result["exit_code"] = (
-        0 if all(s["ok"] for s in result["cleanup"]) else 3
-    )
-    result["fast_forward"] = fast_forward_primary(
-        repository.primary, repository.configuration.base_branch, tip,
-        verified_branch=target["base_branch"],
-    )
-    return result
+    # Only the merge commit comes from the forge: a merged Forgejo PR can
+    # report a synthetic head branch and an older head (E9).
+    return complete_merge(repository, forge, record, merged.merge_commit, {
+        "pr": pr, "head": record["head"],
+        "merge_method": record["merge_method"],
+        "moved_base": record["moved_base"], "merged": True,
+        "merge_commit": merged.merge_commit,
+        "fast_forward": {
+            "result": "skipped", "from": None, "to": None,
+            "reason": "merge integration has not been verified",
+            "command": None,
+        },
+        "merge_record": {
+            "path": str(merge_record_path(repository, pr)),
+            "result": "kept", "reason": None,
+        },
+        "cleanup_command": None,
+    })
