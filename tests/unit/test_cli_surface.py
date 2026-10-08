@@ -72,6 +72,25 @@ class CliSurfaceTests(unittest.TestCase):
         self.assertEqual(checked, 26)
 
     def test_release_and_protocol_versions(self) -> None:
+        # The one deliberate pin; a release edits it with __version__.
         self.assertEqual(__version__, "0.6.1")
         self.assertEqual(PROTOCOL_VERSION, "0.5.0")
         self.assertEqual(TAG, f"AGENT_SQUAD/{PROTOCOL_VERSION}")
+
+    def test_documents_state_package_version(self) -> None:
+        # Each pattern must match exactly once, so a reworded sentence
+        # fails instead of passing silently.
+        statements = [
+            ("README.md", r"package\s+version\s+is\s+`([^`]+)`"),
+            ("README.md", r"The\s+version\s+is\s+`([^`]+)`"),
+            ("docs/workflow-verification.md",
+             r"require\s+package\s+metadata\s+`([^`]+)`"),
+            ("docs/agent-squad-spec.md",
+             r"(?m)^- \*\*Package version:\*\* (\S+)$"),
+            ("docs/agent-squad-spec.md",
+             r"baseline\s+for\s+package\s+version\s+`([^`]+)`"),
+        ]
+        for path, pattern in statements:
+            text = (PROJECT_ROOT / path).read_text(encoding="utf-8")
+            with self.subTest(path=path, pattern=pattern):
+                self.assertEqual(re.findall(pattern, text), [__version__])

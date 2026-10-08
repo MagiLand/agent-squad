@@ -13,7 +13,11 @@ import zipfile
 from email.parser import BytesParser
 from importlib.util import find_spec
 
-from tests._support import PROJECT_ROOT
+from tests._support import PROJECT_ROOT, add_src_to_path
+
+add_src_to_path()
+
+from agent_squad import __version__  # noqa: E402
 
 
 class PackagingTests(unittest.TestCase):
@@ -44,13 +48,13 @@ class PackagingTests(unittest.TestCase):
                 metadata = next(name for name in built.namelist()
                                 if name.endswith(".dist-info/METADATA"))
                 self.assertEqual(BytesParser().parsebytes(
-                    built.read(metadata))["Version"], "0.6.1")
+                    built.read(metadata))["Version"], __version__)
                 package_info = next(m for m in archive.getmembers()
                                     if m.name.count("/") == 1
                                     and m.name.endswith("/PKG-INFO"))
                 self.assertEqual(BytesParser().parsebytes(
                     archive.extractfile(package_info).read())["Version"],
-                    "0.6.1")
+                    __version__)
                 for name in ("squad-implementer", "squad-reviewer"):
                     path = f"agent_squad/skills/{name}/SKILL.md"
                     expected = (PROJECT_ROOT / "src" / path).read_bytes()
