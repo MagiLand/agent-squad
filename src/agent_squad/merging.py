@@ -322,13 +322,50 @@ def cleanup_merge(
     root = repository.resolve_root(repository.configuration.worktree_root)
     implementation = root / f"issue-{issue}"
 
+    def surviving_owner() -> Path | None:
+        """Find an ownership record for this PR that outlived its checks.
+
+        The record stays in the worktree's Git directory when the worktree
+        is moved or its HEAD changes. A record that cannot be read, or a
+        symlink, may be this PR's and counts too.
+        """
+        admin = repository.common / "worktrees"
+        if not admin.is_dir():
+            return None
+        for directory in sorted(admin.iterdir()):
+            record = directory / IMPLEMENTATION_OWNER
+            if not (record.exists() or record.is_symlink()):
+                continue
+            try:
+                owner = (
+                    None if record.is_symlink()
+                    else decode_json(record.read_text())
+                )
+            except (OSError, ValueError):
+                owner = None
+            if not isinstance(owner, dict) or owner.get("pr") == pr:
+                return record
+        return None
+
     def registered() -> bool:
-        # A worktree at the issue path that was detached or switched to
-        # another branch is still present and must prove its ownership.
-        return any(
+        """Whether the implementation worktree may still exist.
+
+        It is present while a registered worktree has the recorded branch
+        or sits at the issue path, and must then prove its ownership. A
+        surviving ownership record for the PR refuses the step outright.
+        """
+        if any(
             w.branch == f"refs/heads/{branch}" or w.root == implementation
             for w in list_worktrees(repository.primary)
-        )
+        ):
+            return True
+        survivor = surviving_owner()
+        if survivor is not None:
+            raise RetainedError(
+                "implementation worktree moved or changed; its ownership"
+                f" record remains: {survivor}"
+            )
+        return False
 
     def owned() -> Path:
         path, owner = owned_implementation(repository, pr, branch, head)

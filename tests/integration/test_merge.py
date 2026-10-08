@@ -1410,7 +1410,79 @@ class ResumedCleanupTests(unittest.TestCase):
                     f.git("rev-parse", "refs/heads/issue-1"), self.head)
                 self.assertEqual(len(self.writes()), writes)
                 f.git("switch", "issue-1", cwd=f.worktree)
+        # The issue path alone still identifies a worktree without a record.
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        record = admin / "agent-squad-implementation.json"
+        saved = record.read_text()
+        record.unlink()
+        f.git("checkout", "--detach", cwd=f.worktree)
+        self.assert_incomplete(self.cleanup(expected=3),
+                               "implementation ownership")
+        self.assertTrue(f.worktree.exists())
+        self.assertEqual(f.git("rev-parse", "refs/heads/issue-1"), self.head)
+        f.git("switch", "issue-1", cwd=f.worktree)
+        record.write_text(saved)
         self.assert_finished(self.cleanup())
+
+    def test_resumed_run_retains_a_moved_worktree(self) -> None:
+        """PR #134 REV-1: the ownership record survives a move."""
+        f = self.f
+        self.stop_at_remote_branch()
+        issue_scratch = f.repo / ".agent-squad/review-scratch/issue-1"
+        issue_scratch.mkdir(parents=True)
+        writes = len(self.writes())
+        moved = f.root / "moved"
+        f.git("worktree", "move", str(f.worktree), str(moved))
+        for args in (("checkout", "--detach"), ("switch", "-c", "other")):
+            with self.subTest(args=args):
+                f.git(*args, cwd=moved)
+                result = self.cleanup(expected=3)
+                self.assert_incomplete(result, "implementation ownership")
+                self.assertEqual(len(result["cleanup"]), 1)
+                self.assertIn("ownership record remains",
+                              result["cleanup"][0]["detail"])
+                self.assertIn(str(moved), f.git(
+                    "worktree", "list", "--porcelain"))
+                self.assertEqual(
+                    f.git("rev-parse", "refs/heads/issue-1"), self.head)
+                self.assertTrue(issue_scratch.exists())
+                self.assertEqual(len(self.writes()), writes)
+                f.git("switch", "issue-1", cwd=moved)
+        f.git("worktree", "move", str(moved), str(f.worktree))
+        self.assert_finished(self.cleanup())
+
+    def test_only_another_prs_ownership_record_shows_removal(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        f.git("worktree", "remove", str(f.worktree))
+        other = f.root / "other"
+        f.git("worktree", "add", "--detach", str(other), f.base)
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=other))
+        record = admin / "agent-squad-implementation.json"
+        foreign = f.root / "foreign.json"
+        foreign.write_text(json.dumps({"pr": 7}))
+        for name, write in (
+            ("unreadable", lambda: record.write_text("{")),
+            ("not an object", lambda: record.write_text("[]")),
+            ("this PR", lambda: record.write_text(json.dumps({"pr": 1}))),
+            ("symlink", lambda: record.symlink_to(foreign)),
+            ("dangling symlink", lambda: record.symlink_to(f.root / "x")),
+        ):
+            with self.subTest(record=name):
+                record.unlink(missing_ok=True)
+                write()
+                result = self.cleanup(expected=3)
+                self.assert_incomplete(result, "implementation ownership")
+                self.assertIn(str(record), result["cleanup"][0]["detail"])
+        record.unlink()
+        record.write_text(json.dumps({"pr": 7}))
+        result = self.cleanup()
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["cleanup"][0]["detail"], "already removed")
+        self.assertFalse(self.record.exists())
+        self.assertEqual(f.git("branch", "--list", "issue-1"), "")
+        self.assertEqual(record.read_text(), json.dumps({"pr": 7}))
+        self.assertTrue(other.exists())
 
     def test_resumed_run_retains_an_unowned_review_worktree(self) -> None:
         f = self.f

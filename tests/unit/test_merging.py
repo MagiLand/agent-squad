@@ -20,6 +20,7 @@ def cleanup_repository():
 
     return SimpleNamespace(
         primary=Path("/primary"),
+        common=Path("/primary/.git"),
         configuration=SimpleNamespace(worktree_root="worktrees"),
         resolve_root=lambda value: Path("/primary") / value,
     )
