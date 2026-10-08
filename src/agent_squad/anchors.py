@@ -23,7 +23,7 @@ def unquote_path(value: str) -> str:
             index += 1
             char = value[index]
             if char in "01234567":
-                raw.append(int(value[index : index + 3], 8))
+                raw.append(int(value[index:index + 3], 8))
                 index += 2
             else:
                 raw.extend(

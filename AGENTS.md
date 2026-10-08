@@ -10,8 +10,9 @@ Implementation should follow the specification's focused increments. Production 
 
 Preserve these repository-level commands:
 
-- `make venv` — create `.venv` with Python 3.11 and setuptools using `uv`; the other targets then use its interpreter.
+- `make venv` — create `.venv` with Python 3.11, setuptools, and the pinned pycodestyle using `uv`; the other targets then use its interpreter.
 - `make test` — run the deterministic automated suite.
+- `make lint` — check PEP 8 with pycodestyle.
 - `make smoke` — exercise the self-contained disposable-repository workflow.
 - `make doctor` — check local Git, filesystem, and Herdr prerequisites.
 - `python -m unittest discover -s tests` — run the standard-library test suite directly.
@@ -20,7 +21,7 @@ Never report a command as passing until its target exists and the command has ru
 
 ## Coding Style & Naming Conventions
 
-Target Python 3.11 or later and use four-space indentation. Follow `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_SNAKE_CASE` for constants. Add type annotations to public interfaces and protocol-bearing data. Prefer `pathlib`, typed models, and the standard library. Invoke subprocesses with argument arrays and `shell=False`. No formatter or linter is configured yet; keep changes PEP 8 compliant and avoid introducing runtime dependencies without justification.
+Target Python 3.11 or later. Add type annotations to public interfaces and protocol-bearing data. Prefer `pathlib`, typed models, and the standard library. Invoke subprocesses with argument arrays and `shell=False`. `make lint` checks PEP 8 with pycodestyle, and CI runs it on every pull request. Avoid introducing runtime dependencies without justification.
 
 ## Testing Guidelines
 

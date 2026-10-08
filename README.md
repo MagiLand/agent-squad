@@ -358,14 +358,17 @@ no record; `doctor` reports its leftover resources.
 ```bash
 make venv
 make test
+make lint
 make smoke
 make doctor
 ```
 
 `make venv` needs [`uv`](https://docs.astral.sh/uv/). It creates `.venv` with
 Python 3.11, which CI's pull-request jobs use, and installs setuptools so the
-packaging test runs instead of being skipped. When `.venv` exists, the other
-targets use its interpreter; set `PYTHON` to choose another one.
+packaging test runs instead of being skipped. It also installs the
+pycodestyle version that CI pins for `make lint`, which checks PEP 8. When
+`.venv` exists, the other targets use its interpreter; set `PYTHON` to choose
+another one.
 
 The automated suite runs the twelve-step smoke scenario twice, on fake GitHub
 and on a loopback fake Forgejo server, each with two accounts. Both use

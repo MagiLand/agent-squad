@@ -58,6 +58,16 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install 'setuptools>=77' .
       - run: python scripts/run-test-group rest
+  lint:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'pycodestyle==2.15.0'
+      - run: make lint
   main-only:
     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: ubuntu-26.04

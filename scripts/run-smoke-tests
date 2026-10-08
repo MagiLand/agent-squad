@@ -9,7 +9,7 @@ import sys
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "src"))
-from tests.smoke_workflow import run_smoke
+from tests.smoke_workflow import run_smoke  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--json", action="store_true")

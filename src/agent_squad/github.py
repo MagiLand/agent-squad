@@ -60,7 +60,6 @@ def anchor_payload(anchor: Anchor) -> dict[str, object]:
     return result
 
 
-
 def parse_evidence(value: object, *, review: bool = False) -> Evidence:
     data = object_value(value, "evidence")
     user = object_value(data.get("user"), "evidence.user")

@@ -5,7 +5,7 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 TEST_PATH = $(if $(findstring /,$(PYTHON)),PATH="$(abspath $(dir $(PYTHON))):$$PATH" )
 
 # test stays the first target, so a plain make still runs the suite.
-.PHONY: test smoke doctor venv
+.PHONY: test smoke doctor lint venv
 test:
 	$(TEST_PATH)PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m unittest discover -s tests
 
@@ -15,7 +15,14 @@ smoke:
 doctor:
 	PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m agent_squad doctor
 
+# pycodestyle finds only *.py files in a directory, so the Python scripts
+# without an extension are named explicitly.
+lint:
+	$(PYTHON) -m pycodestyle src tests scripts scripts/measure-cli-processes \
+		scripts/run-smoke-tests scripts/run-test-group tests/fixtures/gh
+
 venv:
 	@command -v uv >/dev/null 2>&1 || { echo "make venv needs uv, which is not on PATH" >&2; exit 1; }
 	uv venv --clear --python 3.11 --seed .venv
-	uv pip install --python .venv/bin/python 'setuptools>=77'
+	uv pip install --python .venv/bin/python 'setuptools>=77' \
+		'pycodestyle==2.15.0'

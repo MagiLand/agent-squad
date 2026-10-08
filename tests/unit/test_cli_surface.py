@@ -8,9 +8,9 @@ from tests._support import PROJECT_ROOT, add_src_to_path
 
 add_src_to_path()
 
-from agent_squad import __version__
-from agent_squad.cli import parser
-from agent_squad.conventions import PROTOCOL_VERSION, TAG
+from agent_squad import __version__  # noqa: E402
+from agent_squad.cli import parser  # noqa: E402
+from agent_squad.conventions import PROTOCOL_VERSION, TAG  # noqa: E402
 
 
 class CliSurfaceTests(unittest.TestCase):

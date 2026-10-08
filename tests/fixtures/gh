@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+from urllib.parse import parse_qs, unquote, urlsplit
 
 model_path = os.environ["FAKE_FORGE_MODEL"]
 with open(model_path) as stream:
@@ -117,7 +118,7 @@ def root_record(pr, body, anchor, review_id=None):
 def paged(values, query):
     size = int(query.get("per_page", ["100"])[0])
     page = int(query.get("page", ["1"])[0])
-    return values[(page - 1) * size : page * size]
+    return values[(page - 1) * size:page * size]
 
 
 if arguments == ["--version"]:
@@ -180,7 +181,7 @@ if endpoint == "graphql":
                 "repository": {
                     "pullRequest": {
                         "reviewThreads": {
-                            "nodes": threads[offset : offset + size],
+                            "nodes": threads[offset:offset + size],
                             "pageInfo": {
                                 "hasNextPage": has_next,
                                 "endCursor": (
@@ -193,7 +194,6 @@ if endpoint == "graphql":
             }
         }
     )
-from urllib.parse import parse_qs, unquote, urlsplit
 
 parsed = urlsplit(endpoint)
 query = parse_qs(parsed.query)
@@ -419,7 +419,8 @@ if parts[5] == "merge":
             git("merge", "--squash", pr["head"]["sha"])
             git("commit", "-m", "Squash fixture PR")
         if settings.get("wrong_merge_tree"):
-            with open(os.path.join(temporary, "unreviewed.txt"), "w") as stream:
+            unreviewed = os.path.join(temporary, "unreviewed.txt")
+            with open(unreviewed, "w") as stream:
                 stream.write("unreviewed\n")
             git("add", "unreviewed.txt")
             git("commit", "--amend", "--no-edit")
