@@ -13,6 +13,11 @@ import unittest
 
 from tests._support import PROJECT_ROOT
 
+WORKFLOW = PROJECT_ROOT / ".github/workflows/test.yml"
+# CI and make venv install this exact version, so a new release cannot
+# fail CI without a commit.
+PYCODESTYLE = "pycodestyle==2.15.0"
+
 
 class CIGroupingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -47,8 +52,41 @@ class CIGroupingTests(unittest.TestCase):
     def test_workflow_runs_each_group_with_the_required_event_policy(
         self,
     ) -> None:
-        workflow = (PROJECT_ROOT / ".github/workflows/test.yml").read_text(
-            encoding="utf-8")
+        self.assert_workflow_layout(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_layout_guard_accepts_lint_and_rejects_other_extra_jobs(
+        self,
+    ) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        lint = re.search(r"(?ms)^  lint:\n.*?(?=^  \S)", workflow)[0]
+        install = f"      - run: python -m pip install '{PYCODESTYLE}'\n"
+        conditional = lint.replace(
+            "    runs-on:", "    if: github.event_name == 'push'\n"
+            "    runs-on:", 1)
+        rejected = {
+            "unknown extra job": workflow + lint.replace(
+                "  lint:", "  format:", 1),
+            "second lint job": workflow + lint,
+            "unpinned install": workflow.replace(
+                install, "      - run: python -m pip install pycodestyle\n"),
+            "other pinned version": workflow.replace(
+                PYCODESTYLE, "pycodestyle==2.14.0"),
+            "no install": workflow.replace(install, ""),
+            "conditional lint job": workflow.replace(lint, conditional),
+            "no make lint": workflow.replace("      - run: make lint\n", ""),
+        }
+        self.assert_workflow_layout(workflow)
+        for label, text in rejected.items():
+            with self.subTest(rejected=label):
+                self.assertNotEqual(text, workflow)
+                with self.assertRaises(AssertionError):
+                    self.assert_workflow_layout(text)
+
+    def test_make_venv_installs_the_ci_pycodestyle_pin(self) -> None:
+        makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn(f"'{PYCODESTYLE}'", makefile.split("\nvenv:\n", 1)[1])
+
+    def assert_workflow_layout(self, workflow: str) -> None:
         # This guard requires explicit jobs, an inline macOS group matrix,
         # and one-line commands,
         # rather than attempting to parse general YAML or GitHub expressions.
@@ -60,44 +98,54 @@ class CIGroupingTests(unittest.TestCase):
             "doctor", "reviewer", "forge-commands", "smoke", "rest",
             "main-only",
         })
-        self.assertEqual(set(jobs), set(self.groups) | {"macos"})
+        self.assertEqual(set(jobs), set(self.groups) | {"macos", "lint"})
         main_condition = (
             "    if: github.event_name == 'push' || "
             "github.event_name == 'schedule'"
         )
         for name, block in jobs.items():
-            with self.subTest(job=name):
-                conditions = re.findall(r"^    if:.*$", block, re.MULTILINE)
+            # No subTest here: it records a failure instead of raising it,
+            # and the rejected layouts in the lint test must raise.
+            conditions = re.findall(r"^    if:.*$", block, re.MULTILINE)
+            self.assertEqual(
+                conditions,
+                [main_condition] if name in {"main-only", "macos"} else [],
+                name,
+            )
+            self.assertIn(
+                "    runs-on: " + (
+                    "macos-latest" if name == "macos" else "ubuntu-26.04"
+                ) + "\n",
+                block, name,
+            )
+            self.assertRegex(block, r"(?m)^    timeout-minutes: [1-9]\d*$",
+                             name)
+            self.assertIn(
+                "          python-version: '" + (
+                    "3.12" if name == "macos" else "3.11"
+                ) + "'\n",
+                block, name,
+            )
+            if name == "lint":
                 self.assertEqual(
-                    conditions,
-                    [main_condition] if name in {"main-only", "macos"}
-                    else [],
+                    re.findall(r"^      - run: (.+)$", block, re.MULTILINE),
+                    [f"python -m pip install '{PYCODESTYLE}'", "make lint"],
+                    name,
                 )
-                groups = re.findall(
-                    r"^      - run: python scripts/run-test-group (.+)$",
-                    block, re.MULTILINE,
-                )
-                self.assertEqual(
-                    groups,
-                    ["${{ matrix.group }}"] if name == "macos" else [name],
-                )
-                self.assertIn(
-                    "    runs-on: " + (
-                        "macos-latest" if name == "macos" else "ubuntu-26.04"
-                    ) + "\n",
-                    block,
-                )
-                self.assertRegex(block, r"(?m)^    timeout-minutes: [1-9]\d*$")
-                self.assertIn(
-                    "          python-version: '" + (
-                        "3.12" if name == "macos" else "3.11"
-                    ) + "'\n",
-                    block,
-                )
-                self.assertIn(
-                    "      - run: python -m pip install 'setuptools>=77' .\n",
-                    block,
-                )
+                continue
+            groups = re.findall(
+                r"^      - run: python scripts/run-test-group (.+)$",
+                block, re.MULTILINE,
+            )
+            self.assertEqual(
+                groups,
+                ["${{ matrix.group }}"] if name == "macos" else [name],
+                name,
+            )
+            self.assertIn(
+                "      - run: python -m pip install 'setuptools>=77' .\n",
+                block, name,
+            )
         macos = jobs["macos"]
         matrices = re.findall(
             r"^    strategy:\n      fail-fast: false\n      matrix:\n"
