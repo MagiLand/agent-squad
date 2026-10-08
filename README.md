@@ -47,12 +47,47 @@ using `--force` to replace it. Installation does not install `code-review`.
 Start your interactive Implementer inside Herdr in the consuming repository's
 primary checkout. Its live agent name must match `implementer.agent_name`
 (default `implementer`) and its kind must match `implementer.kind`.
+Start it with `herdr agent start`, which gives it that name: a name given with
+`herdr agent rename` to an agent you launched by hand is cleared when the agent
+begins a new session (`/new`), while an agent started with `agent start` keeps
+its name.
+
+Open a shell pane in the primary checkout; its shell holds the pane ID in
+`$HERDR_PANE_ID`. Herdr starts an agent only in a pane whose shell is at its
+prompt, so run the command from another shell, substituting the configured name,
+the kind (`codex` or `claude`), and that pane ID:
+
+```bash
+herdr agent start implementer --kind codex --pane <pane-id>
+```
+
+Native agent arguments go after `--`. To start the agent from its own pane,
+detach the start call. For example, this optional zsh helper starts the agent
+in the calling pane, passes any further arguments to the agent after `--`, and
+detaches the start call with its output in a log file:
+
+```zsh
+hagent() {
+  local name="$1"
+  local kind="$2"
+  shift 2
+  herdr agent start "$name" \
+    --kind "$kind" \
+    --pane "$HERDR_PANE_ID" \
+    -- "$@" \
+    >/tmp/herdr-agent-start-"$name".log 2>&1 &!
+}
+```
+
+Running `hagent implementer codex` in that pane starts the default
+Implementer there.
 
 Herdr can run several named sessions. Agent Squad finds the one running
 session whose agent has that name and kind and works inside this repository,
 and sends every Herdr call there, whatever session the calling process
 inherited. Commands that need Herdr refuse when no session or more than one
-matches; `doctor` names the session it found.
+matches; `doctor` names the session it found, and its “Herdr Implementer
+session” row warns when no running session holds the name.
 
 Then initialize, substituting the two account names:
 
