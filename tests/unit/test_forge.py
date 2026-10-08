@@ -435,6 +435,7 @@ class ForgeBoundaryTests(unittest.TestCase):
         with (
             patch('agent_squad.merging.state_for', return_value=state),
             patch('agent_squad.merging.check_merge_gate', return_value=False),
+            patch('agent_squad.merging.write_merge_record'),
         ):
             result = merge_pr(self.repo, forge, 1)
         self.assertEqual(result['branch_rules'], {'visibility': 'not visible'})

@@ -96,7 +96,9 @@ def parser() -> argparse.ArgumentParser:
     skill = command("skill", ("install",))["install"]
     for name in ("claude", "codex", "force", "json"):
         skill.add_argument("--" + name, action="store_true")
-    pr = command("pr", ("head", "reviews", "create", "report", "merge"))
+    pr = command(
+        "pr", ("head", "reviews", "create", "report", "merge", "cleanup")
+    )
     for name in ("head", "reviews"):
         common(pr[name])
     common(pr["create"], role="implementer", number="issue", mutation=True)
@@ -108,6 +110,7 @@ def parser() -> argparse.ArgumentParser:
     common(pr["merge"], role="implementer", mutation=True)
     pr["merge"].add_argument("--accept-moved-base", action="store_true")
     pr["merge"].add_argument("--accept-merge-hold", action="store_true")
+    common(pr["cleanup"], role="implementer", mutation=True)
     review = command("review", ("post",))["post"]
     common(review, role="reviewer", mutation=True)
     for name in (
@@ -264,6 +267,10 @@ def execute(args: argparse.Namespace) -> dict:
             accept_moved_base=args.accept_moved_base,
             accept_merge_hold=args.accept_merge_hold,
         )
+    if key == ("pr", "cleanup"):
+        from .merging import cleanup_pr
+
+        return cleanup_pr(repository, forge, args.pr)
     if key == ("review", "post"):
         sections = {
             "Summary": args.summary,

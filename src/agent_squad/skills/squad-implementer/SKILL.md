@@ -331,9 +331,17 @@ CI evidence is missing or inaccessible, report that limitation explicitly.
 to cleanup safeguards; do not recreate it for a post-merge report. When the
 CLI did not fast-forward, report its reason and any command it printed. Never
 run the fast-forward or any other command changing the base checkout yourself.
-A failed integration check retains resources; exit 3 means cleanup is incomplete
-and must be reported. Squash after accepting a moved base is not verifiable
-by tree identity.
+A failed integration check retains resources. Squash after accepting a moved
+base is not verifiable by tree identity.
+
+When `pr merge` exits 3 (cleanup incomplete), or exits 1 with the PR merged or
+its merge outcome unknown, its result names
+`agent-squad pr cleanup --as implementer --pr <PR>` under `cleanup_command`.
+Run that command once from the primary checkout without asking. It finishes
+the merge from the record `pr merge` wrote and never sends a merge request.
+If it also fails, report the failed step and wait. Never finish cleanup with
+direct Git or forge commands. Report the `pr cleanup` result in the final
+report.
 
 ## 9. Manual intervention
 

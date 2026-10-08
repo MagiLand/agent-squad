@@ -202,8 +202,11 @@ class HerdrClient:
         executable: str | Path | None = None,
         timeout_seconds: float = 45.0,
         repository: Repository | None = None,
+        removed_worktrees: tuple[Path, ...] = (),
     ) -> None:
         self._working_directory = working_directory
+        # Vacant worktree paths where the Implementer may still be (§8.2).
+        self._removed_worktrees = removed_worktrees
         self._configured_executable = executable
         self._timeout_seconds = timeout_seconds
         self._executable: Path | None = None
@@ -264,6 +267,7 @@ class HerdrClient:
     def _resolve_session(self, repository: Repository) -> HerdrSession:
         implementer = repository.configuration.implementer
         roots = [w.root for w in list_worktrees(repository.primary)]
+        roots += self._removed_worktrees
         examined: list[str] = []
         unreadable: list[str] = []
         matches: list[HerdrSession] = []
