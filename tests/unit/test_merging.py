@@ -308,3 +308,37 @@ class MergeRecordRefusalTests(unittest.TestCase):
         self.assertEqual(result["merge_record"]["reason"], "busy")
         self.assertIsNone(result["cleanup_command"])
         self.assertTrue((common / "agent-squad-merge-pr1.json").exists())
+
+
+class SurvivingOwnerTests(unittest.TestCase):
+    def cleanup(self, owner: object) -> list:
+        import json
+        from tempfile import TemporaryDirectory
+        from unittest.mock import Mock
+        from agent_squad.merging import cleanup_merge
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = cleanup_repository()
+        repository.common = Path(temporary.name)
+        admin = repository.common / "worktrees/moved"
+        admin.mkdir(parents=True)
+        (admin / "agent-squad-implementation.json").write_text(
+            json.dumps(owner))
+        forge = Mock()
+        forge.branch_head.return_value = H
+        with patch("agent_squad.merging.list_worktrees", return_value=[]):
+            return cleanup_merge(repository, 2, H, "feature", 1, forge)
+
+    def test_boolean_pr_is_not_another_prs_number(self):
+        steps = self.cleanup({"pr": True})
+        self.assertEqual(len(steps), 1)
+        self.assertFalse(steps[0]["ok"])
+        self.assertIn("ownership record remains", steps[0]["detail"])
+
+    def test_valid_number_of_another_pr_is_ignored(self):
+        steps = self.cleanup({"pr": 3})
+        self.assertEqual(steps[0], {
+            "step": "implementation ownership", "ok": True,
+            "detail": "already removed",
+        })

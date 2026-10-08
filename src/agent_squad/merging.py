@@ -326,8 +326,8 @@ def cleanup_merge(
         """Find an ownership record for this PR that outlived its checks.
 
         The record stays in the worktree's Git directory when the worktree
-        is moved or its HEAD changes. A record that cannot be read, or a
-        symlink, may be this PR's and counts too.
+        is moved or its HEAD changes. Only a record that names another PR
+        by a valid number is ignored; any other record may be this PR's.
         """
         admin = repository.common / "worktrees"
         if not admin.is_dir():
@@ -343,7 +343,8 @@ def cleanup_merge(
                 )
             except (OSError, ValueError):
                 owner = None
-            if not isinstance(owner, dict) or owner.get("pr") == pr:
+            other = owner.get("pr") if isinstance(owner, dict) else None
+            if not (type(other) is int and other >= 1 and other != pr):
                 return record
         return None
 

@@ -1461,13 +1461,20 @@ class ResumedCleanupTests(unittest.TestCase):
         record = admin / "agent-squad-implementation.json"
         foreign = f.root / "foreign.json"
         foreign.write_text(json.dumps({"pr": 7}))
-        for name, write in (
+        cases = [
             ("unreadable", lambda: record.write_text("{")),
             ("not an object", lambda: record.write_text("[]")),
-            ("this PR", lambda: record.write_text(json.dumps({"pr": 1}))),
             ("symlink", lambda: record.symlink_to(foreign)),
             ("dangling symlink", lambda: record.symlink_to(f.root / "x")),
-        ):
+        ]
+        # PR #134 REV-1: only a valid number for another PR is ignored.
+        for value in (1, None, "7", False, True, 0, -7, 7.0, "missing"):
+            owner = {"schema_version": 1, "branch": "issue-1", "issue": 1}
+            if value != "missing":
+                owner["pr"] = value
+            cases.append((f"pr={value!r}", lambda text=json.dumps(owner):
+                          record.write_text(text)))
+        for name, write in cases:
             with self.subTest(record=name):
                 record.unlink(missing_ok=True)
                 write()
