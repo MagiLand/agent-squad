@@ -9,6 +9,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from tests._support import FakeClock
 from tests.forge_support import ForgeFixture
 from agent_squad.github import GitHub
 from agent_squad.initialization import (
@@ -427,6 +428,129 @@ class MergeTests(unittest.TestCase):
         self.assertFalse(any("DELETE" in c["arguments"]
                              for c in self.f.read_model()["calls"]))
         self.assert_removed()
+
+    def merge_on_clock(self, clock: FakeClock) -> dict:
+        """Merge in process so the deletion wait runs on a virtual clock."""
+        model = self.f.read_model()
+        model["calls"] = []
+        self.f.save_model(model)
+        with patch.dict(os.environ, self.f.env, clear=True):
+            repository = load_initialized_repository(self.f.repo)
+            with patch("agent_squad.github.time", clock):
+                return merge_pr(
+                    repository, GitHub(repository, "implementer"), 1
+                )
+
+    def branch_calls(self) -> tuple[int, int]:
+        """Count repository reads and branch DELETEs in the fake's log."""
+        calls = self.f.read_model()["calls"]
+        return (
+            sum(c["arguments"][1] == "/repos/MagiLand/trial"
+                for c in calls if c["arguments"][:1] == ["api"]),
+            sum("DELETE" in c["arguments"] for c in calls),
+        )
+
+    def assert_retained(self, result: dict, detail: str) -> None:
+        self.assertEqual(result["exit_code"], 3)
+        self.assertTrue(result["merged"])
+        self.assertEqual(result["cleanup"][-1]["step"], "remote branch")
+        self.assertFalse(result["cleanup"][-1]["ok"])
+        self.assertIn(detail, result["cleanup"][-1]["detail"])
+        self.assertEqual(self.f.git("rev-parse", "origin/issue-1"), self.head)
+        self.assertTrue(self.f.worktree.exists())
+        self.assertNotEqual(self.f.git("branch", "--list", "issue-1"), "")
+
+    def test_automatic_deletion_during_the_wait_needs_no_delete(self) -> None:
+        """#120: the branch disappears on the second read of the wait."""
+        self.f.settings(delete_branch_on_merge=True, auto_deletion=3)
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(self.branch_calls(), (1, 0))
+        self.assertEqual(clock.sleeps, [1.0, 1.0])
+        self.assert_removed()
+
+    def test_skipped_automatic_deletion_gets_one_delete_after_the_wait(
+        self,
+    ) -> None:
+        self.f.settings(delete_branch_on_merge=True, auto_deletion="never")
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [1.0] * 30)
+        self.assert_removed()
+
+    def test_refused_delete_after_the_wait_retains_resources(self) -> None:
+        self.f.settings(delete_branch_on_merge=True, auto_deletion="never",
+                        branch_delete_403=True)
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assert_retained(result, "branch deletion forbidden (HTTP 403)")
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [1.0] * 30)
+
+    def test_head_change_during_the_wait_is_refused_without_delete(
+        self,
+    ) -> None:
+        f = self.f
+        f.settings(delete_branch_on_merge=True, auto_deletion="never")
+        clock = FakeClock(on_sleep=lambda: f.git(
+            "update-ref", "refs/heads/issue-1", f.base, cwd=f.origin))
+        result = self.merge_on_clock(clock)
+        self.assert_retained(
+            result, "remote branch no longer matches approved head")
+        self.assertEqual(self.branch_calls(), (1, 0))
+        self.assertEqual(clock.sleeps, [1.0])
+        self.assertEqual(
+            f.git("rev-parse", "refs/heads/issue-1", cwd=f.origin), f.base)
+
+    def test_pr_118_race_answered_404_completes_cleanup(self) -> None:
+        """#120: GitHub deleted the branch between the read and the DELETE."""
+        self.f.settings(delete_branch_on_merge=False,
+                        branch_removed_before_delete=True,
+                        absent_delete_status=404)
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [])
+        self.assert_removed()
+
+    def test_race_answered_422_without_the_setting_completes_cleanup(
+        self,
+    ) -> None:
+        self.f.settings(branch_removed_before_delete=True)
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [])
+        self.assert_removed()
+
+    def test_unreadable_setting_deletes_without_waiting(self) -> None:
+        self.f.settings(delete_branch_on_merge=True, auto_deletion="never",
+                        repository_denied=["developer"])
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [])
+        self.assert_removed()
+
+    def test_delete_answered_422_while_present_fails_with_its_message(
+        self,
+    ) -> None:
+        self.f.settings(branch_delete_status=422)
+        clock = FakeClock()
+        result = self.merge_on_clock(clock)
+        self.assert_retained(result, "Reference does not exist (HTTP 422)")
+        self.assertEqual(self.branch_calls(), (1, 1))
+        self.assertEqual(clock.sleeps, [])
 
     def test_moved_base_refuses_then_merges_only_with_flag(self) -> None:
         self.advance_base()

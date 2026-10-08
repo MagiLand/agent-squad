@@ -588,6 +588,25 @@ class ForgejoMutationTests(unittest.TestCase):
         self.assertTrue(deleted[0]["path"].endswith("/branches/issue-1"))
         self.assertEqual(f.git("branch", "-r", "--list", "origin/issue-1"), "")
 
+    def test_concurrent_deletion_answered_500_counts_as_absent(self):
+        """#120: another deletion lands between the read and the DELETE."""
+        f = self.f
+        f.review("approved")
+        f.settings(leave_branch=True, branch_removed_before_delete=True)
+        start = len(f.read_model()["calls"])
+        result = self.merge()
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertFalse(f.worktree.exists())
+        self.assertEqual(f.git("branch", "-r", "--list", "origin/issue-1"), "")
+        calls = f.read_model()["calls"][start:]
+        deleted = [c for c in calls if c["method"] == "DELETE"]
+        self.assertEqual(len(deleted), 1)
+        self.assertTrue(deleted[0]["path"].endswith("/branches/issue-1"))
+        self.assertFalse(any(
+            c["path"].partition("?")[0].endswith("/repos/MagiLand/trial")
+            for c in calls
+        ))
+
     def test_branch_deletion_failure_retains_tracking_and_worktree(self):
         f = self.f
         f.review("approved")

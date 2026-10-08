@@ -7,14 +7,21 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from urllib.parse import quote, urlencode
 
 from .forge import (
     Anchor, Comment, Evidence, ForgeError, IssueRecord, MergeResult,
     PullRequest, Review, ReviewPublication, ReviewState, Role, Snapshot,
-    ThreadState, V, array, boolean, object_value, oid, positive, text_value,
+    ThreadState, V, array, boolean, branch_present, delete_and_confirm,
+    object_value, oid, positive, text_value,
 )
 from .initialization import Repository, decode_json
+
+# With delete_branch_on_merge set, GitHub deletes the merged head branch a few
+# seconds after answering the merge request (#120). Both values are seconds.
+AUTO_DELETION_WAIT = 30.0
+AUTO_DELETION_POLL = 1.0
 
 
 STATES = {
@@ -584,17 +591,28 @@ class GitHub:
         return oid(target.get("sha"), "branch SHA")
 
     def delete_branch(self, branch: str, expected_head: str) -> None:
-        head = self.branch_head(branch)
-        if head is None:
+        if not branch_present(self, branch, expected_head):
             return
-        if head != expected_head:
-            raise ForgeError("remote branch no longer matches approved head")
-        self.api(
+        if self._deletes_merged_branches():
+            # A DELETE sent now would race GitHub's own deletion.
+            deadline = time.monotonic() + AUTO_DELETION_WAIT
+            while (remaining := deadline - time.monotonic()) > 0:
+                time.sleep(min(AUTO_DELETION_POLL, remaining))
+                if not branch_present(self, branch, expected_head):
+                    return
+        delete_and_confirm(self, branch, expected_head, lambda: self.api(
             f"{self.prefix}/git/refs/heads/{quote(branch, safe='')}",
             method="DELETE",
-        )
-        if self.branch_head(branch) is not None:
-            raise ForgeError(f"remote branch remains: {branch}")
+        ))
+
+    def _deletes_merged_branches(self) -> bool:
+        # Not every caller can read the field (an anonymous read omits it); a
+        # missing or unreadable setting falls back to the guarded DELETE.
+        try:
+            record = self.repository_record()
+        except ForgeError:
+            return False
+        return record.get("delete_branch_on_merge") is True
 
     def branch_prs(self, branch: str) -> list[dict[str, object]]:
         config = self.repository.configuration

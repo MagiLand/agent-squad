@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from tests._support import add_src_to_path
+from tests._support import FakeClock, add_src_to_path
 
 add_src_to_path()
 
@@ -453,3 +453,182 @@ class ForgeBoundaryTests(unittest.TestCase):
         self.assertFalse(result.can_read_thread_resolution)
         self.assertEqual(result.threads, ())
         threads.assert_not_called()
+
+
+class GitHubBranchDeletionTests(unittest.TestCase):
+    """GitHub's automatic head-branch deletion races merge cleanup (#120)."""
+
+    REPOSITORY = '/repos/org/repo'
+    READ = '/repos/org/repo/git/ref/heads/feat%2Ftopic'
+    DELETE = '/repos/org/repo/git/refs/heads/feat%2Ftopic'
+
+    def setUp(self) -> None:
+        path = Path('/repo')
+        repo = Repository(path, path, path / '.git', config())
+        self.clock = FakeClock()
+        for patcher in (
+            patch('agent_squad.github.shutil.which', return_value='/fake/gh'),
+            patch('agent_squad.github.time', self.clock),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.forge = GitHub(repo, 'implementer')
+        self.calls: list[tuple[str, str]] = []
+
+    @staticmethod
+    def ref(sha: str = H) -> dict:
+        return {'ref': 'refs/heads/feat/topic', 'object': {'sha': sha}}
+
+    @staticmethod
+    def absent() -> ForgeError:
+        return ForgeError('gh: Not Found (HTTP 404)', 404)
+
+    @staticmethod
+    def refused(status: int) -> ForgeError:
+        return ForgeError(
+            f'gh: Reference does not exist (HTTP {status})', status)
+
+    @staticmethod
+    def repository(**fields: object) -> dict:
+        return {'id': 1, 'full_name': 'org/repo', **fields}
+
+    def delete(self, *responses: object) -> list[tuple[str, str]]:
+        """Run delete_branch over scripted API responses."""
+        with patch.object(self.forge, 'api', side_effect=responses) as api:
+            try:
+                self.forge.delete_branch('feat/topic', H)
+            finally:
+                self.calls = [(c.args[0], c.kwargs.get('method', 'GET'))
+                              for c in api.call_args_list]
+        return self.calls
+
+    def test_absent_or_moved_branch_is_read_once(self) -> None:
+        self.assertEqual(self.delete(self.absent()), [(self.READ, 'GET')])
+        with self.assertRaisesRegex(
+            ForgeError, '^remote branch no longer matches approved head$'
+        ):
+            self.delete(self.ref(A))
+        self.assertEqual(self.calls, [(self.READ, 'GET')])
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_enabled_automatic_deletion_is_awaited_without_delete(
+        self,
+    ) -> None:
+        calls = self.delete(
+            self.ref(), self.repository(delete_branch_on_merge=True),
+            self.ref(), self.ref(), self.absent(),
+        )
+        self.assertEqual(calls, [
+            (self.READ, 'GET'), (self.REPOSITORY, 'GET'),
+            *[(self.READ, 'GET')] * 3,
+        ])
+        self.assertEqual(self.clock.sleeps, [1.0] * 3)
+
+    def test_skipped_automatic_deletion_gets_one_delete_after_the_bound(
+        self,
+    ) -> None:
+        calls = self.delete(
+            self.ref(), self.repository(delete_branch_on_merge=True),
+            *[self.ref()] * 30, None, self.absent(),
+        )
+        self.assertEqual(self.clock.sleeps, [1.0] * 30)
+        self.assertEqual(calls[2:], [
+            *[(self.READ, 'GET')] * 30,
+            (self.DELETE, 'DELETE'), (self.READ, 'GET'),
+        ])
+
+    def test_wait_never_sleeps_past_the_bound(self) -> None:
+        self.clock.now = 0.25
+        with patch('agent_squad.github.AUTO_DELETION_WAIT', 2.5):
+            self.delete(
+                self.ref(), self.repository(delete_branch_on_merge=True),
+                *[self.ref()] * 3, None, self.absent(),
+            )
+        self.assertEqual(self.clock.sleeps, [1.0, 1.0, 0.5])
+        self.assertEqual(
+            [m for _, m in self.calls].count('DELETE'), 1)
+
+    def test_head_change_during_the_wait_is_refused_without_delete(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ForgeError, '^remote branch no longer matches approved head$'
+        ):
+            self.delete(
+                self.ref(), self.repository(delete_branch_on_merge=True),
+                self.ref(), self.ref(A),
+            )
+        self.assertNotIn('DELETE', [m for _, m in self.calls])
+        self.assertEqual(self.clock.sleeps, [1.0, 1.0])
+
+    def test_setting_not_exactly_true_deletes_without_waiting(self) -> None:
+        for record in (
+            self.repository(delete_branch_on_merge=False),
+            self.repository(),
+            self.repository(delete_branch_on_merge='true'),
+            self.repository(delete_branch_on_merge=None),
+            self.repository(delete_branch_on_merge=1),
+            ForgeError('gh: Forbidden (HTTP 403)', 403),
+        ):
+            with self.subTest(record=record):
+                calls = self.delete(self.ref(), record, None, self.absent())
+                self.assertEqual(calls, [
+                    (self.READ, 'GET'), (self.REPOSITORY, 'GET'),
+                    (self.DELETE, 'DELETE'), (self.READ, 'GET'),
+                ])
+                self.assertEqual(self.clock.sleeps, [])
+
+    def test_failed_delete_counts_only_when_a_fresh_read_shows_absence(
+        self,
+    ) -> None:
+        for status in (404, 422, 500):
+            with self.subTest(status=status):
+                calls = self.delete(
+                    self.ref(), self.repository(), self.refused(status),
+                    self.absent(),
+                )
+                self.assertEqual(calls[2:], [
+                    (self.DELETE, 'DELETE'), (self.READ, 'GET'),
+                ])
+                with self.assertRaises(ForgeError) as caught:
+                    self.delete(
+                        self.ref(), self.repository(), self.refused(status),
+                        self.ref(),
+                    )
+                self.assertEqual(
+                    str(caught.exception),
+                    f'gh: Reference does not exist (HTTP {status})',
+                )
+                self.assertEqual(caught.exception.status, status)
+
+    def test_failed_delete_then_moved_or_unreadable_branch_fails(
+        self,
+    ) -> None:
+        for read, detail in (
+            (self.ref(A), 'remote branch no longer matches approved head'),
+            (ForgeError('gh: branch unreadable (HTTP 403)', 403),
+             'gh: branch unreadable (HTTP 403)'),
+        ):
+            with self.subTest(detail=detail):
+                with self.assertRaises(ForgeError) as caught:
+                    self.delete(
+                        self.ref(), self.repository(), self.refused(422),
+                        read,
+                    )
+                self.assertEqual(
+                    str(caught.exception),
+                    'gh: Reference does not exist (HTTP 422); '
+                    f'after the failed DELETE: {detail}',
+                )
+
+    def test_successful_delete_still_requires_confirmed_absence(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ForgeError, '^remote branch remains: feat/topic$'
+        ):
+            self.delete(self.ref(), self.repository(), None, self.ref())
+        with self.assertRaisesRegex(
+            ForgeError, '^remote branch no longer matches approved head$'
+        ):
+            self.delete(self.ref(), self.repository(), None, self.ref(A))

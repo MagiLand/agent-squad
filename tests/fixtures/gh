@@ -201,13 +201,16 @@ parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
 if len(parts) == 3 and parts[0] == "repos":
     if account in settings.get("repository_denied", []):
         fail("repository unreadable: " + token, 403)
-    output(
-        {
-            "id": 1,
-            "full_name": "/".join(parts[1:3]),
-            "permissions": {"push": True},
-        }
-    )
+    repository = {
+        "id": 1,
+        "full_name": "/".join(parts[1:3]),
+        "permissions": {"push": True},
+    }
+    # GitHub omits the field from some reads, such as an anonymous one.
+    if "delete_branch_on_merge" in settings:
+        repository["delete_branch_on_merge"] = settings[
+            "delete_branch_on_merge"]
+    output(repository)
 if len(parts) < 4 or parts[0] != "repos":
     fail("unsupported endpoint", 404)
 kind = parts[3]
@@ -228,16 +231,33 @@ if kind == "git" and parts[4] in ("ref", "refs"):
         fail("branch unreadable", 403)
     branch = "/".join(parts[6:])
     ref = f"refs/heads/{branch}"
+    pending = model.get("pending_auto_deletion")
+    if method == "GET" and pending and pending["ref"] == ref:
+        # GitHub's automatic deletion lands after the merge response.
+        pending["reads"] -= 1
+        if pending["reads"] <= 0:
+            del model["pending_auto_deletion"]
+            subprocess.run(["git", "update-ref", "-d", ref],
+                           cwd=model["origin"], check=True, shell=False)
+    if method == "DELETE" and settings.get("branch_removed_before_delete"):
+        # Another deletion completes between the branch read and the DELETE.
+        subprocess.run(["git", "update-ref", "-d", ref],
+                       cwd=model["origin"], check=True, shell=False)
     result = subprocess.run(
         ["git", "show-ref", "--verify", ref], cwd=model["origin"],
         text=True, capture_output=True, shell=False,
     )
     if result.returncode:
+        if method == "DELETE":
+            fail("Reference does not exist",
+                 settings.get("absent_delete_status", 422))
         fail("branch not found", 404)
     head = result.stdout.split()[0]
     if method == "DELETE":
         if settings.get("branch_delete_403"):
             fail("branch deletion forbidden", 403)
+        if settings.get("branch_delete_status"):
+            fail("Reference does not exist", settings["branch_delete_status"])
         subprocess.run(["git", "update-ref", "-d", ref, head],
                        cwd=model["origin"], check=True, shell=False)
         output(None)
@@ -395,8 +415,15 @@ if parts[5] == "merge":
             git("commit", "--amend", "--no-edit")
         merge_commit = git("rev-parse", "HEAD")
         git("push", "origin", f"HEAD:refs/heads/{pr['base']['ref']}")
-        if settings.get("delete_branch_on_merge"):
+        # auto_deletion: absent deletes inside the merge request, N deletes
+        # just before the Nth read of the branch, "never" skips deletion.
+        deletion = settings.get("auto_deletion")
+        if settings.get("delete_branch_on_merge") and deletion is None:
             git("push", "origin", f":refs/heads/{pr['head']['ref']}")
+        elif settings.get("delete_branch_on_merge") and deletion != "never":
+            model["pending_auto_deletion"] = {
+                "ref": f"refs/heads/{pr['head']['ref']}", "reads": deletion,
+            }
     pr.update(merged=True, state="closed", merge_commit_sha=merge_commit)
     output(
         {"merged": True, "sha": merge_commit, "message": "merged fixture"}
