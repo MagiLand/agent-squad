@@ -14,10 +14,10 @@ release.
 
 The implementation follows the [Agent Squad specification](docs/agent-squad-spec.md)
 for GitHub and Forgejo, with separate Implementer and Reviewer accounts. The
-package version is `0.6.1`; the protocol tag remains `AGENT_SQUAD/0.5.0`.
+package version is `0.7.0`; the protocol tag remains `AGENT_SQUAD/0.5.0`.
 Release readiness depends on the recorded checks and human-operated trials.
 See [workflow verification](docs/workflow-verification.md) for deterministic
-coverage and the live-trial evidence required before releasing v0.6.0.
+coverage and the recorded live-trial evidence.
 
 ## Install and prepare a repository
 
@@ -44,7 +44,7 @@ agent-squad --version
 agent-squad skill install
 ```
 
-The version is `0.6.1`. Skill installation copies the two role skills into
+The version is `0.7.0`. Skill installation copies the two role skills into
 `~/.agents/skills` for Codex and links them from `~/.claude/skills` for Claude
 Code. `--codex` selects the copies only; `--claude` selects the links only.
 An existing differing file or link is refused. Inspect the difference before

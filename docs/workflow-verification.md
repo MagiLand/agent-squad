@@ -18,7 +18,7 @@ scenario and a second invocation from a source export without `.git`.
 It covers convention parsing, Git identity, gates, publication recovery,
 Reviewer ownership and cleanup, skills, packaging, and doctor diagnostics.
 The release checks compare the CLI command surface with the specification
-and require package metadata `0.6.1`, independently of the declared protocol
+and require package metadata `0.7.0`, independently of the declared protocol
 version `0.5.0` and tag `AGENT_SQUAD/0.5.0`. Both wheel and sdist are inspected.
 They also require `README.md`, this document, and the specification's header
 and §1 to state the same package version.

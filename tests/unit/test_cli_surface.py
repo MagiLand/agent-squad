@@ -73,7 +73,7 @@ class CliSurfaceTests(unittest.TestCase):
 
     def test_release_and_protocol_versions(self) -> None:
         # The one deliberate pin; a release edits it with __version__.
-        self.assertEqual(__version__, "0.6.1")
+        self.assertEqual(__version__, "0.7.0")
         self.assertEqual(PROTOCOL_VERSION, "0.5.0")
         self.assertEqual(TAG, f"AGENT_SQUAD/{PROTOCOL_VERSION}")
 
