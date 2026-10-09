@@ -6,6 +6,12 @@ Developer decisions, and approval. Each review identifies an exact commit and
 runs in a fresh detached worktree. Starting an issue authorizes routine work through merge; higher-risk PRs wait
 for the Developer's review before merging.
 
+The long-term goal of Agent Squad is to reliably achieve a high degree of
+automation in software development. "Reliably" governs the order of work: a
+step is automated only once an independent check exists for what that step
+produces, and the Developer keeps authority over requirements, risk, and
+release.
+
 The implementation follows the [Agent Squad specification](docs/agent-squad-spec.md)
 for GitHub and Forgejo, with separate Implementer and Reviewer accounts. The
 package version is `0.6.1`; the protocol tag remains `AGENT_SQUAD/0.5.0`.
