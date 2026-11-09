@@ -8,13 +8,15 @@
   ],
   "forge-commands": [
     "tests/integration/test_forge_commands.py",
-    "tests/integration/test_forgejo_mutations.py"
+    "tests/integration/test_forgejo_mutations.py",
+    "tests/integration/test_ci_checks.py"
   ],
   "smoke": [
     "tests/integration/test_smoke_workflow.py"
   ],
   "rest": [
     "tests/unit/test_anchors.py",
+    "tests/unit/test_checks.py",
     "tests/unit/test_ci_groups.py",
     "tests/unit/test_cli_surface.py",
     "tests/unit/test_command_validation.py",

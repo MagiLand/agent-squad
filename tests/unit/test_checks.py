@@ -1,0 +1,276 @@
+"""CI result classification, summary, and the checks wait (#145)."""
+
+from dataclasses import replace
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+from tests._support import FakeClock, add_src_to_path
+from tests.unit.test_conventions import H, config
+
+add_src_to_path()
+
+from agent_squad.commands import (  # noqa: E402
+    CHECK_POLL_INTERVAL, ci_record, pr_checks, summarize_checks,
+)
+from agent_squad.forge import (  # noqa: E402
+    Check, ChecksUnavailable, ForgeError,
+)
+from agent_squad.forgejo import Forgejo, parse_status  # noqa: E402
+from agent_squad.github import (  # noqa: E402
+    GitHub, check_run_result, parse_check_run, parse_commit_status,
+)
+from agent_squad.initialization import Repository  # noqa: E402
+from tests.unit.test_forgejo import forgejo_config  # noqa: E402
+
+OTHER = "c" * 40
+
+
+def row(result: str, name: str = "test") -> Check:
+    return Check(name, None, result, result, None, None, None, None)
+
+
+class GitHubClassificationTests(unittest.TestCase):
+    def test_check_runs_classify_every_status_and_conclusion(self) -> None:
+        cells = [
+            *((status, None, "pending") for status in (
+                "queued", "in_progress", "waiting", "requested", "pending",
+                "unnamed_status")),
+            ("in_progress", "success", "pending"),
+            ("completed", "success", "passed"),
+            ("completed", "neutral", "passed"),
+            ("completed", "skipped", "skipped"),
+            *(("completed", conclusion, "failed") for conclusion in (
+                "failure", "cancelled", "timed_out", "action_required",
+                "stale", "startup_failure", "unnamed_conclusion", None)),
+        ]
+        for status, conclusion, expected in cells:
+            with self.subTest(status=status, conclusion=conclusion):
+                self.assertEqual(
+                    check_run_result(status, conclusion), expected
+                )
+
+    def test_commit_statuses_classify_every_state(self) -> None:
+        for state, expected in (
+            ("success", "passed"), ("pending", "pending"),
+            ("failure", "failed"), ("error", "failed"),
+            ("unnamed", "failed"),
+        ):
+            with self.subTest(state=state):
+                check = parse_commit_status(
+                    {"context": "ci", "state": state, "creator": None}
+                )
+                self.assertEqual(check.result, expected)
+                self.assertEqual(check.state, state)
+
+    def test_check_run_fields_come_from_the_run_and_its_workflow_run(
+        self,
+    ) -> None:
+        run = {
+            "name": "Tests / unit (push)", "status": "completed",
+            "conclusion": "failure", "check_suite": {"id": 9},
+            "app": {"slug": "github-actions"}, "html_url": "",
+            "started_at": "2026-11-09T10:00:00Z", "completed_at": None,
+        }
+        check = parse_check_run(run, {9: "pull_request"})
+        # The event comes from the owning workflow run, never the name.
+        self.assertEqual(check, Check(
+            "Tests / unit (push)", "pull_request", "completed/failure",
+            "failed", "github-actions", None, "2026-11-09T10:00:00Z", None,
+        ))
+        external = parse_check_run(
+            {**run, "app": None, "check_suite": None}, {9: "push"}
+        )
+        self.assertEqual((external.event, external.source), (None, None))
+        self.assertEqual(
+            parse_check_run({**run, "status": "queued", "conclusion": None},
+                            {}).state,
+            "queued",
+        )
+        with self.assertRaises(ForgeError):
+            parse_check_run({**run, "started_at": "yesterday"}, {})
+
+
+class ForgejoClassificationTests(unittest.TestCase):
+    def test_statuses_classify_every_state(self) -> None:
+        for state, expected in (
+            ("success", "passed"), ("skipped", "skipped"),
+            ("pending", "pending"), ("failure", "failed"),
+            ("error", "failed"), ("warning", "failed"),
+            ("cancelled", "failed"), ("anything", "failed"),
+        ):
+            with self.subTest(state=state):
+                check = parse_status({
+                    "context": "Tests / unit (push)", "status": state,
+                    "creator": None, "target_url": "",
+                })
+                self.assertEqual(check.result, expected)
+                self.assertEqual(
+                    (check.event, check.source, check.url),
+                    (None, None, None),
+                )
+
+
+class SummaryTests(unittest.TestCase):
+    def test_summary_precedence(self) -> None:
+        for results, expected in (
+            ((), "none"),
+            (("passed", "pending", "failed"), "failed"),
+            (("failed", "pending"), "failed"),
+            (("passed", "pending"), "pending"),
+            (("passed", "skipped"), "passed"),
+            (("skipped",), "passed"),
+        ):
+            with self.subTest(results=results):
+                self.assertEqual(
+                    summarize_checks(tuple(map(row, results))), expected
+                )
+
+
+class RefusalTests(unittest.TestCase):
+    """Only a refusal for the acting identity becomes ``unavailable``."""
+
+    def adapters(self) -> list:
+        path = Path("/repo")
+        github = Repository(path, path, path / ".git", config())
+        forgejo = Repository(path, path, path / ".git", forgejo_config())
+        with patch("agent_squad.github.shutil.which", return_value="/gh"):
+            return [GitHub(github, "reviewer"),
+                    Forgejo(forgejo, "reviewer")]
+
+    def test_refusals_are_unavailable_and_other_errors_raise(self) -> None:
+        for forge in self.adapters():
+            for status in (401, 403, 404, 422, 500, None):
+                error = ForgeError("refused", status)
+                with self.subTest(forge=type(forge).__name__, status=status), \
+                        patch.object(forge, "api", side_effect=error):
+                    if status in (401, 403, 404):
+                        record = ci_record(forge, H)
+                        self.assertEqual(record["summary"], "unavailable")
+                        self.assertEqual(record["checks"], [])
+                        self.assertIn("refused", record["reason"])
+                    else:
+                        with self.assertRaises(ForgeError) as raised:
+                            ci_record(forge, H)
+                        self.assertNotIsInstance(
+                            raised.exception, ChecksUnavailable
+                        )
+
+    def test_github_reads_every_part_before_reporting(self) -> None:
+        forge = self.adapters()[0]
+        pages = {
+            "check-runs": {"check_runs": []},
+            "/status": {"state": "pending", "statuses": []},
+            "actions/runs": {"workflow_runs": []},
+        }
+        seen = []
+
+        def api(endpoint: str) -> dict:
+            seen.append(endpoint)
+            return next(v for k, v in pages.items() if k in endpoint)
+
+        with patch.object(forge, "api", side_effect=api):
+            self.assertEqual(ci_record(forge, H)["summary"], "none")
+        self.assertEqual(seen, [
+            f"/repos/org/repo/commits/{H}/check-runs"
+            "?filter=latest&per_page=100&page=1",
+            f"/repos/org/repo/commits/{H}/status?per_page=100&page=1",
+            f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
+        ])
+
+
+class StubForge:
+    """A PR whose head and check results follow scripted reads."""
+
+    def __init__(self, results: list, heads: list | None = None) -> None:
+        self.results = list(results)
+        self.heads = list(heads or [])
+        self.head = H
+        self.reads: list[str] = []
+
+    def pr(self, number: int):
+        if self.heads:
+            self.head = self.heads.pop(0)
+        return type("PR", (), {"head": self.head})()
+
+    def checks(self, sha: str) -> tuple[Check, ...]:
+        self.reads.append(sha)
+        result = self.results.pop(0) if len(self.results) > 1 else (
+            self.results[0])
+        if result == "unavailable":
+            raise ChecksUnavailable("refused (HTTP 403)", 403)
+        return () if result == "none" else (row(result),)
+
+
+class WaitTests(unittest.TestCase):
+    def run_wait(self, forge: StubForge, wait: int | None) -> tuple:
+        clock = FakeClock()
+        with patch("agent_squad.commands.time", clock):
+            return pr_checks(forge, 1, wait), clock.sleeps
+
+    def test_without_wait_reads_once(self) -> None:
+        forge = StubForge(["pending"])
+        result, sleeps = self.run_wait(forge, None)
+        self.assertEqual(result["summary"], "pending")
+        self.assertNotIn("timed_out", result)
+        self.assertEqual((sleeps, forge.reads), ([], [H]))
+
+    def test_returns_early_when_pending_turns_final(self) -> None:
+        for final in ("passed", "failed"):
+            with self.subTest(final=final):
+                forge = StubForge(["pending", final])
+                result, sleeps = self.run_wait(forge, 600)
+                self.assertEqual(result["summary"], final)
+                self.assertFalse(result["timed_out"])
+                self.assertEqual(sleeps, [CHECK_POLL_INTERVAL])
+                self.assertEqual(result["waited_seconds"], 10)
+
+    def test_times_out_with_the_last_summary(self) -> None:
+        forge = StubForge(["pending"])
+        result, sleeps = self.run_wait(forge, 25)
+        self.assertEqual(sleeps, [10, 10, 5])
+        self.assertEqual(
+            (result["summary"], result["timed_out"],
+             result["waited_seconds"], result["head_changed"]),
+            ("pending", True, 25, False),
+        )
+        self.assertEqual(len(forge.reads), 4)
+
+    def test_waits_through_none(self) -> None:
+        forge = StubForge(["none", "none", "passed"])
+        result, sleeps = self.run_wait(forge, 600)
+        self.assertEqual(result["summary"], "passed")
+        self.assertEqual(sleeps, [10, 10])
+
+    def test_unavailable_ends_the_wait_at_once(self) -> None:
+        forge = StubForge(["unavailable"])
+        result, sleeps = self.run_wait(forge, 600)
+        self.assertEqual(result["summary"], "unavailable")
+        self.assertEqual((sleeps, result["timed_out"]), ([], False))
+
+    def test_head_change_ends_the_wait_early(self) -> None:
+        forge = StubForge(["pending", "passed"], heads=[H, OTHER])
+        result, sleeps = self.run_wait(forge, 600)
+        self.assertTrue(result["head_changed"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual((result["head"], result["summary"]),
+                         (H, "pending"))
+        self.assertEqual((sleeps, forge.reads), ([10], [H]))
+
+
+class RecordTests(unittest.TestCase):
+    def test_rows_keep_every_record_field(self) -> None:
+        check = replace(row("failed"), event="push", url="https://ci/1")
+        forge = StubForge([])
+        forge.checks = lambda sha: (check,)
+        self.assertEqual(ci_record(forge, H), {
+            "head": H, "summary": "failed", "checks": [{
+                "name": "test", "event": "push", "state": "failed",
+                "result": "failed", "source": None, "url": "https://ci/1",
+                "started_at": None, "completed_at": None,
+            }],
+        })
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -186,6 +186,8 @@ say “Let's start on issue #42” (use your issue number).
    opens a PR with the copied issue (or approved drafted Task) and report.
    Unless you said “don't merge”, kept the merge, or a hold applies, it records
    your start instruction as a standing instruction to merge when approved.
+   Before each review request it waits for the head's checks with
+   `pr checks --wait` and fixes a failed check first.
 3. A fresh Reviewer checks the full PR HEAD SHA against repository standards
    and the effective Task, then publishes its review and inline findings.
 4. The Implementer evaluates findings, records dispositions, fixes valid
@@ -198,11 +200,12 @@ say “Let's start on issue #42” (use your issue number).
    dependencies or CI authority, publication or incompatible interfaces, and
    unresolved scope or design choices require your review before merging.
    The Reviewer records a `## Merge hold` with the applicable item and reason.
-6. With approval and a standing instruction, the Implementer checks CI for
-   that exact head, merges, waits for configured base-push CI, and reports the
-   result, cleanup, and optional dispositions. You review routine work after
-   merge. A hold or absence of an instruction makes it report approval and
-   wait for you. Only your merge instruction after seeing a hold releases it.
+6. With approval and a standing instruction, the Implementer confirms that
+   CI passed at that exact head, merges, waits for configured base-push CI,
+   and reports the result, cleanup, and optional dispositions. You review
+   routine work after merge. A hold or absence of an instruction makes it
+   report approval and wait for you. Only your merge instruction after seeing
+   a hold releases it.
 
 You can withdraw a standing instruction by telling the Implementer not to
 merge. A stop or Task amendment cancels it; after your continuation or
@@ -219,8 +222,14 @@ named exactly `needs-triage`; without one the command creates nothing.
 A successful Herdr handoff ends the sending agent's step. It becomes idle;
 there is no polling of the receiving agent. The Reviewer posts on the configured forge
 before notifying the Implementer, so a missing notification loses no review.
-The CLI does not orchestrate CI or certify that checks ran; any repository
-review-readiness policy must be satisfied separately for the exact revision.
+The CLI reads CI results on both forges but does not orchestrate CI, gate on
+its results, or certify that the checks a repository expects ran. `status`
+reports them under `ci` for the current head, and `pr checks` prints the same
+result and can wait for pending checks. The skills act on them: a failed check
+is a defect, the Implementer waits for a head's checks before requesting
+review, and the Reviewer does not approve a head with a failed check. Any
+other repository review-readiness policy must be satisfied separately for the
+exact revision.
 
 The following reads help you inspect a PR; issue and PR numbers can differ:
 
@@ -228,6 +237,7 @@ The following reads help you inspect a PR; issue and PR numbers can differ:
 agent-squad issue view --issue 42 --json
 agent-squad pr head --pr 43 --json
 agent-squad pr reviews --pr 43 --json
+agent-squad pr checks --pr 43 --json
 agent-squad status --pr 43 --json
 ```
 
@@ -320,7 +330,7 @@ shipped command path.
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
 | `issue view`, `issue comment`, `issue create` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`. |
 | `pr create`, `pr report` | Publish the Task and implementation report; update the report on an open PR. |
-| `pr head`, `pr reviews`, `status` | Read exact revision identities, reviews, and derived workflow state. |
+| `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head, and derived workflow state. |
 | `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
 | `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
 | `reviewer launch`, `reviewer adopt`, `reviewer close` | Start a fresh Reviewer, adopt after a human startup answer, or close owned resources. |

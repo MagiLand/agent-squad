@@ -14,13 +14,17 @@ decisions, stops, and budget. Obtain Task, PR, review, decision, stop, and budge
 state through
 `agent-squad issue view`, `agent-squad status --pr <N> --json`,
 `agent-squad pr head --pr <N> --json`, and
-`agent-squad pr reviews --pr <N> --json`.
+`agent-squad pr reviews --pr <N> --json`. On every forge, read whether the
+checks at a head passed, failed, or are still pending from `ci` in
+`agent-squad status --pr <N> --json` or from
+`agent-squad pr checks --pr <N> [--wait <seconds>] --json`.
 
 Filter `--json` output to read what is needed instead of saving whole responses
 to disk. A saved response is never authority.
 
 For a GitHub repository, for CI evidence and required-check metadata these
-commands do not expose,
+commands do not expose (logs, durations, required-check configuration, and
+the run at the merge commit),
 use read-only `gh run list`, `gh run view` (including logs),
 `gh run watch <run-id> --exit-status`, `gh pr checks`,
 or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
@@ -34,8 +38,8 @@ This allowance does not permit `gh` mutations, other `gh` reads, or using
 `gh` for Task, PR, review, decision, stop, or budget authority. Never retrieve
 credentials, read a token, switch forge identities, or reconstruct authority
 from local files. Use existing authenticated access; if it is insufficient,
-report the limitation. On another forge, report inaccessible CI evidence and
-wait for the Developer to supply evidence or authorize a read path.
+report the limitation. On another forge, `pr checks` and `status` are the only
+CI reads.
 Git commands and local code inspection remain part of implementation.
 Every forge mutation below uses `--as implementer`; the CLI handles identity.
 
@@ -129,6 +133,24 @@ List every issue you filed in the reports of section 8.
 
 ## 3. Request review
 
+Before every `reviewer launch` in a repository that runs checks on pull
+requests, wait for the head's checks with
+`agent-squad pr checks --pr <PR> --wait 300 --json`, giving the shell command
+a timeout longer than the wait, and repeat it while `summary` is `pending`.
+Then act on `summary`:
+
+- `passed`: launch the Reviewer.
+- `failed`: a failed check is a defect. When the fix lies within the Task,
+  fix it, validate, commit, push, update the report, and start this section
+  again for the new head; never launch a Reviewer for the failed head. When
+  the fix lies outside the Task, or the change did not cause the failure,
+  report the failed check to the Developer and wait.
+- `none` after the wait, or `unavailable`: report it, with any `reason`, to
+  the Developer and wait.
+
+If `head_changed` is true, re-read `status` and start again for the current
+head. The CLI does not enforce these results; following them is your duty.
+
 Run `agent-squad reviewer launch --pr <PR>` from the issue worktree.
 On exit 0 follow the asynchronous handoff rule immediately. On exit 4 report
 the named gate to the Developer. On exit 3 report the exact pane that needs a
@@ -219,7 +241,8 @@ fixed` and `needs-human` apply to every thread.
 After `NOT FIXED`, supply a new disposition. After fixes, run relevant tests,
 commit, push, and update `pr report`. Reapply the hold rule to the whole PR
 and withdraw the standing instruction if a hold now applies. Use
-`reviewer close --pr <PR> --head <finished-review-head>` and then `reviewer launch --pr <PR>`. A same-head review
+`reviewer close --pr <PR> --head <finished-review-head>` and then `reviewer launch --pr <PR>`
+after section 3's wait for checks. A same-head review
 is allowed when every unsettled blocking disposition is rejected, or after a
 Task amendment; it is not a substitute for committing and pushing fixes.
 
@@ -294,14 +317,13 @@ Developer releases a hold by instructing the merge after seeing it; only then
 pass `--accept-merge-hold`. A standing instruction never releases a hold.
 
 When `next_action` is `merge`, proceed without another confirmation. Before
-`pr merge`, confirm every check run for the approved head concluded `success`,
-`neutral`, or `skipped`. Wait for running checks through the CI-read allowance
-above (`gh run watch <run-id> --exit-status` on GitHub); on another forge,
-report inaccessible CI evidence and wait. A failed check is a defect: fix it and
-have the new head reviewed, or report it if the fix is outside the Task. If
-no check exists at that head although the repository runs checks on pull
-requests, report that and wait. Apply the same checks to an explicit merge.
-The tool itself does not read or interpret CI.
+`pr merge`, confirm in `status` or `pr checks` that `ci.summary` for the
+approved head is `passed`, or `none` in a repository that runs no checks on
+pull requests. Wait for pending checks with `pr checks --wait`. A failed check
+is a defect: fix it and have the new head reviewed, or report it if the fix is
+outside the Task. Report `unavailable`, or `none` in a repository that runs
+checks on pull requests, and wait. Apply the same checks to an explicit merge.
+The CLI reports CI results but never refuses a merge because of them.
 
 Run `agent-squad pr merge --as implementer --pr <PR>` from the primary
 checkout under the standing instruction or the Developer's later instruction.

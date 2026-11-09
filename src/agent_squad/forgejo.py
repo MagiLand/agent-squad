@@ -21,7 +21,11 @@ from urllib.request import (
 )
 
 from .forge import (
+    CHECK_REFUSALS,
     Anchor,
+    Check,
+    CheckResult,
+    ChecksUnavailable,
     Comment,
     Evidence,
     ForgeError,
@@ -278,6 +282,36 @@ def parse_comments(
     return (
         tuple(sorted(comments, key=lambda c: c.evidence.id)),
         tuple(sorted(threads, key=lambda t: t.root_id)),
+    )
+
+
+# Forgejo stores any string a client posts as a status, so every state not
+# named here, including warning and error, counts as failed (#145).
+STATUS_RESULTS: dict[str, CheckResult] = {
+    "success": "passed", "skipped": "skipped", "pending": "pending",
+}
+
+
+def parse_status(value: object) -> Check:
+    data = object_value(value, "commit status")
+    state = text_value(data.get("status"), "status.status")
+    # Forgejo Actions writes its statuses without a creator.
+    creator = data.get("creator")
+    url = data.get("target_url")
+    return Check(
+        # Forgejo Actions names a status "<workflow> / <job> (<event>)"; the
+        # event is never parsed out of it.
+        text_value(data.get("context"), "status.context"),
+        None,
+        state,
+        STATUS_RESULTS.get(state, "failed"),
+        None if creator is None else V.require_string(
+            object_value(creator, "status.creator").get("login"),
+            "status.creator.login",
+        ),
+        None if url in (None, "") else text_value(url, "status.target_url"),
+        None,
+        None,
     )
 
 
@@ -669,6 +703,35 @@ class Forgejo:
             if error.status in (403, 404):
                 return {"visibility": "not visible"}
             raise
+
+    def checks(self, sha: str) -> tuple[Check, ...]:
+        """Read the latest commit status per context at one commit (#145).
+
+        The combined read pages at 50 rows; each page's ``state`` and
+        ``total_count`` describe that page alone, so neither is read.
+        """
+        rows: list = []
+        page = 1
+        try:
+            while True:
+                data = object_value(self.api(
+                    f"{self.prefix}/commits/{sha}/status"
+                    f"?limit=50&page={page}"
+                ), "combined status")
+                # A commit without statuses answers ``statuses: null``.
+                values = data.get("statuses")
+                entries = [] if values is None else array(values, "statuses")
+                rows.extend(entries)
+                if len(entries) < 50:
+                    break
+                page += 1
+        except ForgeError as error:
+            if error.status not in CHECK_REFUSALS:
+                raise
+            raise ChecksUnavailable(
+                f"{error} (HTTP {error.status})", error.status
+            ) from None
+        return tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
 
     def branch_prs(self, branch: str) -> list[dict[str, object]]:
         matches = []
