@@ -1,6 +1,7 @@
 """CI results read at a PR head through both fake forges (#145)."""
 
 import json
+import subprocess
 import sys
 import unittest
 
@@ -267,9 +268,18 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
     def test_zero_statuses_with_pending_combined_state_are_not_pending(
         self,
     ) -> None:
-        # The fake answers the combined read with state "pending" here.
         self.seed({"check_runs": [check_run("test")]})
         self.assertEqual(self.ci()["summary"], "passed")
+        # The combined read the adapter ignored did say pending.
+        combined = subprocess.run(
+            ["gh", "api",
+             f"/repos/MagiLand/trial/commits/{self.head}/status"],
+            env={**self.f.env, "GH_TOKEN": "fake-token-reviewer"},
+            text=True, capture_output=True, timeout=30, shell=False,
+        )
+        self.assertEqual(combined.returncode, 0, combined.stderr)
+        body = json.loads(combined.stdout)
+        self.assertEqual((body["state"], body["statuses"]), ("pending", []))
 
     def test_failed_then_passed_rerun_is_reported_once_as_passed(
         self,
