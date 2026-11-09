@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import re
+import time
 from typing import TypeVar
 
 from .anchors import Anchor, commentable_lines, validate_anchor
@@ -30,6 +31,8 @@ from .conventions import (
     validate_section,
 )
 from .forge import (
+    Check,
+    ChecksUnavailable,
     ForgeError,
     Forge,
     ReviewComment,
@@ -55,6 +58,8 @@ V = JsonValidator(AgentSquadError)
 T = TypeVar("T")
 # The one label of an issue the Implementer files (#112); not configurable.
 TRIAGE_LABEL = "needs-triage"
+# Seconds between the reads of `pr checks --wait` (#145).
+CHECK_POLL_INTERVAL = 10.0
 
 
 def read_file(path: str) -> str:
@@ -151,6 +156,68 @@ def state_for(
         reviewer_live=live,
     )
     return {**state, "paths": workflow_paths(repository, pr=pr.number)}
+
+
+def summarize_checks(checks: tuple[Check, ...]) -> str:
+    """One CI summary: any failed row wins, then any pending row (#145)."""
+    if not checks:
+        return "none"
+    results = {check.result for check in checks}
+    return next(
+        (s for s in ("failed", "pending") if s in results), "passed"
+    )
+
+
+def ci_record(forge: Forge, head: str) -> dict:
+    """Read and classify the checks at ``head``; never a gate (§7.9).
+
+    The result is derived on every read and never stored (§3).
+    """
+    try:
+        checks = forge.checks(head)
+    except ChecksUnavailable as error:
+        return {
+            "head": head, "summary": "unavailable", "reason": str(error),
+            "checks": [],
+        }
+    return {
+        "head": head,
+        "summary": summarize_checks(checks),
+        "checks": [asdict(check) for check in checks],
+    }
+
+
+def pr_checks(forge: Forge, number: int, wait: int | None = None) -> dict:
+    """Report the checks at the PR's current head, optionally waiting.
+
+    With ``wait`` the read repeats through ``pending`` and ``none``, because
+    checks appear some seconds after a push. The PR head is read again after
+    every checks read, so a head that moved before or during the read that
+    ends the wait is reported as ``head_changed`` with the old head's result.
+    """
+    head = forge.pr(number).head
+    if wait is None:
+        return ci_record(forge, head)
+    start = time.monotonic()
+    timed_out = head_changed = False
+    while True:
+        record = ci_record(forge, head)
+        if forge.pr(number).head != head:
+            head_changed = True
+            break
+        if record["summary"] not in ("pending", "none"):
+            break
+        remaining = start + wait - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        time.sleep(min(CHECK_POLL_INTERVAL, remaining))
+    return {
+        **record,
+        "waited_seconds": round(time.monotonic() - start),
+        "timed_out": timed_out,
+        "head_changed": head_changed,
+    }
 
 
 def workflow_paths(

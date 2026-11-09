@@ -26,7 +26,7 @@ class CliSurfaceTests(unittest.TestCase):
             words = command.split()
             expected.add(tuple(word for word in words[:2]
                                if re.fullmatch(r"[a-z][a-z-]*", word)))
-        self.assertEqual(len(expected), 26)
+        self.assertEqual(len(expected), 27)
 
         def leaves(current, prefix=()):
             subparsers = [a for a in current._actions
@@ -69,7 +69,7 @@ class CliSurfaceTests(unittest.TestCase):
                     - {"--json", "--as"},
                 )
             checked += 1
-        self.assertEqual(checked, 26)
+        self.assertEqual(checked, 27)
 
     def test_release_and_protocol_versions(self) -> None:
         # The one deliberate pin; a release edits it with __version__.

@@ -168,6 +168,30 @@ class ReviewPublication:
     base: str
 
 
+CheckResult = Literal["passed", "skipped", "failed", "pending"]
+# HTTP statuses with which a forge refuses the checks read for the acting
+# identity (#145); any other failure remains an error.
+CHECK_REFUSALS = (401, 403, 404)
+
+
+@dataclass(frozen=True)
+class Check:
+    """One check recorded for a commit; the adapter sets ``result`` (§11.0)."""
+
+    name: str
+    event: str | None
+    state: str
+    result: CheckResult
+    source: str | None
+    url: str | None
+    started_at: str | None
+    completed_at: str | None
+
+
+class ChecksUnavailable(ForgeError):
+    """The forge refused the checks read for the acting identity."""
+
+
 class IssueRecord(TypedDict):
     number: int
     title: str
@@ -232,6 +256,7 @@ class Forge(Protocol):
     def snapshot(self, number: int) -> Snapshot: ...
     def thread_states(self, number: int) -> tuple[ThreadState, ...]: ...
     def branch_rules(self, branch: str) -> dict[str, object]: ...
+    def checks(self, sha: str) -> tuple[Check, ...]: ...
     def branch_head(self, branch: str) -> str | None: ...
     def delete_branch(self, branch: str, expected_head: str) -> None: ...
     def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None: ...

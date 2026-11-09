@@ -9,7 +9,8 @@ Review the exact requested revision without changing implementation code.
 The forge holds the authoritative Task, review history, decisions, findings,
 verification, stops, and budget. Obtain all forge and workflow facts through
 `agent-squad status --pr <N> --json`, `agent-squad pr head --pr <N> --json`,
-`agent-squad pr reviews --pr <N> --json`, and `agent-squad issue view`.
+`agent-squad pr reviews --pr <N> --json`, `agent-squad pr checks --pr <N>
+[--wait <seconds>] --json`, and `agent-squad issue view`.
 Never call `gh`, retrieve or read a token, or switch forge identities. All
 forge mutations below use `--as reviewer`; the CLI selects the identity.
 Local Git reads, code inspection, and executable probes are still required.
@@ -85,6 +86,30 @@ Inspect correctness, regressions, relevant edge cases, maintainability, and
 compliance with repository standards and the Task. Verify material claims in
 the implementation report. Supply the axes to the published review through
 `--standards` and `--spec`. Publish substantive findings on the forge PR only.
+
+CI results are necessary but not sufficient for approval. Read `ci` in
+`status --json` for the pinned head and list every check with its `result`
+in Evidence. Then:
+
+- A `failed` check prevents approval. Raise a blocking finding naming the
+  check, unless another blocking finding already covers its cause.
+- A `passed` check may stand in for a check you could not run only after you
+  read the workflow definition at `head` and confirm that the job runs that
+  check; Evidence then names the job, the workflow file, and the command.
+  A `passed` result satisfies repository guidance that asks for CI evidence.
+  Passing CI never replaces your review or your own probes.
+- A result whose `source` is the Implementer's or the Reviewer's forge
+  account is not CI evidence; report it as such in Evidence.
+- When checks are still `pending` once the review is otherwise ready, run
+  `agent-squad pr checks --pr <N> --wait 540 --json` once, giving the shell
+  command a timeout longer than the wait. If the summary is then still
+  `pending`, `none`, or `unavailable`, publish the verdict the other evidence
+  supports, list the unresolved checks in Evidence, and raise a blocking
+  finding only where an acceptance criterion or repository guidance requires
+  that result.
+- Request evidence the Implementer can supply, such as a test list, a
+  duration, or an earlier run, through a finding; it is blocking when an
+  acceptance criterion depends on it.
 
 ## 6. Severity and follow-up policy
 
@@ -171,7 +196,8 @@ files; these notes are recovery aids, never review authority. Run
 --verdict <approved|changes_requested|needs_human> --summary <file>
 --verified-dispositions <file> [--merge-hold <file>] --standards <file>
 --spec <file> --evidence <file> --threads <threads-file>`. Approval requires
-no new blocking finding and all previous blocking findings settled. Changes
+no new blocking finding, all previous blocking findings settled, and no
+`failed` check at `head` (section 5). Changes
 requested requires a blocking finding or a NOT FIXED verification from this
 pass.
 
@@ -238,7 +264,10 @@ the corresponding reason on the PR:
   continuing risks reviewing or approving the wrong code. A moved request head
   specifically follows section 1: no publication, report in pane, stop.
 
-Optional findings alone never justify stopping. Respect the effective budget,
+Optional findings alone never justify stopping. Missing, pending, or
+unavailable CI results never justify stopping either: section 5 says how to
+review without them, and evidence the Implementer can supply is a finding.
+`judgement` remains for decisions only the Developer can make. Respect the effective budget,
 including any Developer extension; only the Developer can authorize continuation.
 
 ## 10. Asynchronous handoff

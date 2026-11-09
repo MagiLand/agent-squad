@@ -306,3 +306,136 @@ class IssueCreateSkillTests(unittest.TestCase):
         # The Reviewer recommends follow-up work; it never creates issues.
         self.assertNotIn(
             "issue create", packaged_skill("squad-reviewer").decode())
+
+
+def flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def section(text: str, start: str, end: str) -> str:
+    return text.split(start, 1)[1].split(end, 1)[0]
+
+
+class CiResultSkillTests(unittest.TestCase):
+    """Both skills read CI results through the CLI and act on them (#145)."""
+
+    def setUp(self) -> None:
+        self.implementer = flat(packaged_skill("squad-implementer").decode())
+        self.reviewer = flat(packaged_skill("squad-reviewer").decode())
+        spec = flat((PROJECT_ROOT / "docs/agent-squad-spec.md").read_text())
+        self.spec_implementer = section(
+            spec, "### 12.2 `squad-implementer`: mandatory rules",
+            "### 12.3")
+        self.spec_reviewer = section(
+            spec, "### 12.3 `squad-reviewer`: mandatory rules", "### 12.4")
+
+    def test_implementer_waits_for_checks_before_every_launch(self) -> None:
+        launch = section(self.implementer, "## 3. Request review", "## 4.")
+        for rule in (
+            "Before every `reviewer launch` in a repository that runs checks "
+            "on pull requests, wait for the head's checks with "
+            "`agent-squad pr checks --pr <PR> --wait 300 --json`",
+            "repeat it while `summary` is `pending`.",
+            "`passed`: launch the Reviewer.",
+            "`failed`: a failed check is a defect. When the fix lies within "
+            "the Task, fix it, validate, commit, push, update the report, and "
+            "start this section again for the new head; never launch a "
+            "Reviewer for the failed head. When the fix lies outside the "
+            "Task, or the change did not cause the failure, report the failed "
+            "check to the Developer and wait.",
+            "`none` after the wait, or `unavailable`: report it, with any "
+            "`reason`, to the Developer and wait.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, launch)
+        self.assertLess(launch.index("pr checks"),
+                        launch.index("Run `agent-squad reviewer launch"))
+        feedback = section(self.implementer, "## 5. Consume", "## 6.")
+        self.assertIn("after section 3's wait for checks", feedback)
+        # The spec outline names the same rule.
+        self.assertIn("`pr checks --wait`", self.spec_implementer)
+        self.assertIn("without launching for the failed head",
+                      self.spec_implementer)
+
+    def test_implementer_merges_only_a_passed_or_checkless_head(
+        self,
+    ) -> None:
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        self.assertIn(
+            "confirm in `status` or `pr checks` that `ci.summary` for the "
+            "approved head is `passed`, or `none` in a repository that runs "
+            "no checks on pull requests.", finishing)
+        self.assertIn(
+            "the approved head's CI summary is `passed`, or `none` in a "
+            "repository that runs no PR checks", self.spec_implementer)
+        self.assertNotIn("The tool itself does not read or interpret CI",
+                         self.implementer)
+
+    def test_pass_fail_results_come_from_the_cli_on_every_forge(
+        self,
+    ) -> None:
+        preamble = self.implementer.split("## 1.", 1)[0]
+        self.assertIn(
+            "On every forge, read whether the checks at a head passed, "
+            "failed, or are still pending from `ci` in `agent-squad status "
+            "--pr <N> --json` or from `agent-squad pr checks --pr <N> "
+            "[--wait <seconds>] --json`.", preamble)
+        self.assertIn("(logs, durations, required-check configuration, and "
+                      "the run at the merge commit)", preamble)
+        self.assertIn("`agent-squad pr checks --pr <N> [--wait <seconds>] "
+                      "--json`", self.reviewer.split("## 1.", 1)[0])
+
+    def test_reviewer_rules_for_ci_results(self) -> None:
+        review = section(self.reviewer, "## 5. Two-axis review", "## 6.")
+        for rule in (
+            "CI results are necessary but not sufficient for approval. Read "
+            "`ci` in `status --json` for the pinned head and list every "
+            "check with its `result` in Evidence.",
+            "A `failed` check prevents approval. Raise a blocking finding "
+            "naming the check, unless another blocking finding already "
+            "covers its cause.",
+            "A `passed` check may stand in for a check you could not run "
+            "only after you read the workflow definition at `head` and "
+            "confirm that the job runs that check; Evidence then names the "
+            "job, the workflow file, and the command.",
+            "A `passed` result satisfies repository guidance that asks for "
+            "CI evidence. Passing CI never replaces your review or your own "
+            "probes.",
+            "A result whose `source` is the Implementer's or the Reviewer's "
+            "forge account is not CI evidence; report it as such in "
+            "Evidence.",
+            "run `agent-squad pr checks --pr <N> --wait 540 --json` once",
+            "publish the verdict the other evidence supports, list the "
+            "unresolved checks in Evidence, and raise a blocking finding "
+            "only where an acceptance criterion or repository guidance "
+            "requires that result.",
+            "Request evidence the Implementer can supply, such as a test "
+            "list, a duration, or an earlier run, through a finding; it is "
+            "blocking when an acceptance criterion depends on it.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, review)
+        publish = section(self.reviewer, "## 7. Publish", "## 8.")
+        self.assertIn("no `failed` check at `head` (section 5)", publish)
+        for outline in (
+            "CI results are necessary but not sufficient for approval",
+            "a failed check prevents approval",
+            "run `pr checks --wait` once for at most ten minutes",
+        ):
+            with self.subTest(outline=outline):
+                self.assertIn(outline, self.spec_reviewer)
+
+    def test_no_skill_stops_or_asks_the_developer_for_a_ci_read(
+        self,
+    ) -> None:
+        stop = section(self.reviewer, "## 9. Early stop", "## 10.")
+        self.assertIn("Missing, pending, or unavailable CI results never "
+                      "justify stopping either", stop)
+        self.assertIn("Missing, pending, or unavailable CI results are "
+                      "never a reason to stop", self.spec_reviewer)
+        for text in (self.implementer, self.reviewer,
+                     self.spec_implementer, self.spec_reviewer):
+            for phrase in ("authorize a read path", "inaccessible CI",
+                           "supply evidence"):
+                with self.subTest(phrase=phrase):
+                    self.assertNotIn(phrase, text)

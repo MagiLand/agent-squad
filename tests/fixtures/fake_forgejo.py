@@ -289,6 +289,8 @@ class Handler(BaseHTTPRequestHandler):
             if head is None:
                 return 404, {"message": "branch not found"}
             return 200, {"name": branch, "commit": {"id": head}}
+        if parts[3] == "commits" and parts[5:] == ["status"]:
+            return self.combined_status(model, account, parts[4], query)
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "labels":
@@ -506,6 +508,43 @@ class Handler(BaseHTTPRequestHandler):
         rows = [r for r in rows if state in ("all", r["state"])]
         return 200, self.paged(
             sorted(rows, key=lambda r: r["number"], reverse=True), query)
+
+    @staticmethod
+    def combined_status(
+        model: dict, account: str, sha: str, query: dict
+    ) -> tuple[int, object]:
+        """Serve Forgejo 16.0.3's combined status as probed for #145.
+
+        ``model["checks"][sha]`` lists statuses in creation order; the read
+        keeps the latest per context, serves 30 rows by default and at most
+        50, and reports ``state`` and ``total_count`` for its page alone.
+        """
+        if account in model.get("settings", {}).get("checks_denied", []):
+            return 403, {"message": "status read refused"}
+        sequence = model.get("check_sequence", {}).get(sha)
+        if sequence and query.get("page", ["1"])[0] == "1":
+            # Each complete read takes the next scripted state.
+            model.setdefault("checks", {})[sha] = sequence.pop(0)
+        latest: dict[str, dict] = {}
+        for row in model.get("checks", {}).get(sha, []):
+            latest.pop(row["context"], None)
+            latest[row["context"]] = row
+        size = min(int(query.get("limit", ["30"])[0]), 50)
+        page = int(query.get("page", ["1"])[0])
+        rows = list(latest.values())[(page - 1) * size:page * size]
+        states = {row["status"] for row in rows}
+        state = (
+            "" if not rows
+            else "failure" if states - {"success", "pending", "skipped"}
+            else "pending" if "pending" in states
+            else "success"
+        )
+        return 200, {
+            "sha": sha,
+            "state": state,
+            "total_count": len(rows),
+            "statuses": rows or None,
+        }
 
     @staticmethod
     def paged(rows: list, query: dict) -> list:

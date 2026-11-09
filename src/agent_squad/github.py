@@ -11,10 +11,11 @@ import time
 from urllib.parse import quote, urlencode
 
 from .forge import (
-    Anchor, Comment, Evidence, ForgeError, IssueRecord, MergeResult,
-    PullRequest, Review, ReviewPublication, ReviewState, Role, Snapshot,
-    ThreadState, V, array, boolean, branch_present, delete_and_confirm,
-    object_value, oid, positive, text_value,
+    CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable, Comment,
+    Evidence, ForgeError, IssueRecord, MergeResult, PullRequest, Review,
+    ReviewPublication, ReviewState, Role, Snapshot, ThreadState, V, array,
+    boolean, branch_present, delete_and_confirm, object_value, oid, positive,
+    text_value,
 )
 from .initialization import Repository, decode_json
 
@@ -164,6 +165,76 @@ def parse_pullrequest(value: object) -> PullRequest:
         merged,
         merge_commit,
         mergeable,
+    )
+
+
+def optional_text(value: object, label: str) -> str | None:
+    """Read a field that may be absent, null, or empty as null."""
+    return None if value in (None, "") else text_value(value, label)
+
+
+def check_run_result(status: str, conclusion: str | None) -> CheckResult:
+    """Classify a check run; a conclusion not named here counts as failed."""
+    if status != "completed":
+        return "pending"
+    if conclusion in ("success", "neutral"):
+        return "passed"
+    return "skipped" if conclusion == "skipped" else "failed"
+
+
+# A commit status state not named here counts as failed (#145).
+STATUS_RESULTS: dict[str, CheckResult] = {
+    "success": "passed", "pending": "pending",
+}
+
+
+def parse_check_run(value: object, events: dict[int, str]) -> Check:
+    data = object_value(value, "check run")
+    status = text_value(data.get("status"), "check_run.status")
+    conclusion = data.get("conclusion")
+    if conclusion is not None:
+        conclusion = text_value(conclusion, "check_run.conclusion")
+    suite = data.get("check_suite")
+    suite_id = None if suite is None else positive(
+        object_value(suite, "check_suite").get("id"), "check_suite.id"
+    )
+    app = data.get("app")
+    timestamps = {
+        key: (None if data.get(key) is None
+              else V.require_timestamp(data[key], f"check_run.{key}"))
+        for key in ("started_at", "completed_at")
+    }
+    return Check(
+        text_value(data.get("name"), "check_run.name"),
+        # Only the owning workflow run states an event; never a name.
+        events.get(suite_id),
+        status if conclusion is None else f"{status}/{conclusion}",
+        check_run_result(status, conclusion),
+        None if app is None else V.require_string(
+            object_value(app, "check_run.app").get("slug"), "app.slug"
+        ),
+        optional_text(data.get("html_url"), "check_run.html_url"),
+        timestamps["started_at"],
+        timestamps["completed_at"],
+    )
+
+
+def parse_commit_status(value: object) -> Check:
+    data = object_value(value, "commit status")
+    state = text_value(data.get("state"), "status.state")
+    creator = data.get("creator")
+    return Check(
+        text_value(data.get("context"), "status.context"),
+        None,
+        state,
+        STATUS_RESULTS.get(state, "failed"),
+        None if creator is None else V.require_string(
+            object_value(creator, "status.creator").get("login"),
+            "status.creator.login",
+        ),
+        optional_text(data.get("target_url"), "status.target_url"),
+        None,
+        None,
     )
 
 
@@ -342,15 +413,17 @@ class GitHub:
             raise ForgeError(detail)
         return value
 
-    def listing(self, endpoint: str) -> list:
+    def listing(self, endpoint: str, key: str | None = None) -> list:
+        """Read every page; ``key`` names the array of a wrapped page."""
         result = []
         page = 1
         while True:
             separator = "&" if "?" in endpoint else "?"
-            entries = array(
-                self.api(f"{endpoint}{separator}per_page=100&page={page}"),
-                endpoint,
-            )
+            value = self.api(f"{endpoint}{separator}per_page=100&page={page}")
+            if key is not None:
+                # A wrapped page's total_count and state are never read.
+                value = object_value(value, endpoint).get(key)
+            entries = array(value, endpoint)
             result.extend(entries)
             if len(entries) < 100:
                 return result
@@ -560,6 +633,38 @@ class GitHub:
                 else:
                     raise
         return result
+
+    def checks(self, sha: str) -> tuple[Check, ...]:
+        """Read check runs and commit statuses at one commit (#145).
+
+        The default check-run filter keeps each run's latest attempt, and the
+        combined status keeps the latest status per context; its own state
+        reads pending for a commit without statuses, so it is never used.
+        """
+        commit = f"{self.prefix}/commits/{sha}"
+        try:
+            runs = self.listing(
+                f"{commit}/check-runs?filter=latest", "check_runs"
+            )
+            statuses = self.listing(f"{commit}/status", "statuses")
+            workflow_runs = self.listing(
+                f"{self.prefix}/actions/runs?head_sha={sha}", "workflow_runs"
+            )
+        except ForgeError as error:
+            if error.status not in CHECK_REFUSALS:
+                raise
+            raise ChecksUnavailable(str(error), error.status) from None
+        events = {}
+        for value in workflow_runs:
+            data = object_value(value, "workflow run")
+            events[positive(data.get("check_suite_id"), "check_suite_id")] = (
+                V.require_string(data.get("event"), "workflow_run.event")
+            )
+        return tuple(sorted(
+            [parse_check_run(run, events) for run in runs]
+            + [parse_commit_status(status) for status in statuses],
+            key=lambda check: (check.name, check.event or ""),
+        ))
 
     def merge(self, number: int, head: str, method: str) -> MergeResult:
         data = object_value(self.api(

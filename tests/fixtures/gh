@@ -269,6 +269,51 @@ if kind in ("branches", "rules"):
     if kind == "branches":
         output(settings.get("protection", {}))
     output(paged(settings.get("rules", []), query))
+if (kind == "commits" and parts[5:] in (["check-runs"], ["status"])) or (
+    kind == "actions" and parts[4:] == ["runs"]
+):
+    # Checks at one commit: model["checks"][sha] holds every check run
+    # attempt, every commit status in creation order, and the workflow runs.
+    if account in settings.get("checks_denied", []):
+        fail("Resource not accessible by integration", 403)
+    checks = model.setdefault("checks", {})
+    sha = number if kind == "commits" else query.get("head_sha", [""])[0]
+    first = query.get("page", ["1"])[0] == "1"
+    sequence = model.get("check_sequence", {}).get(sha)
+    if parts[5:] == ["check-runs"] and first and sequence:
+        # Each complete read takes the next scripted state.
+        checks[sha] = sequence.pop(0)
+    recorded = checks.get(sha, {})
+    if kind == "actions":
+        runs = recorded.get("workflow_runs", [])
+        output({"total_count": len(runs), "workflow_runs": paged(runs, query)})
+    if parts[5] == "check-runs":
+        runs = recorded.get("check_runs", [])
+        if query.get("filter", ["latest"])[0] == "latest":
+            latest = {}
+            for run in runs:
+                key = (run.get("check_suite", {}).get("id"), run["name"])
+                latest.pop(key, None)
+                latest[key] = run
+            runs = list(latest.values())
+        output({"total_count": len(runs), "check_runs": paged(runs, query)})
+    latest = {}
+    for status in recorded.get("statuses", []):
+        latest.pop(status["context"], None)
+        latest[status["context"]] = status
+    rows = list(latest.values())
+    states = {status["state"] for status in rows}
+    output({
+        # GitHub reports pending for a commit without statuses.
+        "state": (
+            "failure" if states & {"failure", "error"}
+            else "pending" if "pending" in states or not rows
+            else "success"
+        ),
+        "sha": sha,
+        "total_count": len(rows),
+        "statuses": paged(rows, query),
+    })
 if kind == "labels":
     output(paged(model.get("labels", []), query))
 if kind == "issues":

@@ -97,10 +97,12 @@ def parser() -> argparse.ArgumentParser:
     for name in ("claude", "codex", "force", "json"):
         skill.add_argument("--" + name, action="store_true")
     pr = command(
-        "pr", ("head", "reviews", "create", "report", "merge", "cleanup")
+        "pr",
+        ("head", "reviews", "checks", "create", "report", "merge", "cleanup"),
     )
-    for name in ("head", "reviews"):
+    for name in ("head", "reviews", "checks"):
         common(pr[name])
+    pr["checks"].add_argument("--wait", type=positive_argument)
     common(pr["create"], role="implementer", number="issue", mutation=True)
     pr["create"].add_argument("--task")
     pr["create"].add_argument("--report", required=True)
@@ -340,6 +342,9 @@ def execute(args: argparse.Namespace) -> dict:
             args.reason,
             commands.read_file(args.body),
         )
+    if key == ("pr", "checks"):
+        # Only the PR record and its checks: no fetch and no Herdr read.
+        return commands.pr_checks(forge, args.pr, args.wait)
     state = commands.state_for(
         repository,
         forge.snapshot(args.pr),
@@ -355,7 +360,8 @@ def execute(args: argparse.Namespace) -> dict:
             "reviews": state["reviews"],
             "diagnostics": state["diagnostics"],
         }
-    return state
+    # Reported beside the derived state; no other field depends on it (§7.9).
+    return {**state, "ci": commands.ci_record(forge, state["target"]["head"])}
 
 
 def reply_option_error(args: argparse.Namespace) -> str | None:
@@ -423,6 +429,21 @@ def main(argv: list[str] | None = None) -> int:
                         f'Comment {c["id"]} by {c["author"]} is an'
                         " Implementer agent note, not a Developer comment."
                     )
+            print(json.dumps(result, indent=2, default=json_default))
+        elif (args.group, getattr(args, "command", None)) == (
+            "pr", "checks",
+        ):
+            print(
+                f'CI {result["summary"]}: {len(result["checks"])} checks at'
+                f' {result["head"]}'
+            )
+            if result.get("head_changed"):
+                print("The PR head changed; stopped waiting.")
+            elif result.get("timed_out"):
+                print(
+                    f'Stopped waiting after {result["waited_seconds"]}'
+                    " seconds; checks are not final."
+                )
             print(json.dumps(result, indent=2, default=json_default))
         elif (args.group, getattr(args, "command", None)) == (
             "issue", "create",
