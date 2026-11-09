@@ -191,24 +191,27 @@ def pr_checks(forge: Forge, number: int, wait: int | None = None) -> dict:
     """Report the checks at the PR's current head, optionally waiting.
 
     With ``wait`` the read repeats through ``pending`` and ``none``, because
-    checks appear some seconds after a push, and ends early if the head moves.
+    checks appear some seconds after a push. The PR head is read again after
+    every checks read, so a head that moved before or during the read that
+    ends the wait is reported as ``head_changed`` with the old head's result.
     """
     head = forge.pr(number).head
     if wait is None:
         return ci_record(forge, head)
     start = time.monotonic()
-    record = ci_record(forge, head)
     timed_out = head_changed = False
-    while record["summary"] in ("pending", "none"):
+    while True:
+        record = ci_record(forge, head)
+        if forge.pr(number).head != head:
+            head_changed = True
+            break
+        if record["summary"] not in ("pending", "none"):
+            break
         remaining = start + wait - time.monotonic()
         if remaining <= 0:
             timed_out = True
             break
         time.sleep(min(CHECK_POLL_INTERVAL, remaining))
-        if forge.pr(number).head != head:
-            head_changed = True
-            break
-        record = ci_record(forge, head)
     return {
         **record,
         "waited_seconds": round(time.monotonic() - start),

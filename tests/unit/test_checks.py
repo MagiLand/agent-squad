@@ -249,13 +249,41 @@ class WaitTests(unittest.TestCase):
         self.assertEqual((sleeps, result["timed_out"]), ([], False))
 
     def test_head_change_ends_the_wait_early(self) -> None:
-        forge = StubForge(["pending", "passed"], heads=[H, OTHER])
+        # The head moves during the sleep; the next read is followed by a
+        # head read that reports the change.
+        forge = StubForge(["pending", "pending"], heads=[H, H, OTHER])
         result, sleeps = self.run_wait(forge, 600)
         self.assertTrue(result["head_changed"])
         self.assertFalse(result["timed_out"])
         self.assertEqual((result["head"], result["summary"]),
                          (H, "pending"))
-        self.assertEqual((sleeps, forge.reads), ([10], [H]))
+        self.assertEqual((sleeps, forge.reads), ([10], [H, H]))
+
+    def test_head_change_during_a_final_read_is_reported(self) -> None:
+        """REV-1: a final result for the old head never ends the wait
+        as if the head had not moved."""
+        for name, results, heads, sleeps_expected in (
+            ("initial read", ["passed"], [H, OTHER], []),
+            ("read after a poll", ["pending", "passed"], [H, H, OTHER],
+             [10]),
+        ):
+            with self.subTest(name):
+                forge = StubForge(results, heads=heads)
+                result, sleeps = self.run_wait(forge, 600)
+                self.assertTrue(result["head_changed"])
+                self.assertFalse(result["timed_out"])
+                # The result stays attributed to the head it was read at.
+                self.assertEqual((result["head"], result["summary"]),
+                                 (H, "passed"))
+                self.assertEqual(sleeps, sleeps_expected)
+
+    def test_unmoved_head_reports_no_change(self) -> None:
+        for results in (["passed"], ["pending", "passed"]):
+            with self.subTest(results=results):
+                forge = StubForge(results, heads=[H, H, H])
+                result, _ = self.run_wait(forge, 600)
+                self.assertFalse(result["head_changed"])
+                self.assertEqual(result["summary"], "passed")
 
 
 class RecordTests(unittest.TestCase):
