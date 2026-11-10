@@ -117,14 +117,17 @@ class ForgeFixture:
             key: value
             for key, value in os.environ.items()
             if not (
-                key.startswith(
-                    ("GIT_", "GH_", "GITHUB_", "PYTHON", "FAKE_", "HERDR_")
-                )
+                key.startswith((
+                    "GIT_", "GH_", "GITHUB_", "PYTHON", "FAKE_", "HERDR_",
+                    "AGENT_SQUAD_",
+                ))
             )
         }
         self.env.update(
             PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
             HOME=str(self.root / "home"),
+            # The CLI's event store, outside HOME (docs/events.md).
+            XDG_STATE_HOME=str(self.root / "state"),
             PYTHONPATH=str(SRC_ROOT),
             FAKE_FORGE_MODEL=str(self.model_path),
             FAKE_HERDR_MODEL=str(self.root / "herdr.json"),
