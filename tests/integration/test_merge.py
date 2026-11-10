@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 import shlex
@@ -84,6 +85,7 @@ class ExternalWorktreeMergeTests(unittest.TestCase):
         """PR #134 REV-2: only the record's vacant issue path is admitted."""
         f, review = self.external()
         f.herdr_settings(snapshot_failure=True)
+        start = len(f.read_model()["calls"])
         result = run_pr(self, f, "merge", 3)
         self.assertEqual(result["cleanup"][-1]["step"], "review worktree")
         self.assertFalse(f.worktree.exists())
@@ -107,6 +109,13 @@ class ExternalWorktreeMergeTests(unittest.TestCase):
         self.assertFalse(review.exists())
         self.assertEqual(f.herdr_model()["workspaces"], [])
         self.assertFalse((f.repo / ".git/agent-squad-merge-pr1.json").exists())
+        # pr merge and pr cleanup read no dependency and change no
+        # label (#144).
+        self.assertEqual([
+            c["arguments"][1] for c in f.read_model()["calls"][start:]
+            if re.search(r"/issues/\d+/(labels|dependencies)",
+                         c["arguments"][1])
+        ], [])
 
 
 class MergeTests(unittest.TestCase):
@@ -448,6 +457,7 @@ class MergeTests(unittest.TestCase):
         unrelated = f.repo / ".agent-squad/review-scratch/pr10"
         unrelated.mkdir()
         (unrelated / "keep").write_text("keep")
+        start = len(f.read_model()["calls"])
         result = self.merge(cwd=f.worktree)
         self.assertEqual(result["integration"], "verified by ancestry")
         self.assertNotEqual(result["merge_commit"], self.head)
@@ -464,6 +474,12 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(merges[0]["account"], "developer")
         self.assertEqual(merges[0]["body"], {
                          "sha": self.head, "merge_method": "merge"})
+        # pr merge reads no dependency and changes no label (#144).
+        self.assertEqual([
+            c["arguments"][1] for c in calls[start:]
+            if re.search(r"/issues/\d+/(labels|dependencies)",
+                         c["arguments"][1])
+        ], [])
 
     def test_squash_verifies_tree_identity_and_forge_branch_deletion(
         self,

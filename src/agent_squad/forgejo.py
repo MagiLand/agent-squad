@@ -29,9 +29,11 @@ from .forge import (
     Comment,
     Evidence,
     ForgeError,
+    IssueDependencies,
     IssueRecord,
     MergeResult,
     PullRequest,
+    RelatedIssue,
     Review,
     ReviewPublication,
     ReviewState,
@@ -43,9 +45,11 @@ from .forge import (
     boolean,
     branch_present,
     delete_and_confirm,
+    exposed,
     object_value,
     oid,
     positive,
+    related_issue,
     text_value,
 )
 from .initialization import (
@@ -67,6 +71,10 @@ TIMESTAMP = re.compile(
 )
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
 FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
+# The page size of the one blocks read (#144): F16 FormInt parses the limit
+# with strconv.Atoi, and this is the largest value every platform's int
+# holds, above any number of issues one issue can block.
+FORGEJO_BLOCKS_LIMIT = 2**31 - 1
 
 
 def anchor_payload(anchor: Anchor) -> dict[str, object]:
@@ -147,6 +155,22 @@ def parse_issue(value: object) -> IssueRecord:
         ],
         "comments": (),
     }
+
+
+def parse_related_issue(value: object) -> RelatedIssue | None:
+    """Read a dependency row; null for a row the forge hides (#144).
+
+    F16 serves a blocker that the identity may not read as an issue
+    numbered 0, without its repository.
+    """
+    data = object_value(value, "related issue")
+    if data.get("number") == 0:
+        return None
+    repository = object_value(data.get("repository"), "issue.repository")
+    return related_issue(
+        data.get("number"), data.get("title"), data.get("state"),
+        V.require_string(repository.get("full_name"), "repository.full_name"),
+    )
 
 
 def parse_pullrequest(value: object) -> PullRequest:
@@ -617,6 +641,70 @@ class Forgejo:
                 f'issue {record["number"]} created; response mismatch'
             )
         return record
+
+    def _all_pages(self, endpoint: str) -> list:
+        """Read pages until an empty one; fail a page that repeats."""
+        result: list = []
+        previous = None
+        page = 1
+        while True:
+            entries = array(
+                self.api(f"{endpoint}?limit=50&page={page}"), "list"
+            )
+            if not entries:
+                return result
+            if entries == previous:
+                raise ForgeError(f"{endpoint} repeated a page")
+            result.extend(entries)
+            previous = entries
+            page += 1
+
+    def issue_dependencies(self, number: int) -> IssueDependencies:
+        endpoint = f"{self.prefix}/issues/{number}"
+
+        def parsed(rows: list) -> list[RelatedIssue] | None:
+            found = [parse_related_issue(row) for row in rows]
+            # A hidden dependency leaves the list unknown, not shorter.
+            return None if None in found else found
+
+        def blocks() -> list[RelatedIssue] | None:
+            # F16 GetIssueBlocks slices the whole list by page and limit
+            # before it drops the issues the identity may not read, so any
+            # page, even an empty one, may precede readable rows. It never
+            # caps limit, so this one page holds every readable issue.
+            return parsed(array(self.api(
+                f"{endpoint}/blocks?limit={FORGEJO_BLOCKS_LIMIT}&page=1"
+            ), "list"))
+
+        return {
+            "blocks": exposed(blocks),
+            # GetIssueDependencies pages in the database, caps limit, and
+            # keeps a row for every blocker, so paging ends at an empty page.
+            "blocked_by": exposed(
+                lambda: parsed(self._all_pages(f"{endpoint}/dependencies"))
+            ),
+        }
+
+    def change_issue_labels(
+        self, number: int, add: tuple[str, ...], remove: tuple[str, ...],
+    ) -> None:
+        """Add, then remove one at a time; never replace the whole set."""
+        endpoint = f"{self.prefix}/issues/{number}/labels"
+        if add:
+            # By ID: F16 drops an unknown name or ID silently, and a name
+            # would also add an organization label of the same name.
+            ids = self._label_ids()
+            for name in add:
+                if name not in ids:
+                    raise ForgeError(f"repository has no {name} label")
+            self.api(
+                endpoint, method="POST",
+                body={"labels": [ids[name] for name in add]},
+            )
+        for name in remove:
+            # By name: F16 looks the name up among the repository's labels
+            # first and reads it as a label ID only when none has that name.
+            self.api(f'{endpoint}/{quote(name, safe="")}', method="DELETE")
 
     def pr(self, number: int) -> PullRequest:
         data = self.api(f"{self.prefix}/pulls/{number}")

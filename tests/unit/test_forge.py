@@ -395,6 +395,90 @@ class ForgeBoundaryTests(unittest.TestCase):
             'labels': ['needs-triage'], 'comments': (),
         })
 
+    def test_dependencies_read_both_lists_and_null_a_refused_one(
+        self,
+    ) -> None:
+        def row(number: int, url: str = 'repos/org/repo') -> dict:
+            return dict(forge_evidence(), number=number, title=f'T{number}',
+                        state='closed' if number % 2 else 'open',
+                        repository_url=f'https://api.github.com/{url}')
+
+        blocking = [row(i) for i in range(1, 101)]
+        with patch.object(self.forge, 'api', side_effect=[
+            blocking, [row(101, 'repos/other-org/other.repo')],
+            [row(102)],
+        ]) as api:
+            found = self.forge.issue_dependencies(5)
+        self.assertEqual([call.args[0] for call in api.call_args_list], [
+            '/repos/org/repo/issues/5/dependencies/blocking'
+            '?per_page=100&page=1',
+            '/repos/org/repo/issues/5/dependencies/blocking'
+            '?per_page=100&page=2',
+            '/repos/org/repo/issues/5/dependencies/blocked_by'
+            '?per_page=100&page=1',
+        ])
+        self.assertEqual(len(found['blocks']), 101)
+        self.assertEqual(found['blocks'][-1], {
+            'number': 101, 'title': 'T101', 'state': 'closed',
+            'repository': 'other-org/other.repo',
+        })
+        self.assertEqual(found['blocked_by'], [{
+            'number': 102, 'title': 'T102', 'state': 'open',
+            'repository': 'org/repo',
+        }])
+        for status in (401, 403, 404):
+            with self.subTest(status=status):
+                with patch.object(self.forge, 'api', side_effect=[
+                    CommandFailed('refused', status, ''), [],
+                ]):
+                    self.assertEqual(
+                        self.forge.issue_dependencies(5),
+                        {'blocks': None, 'blocked_by': []},
+                    )
+        for failure in (
+            CommandFailed('server error', 500, ''), ForgeError('timeout'),
+        ):
+            with self.subTest(failure=str(failure)):
+                with patch.object(self.forge, 'api', side_effect=failure):
+                    with self.assertRaises(ForgeError):
+                        self.forge.issue_dependencies(5)
+        for field, value, message in (
+            ('repository_url', 'https://api.github.com/repos/org',
+             'repository_url must name a repository'),
+            ('repository_url', 'https://api.github.com/users/org/repo',
+             'repository_url must name a repository'),
+            ('repository_url', None, 'repository_url must be a string'),
+            ('state', 'merged', 'state must be open or closed'),
+            ('number', 0, 'related issue number must be positive'),
+        ):
+            with self.subTest(field=field, value=value):
+                with patch.object(self.forge, 'api', return_value=[
+                    {**row(3), field: value},
+                ]):
+                    with self.assertRaisesRegex(ForgeError, message):
+                        self.forge.issue_dependencies(5)
+
+    def test_label_changes_add_once_then_remove_each_by_encoded_name(
+        self,
+    ) -> None:
+        with patch.object(self.forge, 'api', return_value=[]) as api:
+            self.forge.change_issue_labels(
+                5, ('ready-for-agent', 'area: x'), ('a/b c', 'stale'))
+        self.assertEqual([(c.args, c.kwargs) for c in api.call_args_list], [
+            (('/repos/org/repo/issues/5/labels',),
+             {'method': 'POST',
+              'body': {'labels': ['ready-for-agent', 'area: x']}}),
+            (('/repos/org/repo/issues/5/labels/a%2Fb%20c',),
+             {'method': 'DELETE'}),
+            (('/repos/org/repo/issues/5/labels/stale',),
+             {'method': 'DELETE'}),
+        ])
+        # An empty add list is never sent.
+        with patch.object(self.forge, 'api', return_value=[]) as api:
+            self.forge.change_issue_labels(5, (), ('stale',))
+        api.assert_called_once_with(
+            '/repos/org/repo/issues/5/labels/stale', method='DELETE')
+
     def test_unsupported_resolution_exits_before_reading_or_mutating(
         self,
     ) -> None:

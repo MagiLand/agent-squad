@@ -61,6 +61,9 @@ V = JsonValidator(AgentSquadError)
 T = TypeVar("T")
 # The one label of an issue the Implementer files (#112); not configurable.
 TRIAGE_LABEL = "needs-triage"
+# The labels that keep an issue from being a Task (§7.2), which `issue label`
+# never removes (#144); compared without regard to case.
+PROTECTED_LABELS = (TRIAGE_LABEL, "needs-info", "ready-for-human", "wontfix")
 # Seconds between the reads of `pr checks --wait` (#145).
 CHECK_POLL_INTERVAL = 10.0
 
@@ -250,7 +253,69 @@ def view_issue(repository: Repository, forge: Forge, number: int) -> dict:
             {**asdict(c), "agent_note": is_note(c.body)}
             for c in record["comments"]
         ],
+        # Only this read asks for dependencies (#144).
+        **forge.issue_dependencies(number),
         "paths": workflow_paths(repository, issue=number),
+    }
+
+
+def label_issue(
+    forge: Forge, number: int, add: list[str], remove: list[str],
+) -> dict:
+    """Add and remove existing repository labels on one issue (#144)."""
+    add_names = tuple(dict.fromkeys(add))
+    remove_names = tuple(dict.fromkeys(remove))
+    if not add_names and not remove_names:
+        raise AgentSquadError("issue label requires --add or --remove")
+    for name in add_names:
+        if name in remove_names:
+            raise AgentSquadError(
+                f"issue label cannot both add and remove {name}"
+            )
+    for name in remove_names:
+        if name.casefold() in PROTECTED_LABELS:
+            raise AgentSquadError(
+                f"issue label never removes {name}, which keeps an issue"
+                " from being a Task"
+            )
+    record = forge.issue(number)
+    if record["is_pull_request"]:
+        raise AgentSquadError(
+            f"issue label requires an issue, not pull request #{number}"
+        )
+    # Check before writing: a forge may drop or create an unknown label.
+    existing = set(forge.labels())
+    for name in (*add_names, *remove_names):
+        if name not in existing:
+            raise AgentSquadError(
+                f"repository has no label named {name}; issue label never"
+                " creates one"
+            )
+    before = record["labels"]
+    adding = tuple(name for name in add_names if name not in before)
+    removing = tuple(name for name in remove_names if name in before)
+    after = before
+    if adding or removing:
+        forge.change_issue_labels(number, adding, removing)
+        after = forge.issue(number)["labels"]
+        # Check every request, not only the writes: adding a label can
+        # remove another one in its exclusive scope on Forgejo (PR #156).
+        missed = [f"{name} is not on the issue" for name in add_names
+                  if name not in after]
+        missed += [f"{name} is still on the issue" for name in remove_names
+                   if name in after]
+        if missed:
+            raise AgentSquadError(
+                f"issue #{number} read back after the label change: "
+                + "; ".join(missed)
+            )
+    return {
+        "issue": number,
+        "state": record["state"],
+        "labels_before": before,
+        "labels_after": after,
+        "added": list(adding),
+        "removed": list(removing),
     }
 
 

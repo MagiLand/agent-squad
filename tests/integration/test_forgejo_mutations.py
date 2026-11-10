@@ -1,6 +1,7 @@
 """Forgejo write/recovery contracts through the CLI."""
 
 import json
+import re
 import sys
 import unittest
 from unittest.mock import patch
@@ -586,6 +587,7 @@ class ForgejoMutationTests(unittest.TestCase):
         target = f.root / "foreign-scratch"
         target.mkdir()
         scratch.symlink_to(target, target_is_directory=True)
+        merge_start = len(f.read_model()["calls"])
         result = self.merge(3)
         self.assertEqual(result["cleanup"][-1]["step"], "scratch directory")
         self.assertFalse(f.worktree.exists())
@@ -605,6 +607,12 @@ class ForgejoMutationTests(unittest.TestCase):
         self.assertEqual(
             [c for c in calls if c["method"] != "GET"], [])
         self.assertFalse((f.repo / ".git/agent-squad-merge-pr1.json").exists())
+        # pr merge and pr cleanup read no dependency and change no label.
+        self.assertEqual([
+            c["path"] for c in f.read_model()["calls"][merge_start:]
+            if re.search(r"/issues/\d+/(labels|dependencies|blocks)",
+                         c["path"])
+        ], [])
 
     def test_merge_ancestry_and_tracking_cleanup_use_premerge_identity(self):
         f = self.f
