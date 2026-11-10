@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -260,13 +261,17 @@ class StoreTests(unittest.TestCase):
             (self.environ, "pass", f"writable: {self.store}"),
             ({"XDG_STATE_HOME": str(blocked)}, "warn",
              f"not writable: {blocked}/agent-squad/events: "),
-            ({"AGENT_SQUAD_EVENTS": "off"}, "pass",
+            # The temporary location keeps a broken check out of HOME.
+            ({**self.environ, "AGENT_SQUAD_EVENTS": "off"}, "pass",
              "recording disabled by AGENT_SQUAD_EVENTS=off"),
         ):
             with self.subTest(severity=severity, detail=detail):
+                shutil.rmtree(self.root / "state", ignore_errors=True)
                 result = events.diagnose(environ)
                 self.assertEqual(result[0], severity)
                 self.assertTrue(result[1].startswith(detail), result[1])
+                self.assertEqual((self.root / "state").exists(),
+                                 detail.startswith("writable"))
 
 
 if __name__ == "__main__":
