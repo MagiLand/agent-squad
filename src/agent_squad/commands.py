@@ -23,6 +23,7 @@ from .conventions import (
     parse_line,
     render_line,
     replace_section,
+    require_open_issue,
     section,
     task_from_issue,
     validate_merge_directive,
@@ -358,6 +359,8 @@ def create_pr(
     title: str | None,
 ) -> dict:
     issue_record = forge.issue(issue)
+    # Also with --task: the issue number is then typed by hand.
+    require_open_issue(issue_record)
     task = validate_section(
         task if task is not None else task_from_issue(issue_record), "Task"
     )

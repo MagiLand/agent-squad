@@ -226,12 +226,17 @@ def replace_section(body: str, name: str, replacement: str) -> str:
     return body[:start] + replacement + "\n\n" + body[end:]
 
 
-def task_from_issue(issue: dict) -> str:
-    """Copy issue wording into one Task section, nesting only ATX headings."""
+def require_open_issue(issue: dict) -> None:
+    """Refuse a pull request or a closed issue as the issue a PR closes."""
     if issue["is_pull_request"]:
         raise AgentSquadError("Task requires an issue, not a pull request")
     if issue["state"] != "open":
         raise AgentSquadError("Task requires an open issue")
+
+
+def task_from_issue(issue: dict) -> str:
+    """Copy issue wording into one Task section, nesting only ATX headings."""
+    require_open_issue(issue)
     body = issue["body"].replace("\r\n", "\n").replace("\r", "\n")
     if not body.strip():
         raise AgentSquadError("issue body must not be empty")
