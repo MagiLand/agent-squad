@@ -32,7 +32,7 @@ from agent_squad.forgejo import (  # noqa: E402
     parse_review,
     read_token,
 )
-from agent_squad.forge import ForgeError  # noqa: E402
+from agent_squad.forge import ForgeError, MergeRefused  # noqa: E402
 
 
 def forgejo_config():
@@ -978,7 +978,7 @@ class MutationContractTests(unittest.TestCase):
             "/repos/owner/repo/pulls/1/reviews/20", method="DELETE",
         )
 
-    def test_branch_identity_guard_absence_and_refusal_statuses(self):
+    def test_branch_identity_guard_and_absence(self):
         forge = self.forge()
         forge.api.side_effect = ForgeError("absent", 404)
         forge.delete_branch("feat/topic", "a" * 40)
@@ -992,13 +992,86 @@ class MutationContractTests(unittest.TestCase):
             with self.assertRaises(ForgeError):
                 forge.delete_branch("feat/topic", "a" * 40)
             self.assertEqual(forge.api.call_count, 1)
-        for status in (403, 405, 409, 422):
-            forge.api.reset_mock()
-            forge.api.side_effect = ForgeError("refused", status)
-            with self.assertRaises(ForgeError) as caught:
-                forge.merge(1, "a" * 40, "merge")
-            self.assertEqual(caught.exception.status, status)
-            self.assertEqual(forge.api.call_count, 1)
+
+    def merge_after_answer(self, answer: ForgeError, read: object):
+        """Send one merge that Forgejo answers with ``answer``; ``read`` is
+        the PR the read that follows returns, or the error it raises."""
+        forge = self.forge()
+        forge.api.side_effect = answer
+        forge.pr = (Mock(side_effect=read) if isinstance(read, Exception)
+                    else Mock(return_value=read))
+        try:
+            return forge.merge(1, "a" * 40, "merge"), None
+        except ForgeError as error:
+            return None, error
+        finally:
+            # The request is unchanged, and only one read of the PR follows.
+            forge.api.assert_called_once_with(
+                "/repos/owner/repo/pulls/1/merge", method="POST",
+                body={"Do": "merge", "head_commit_id": "a" * 40,
+                      "delete_branch_after_merge": True},
+            )
+            if answer.status is None:
+                forge.pr.assert_not_called()
+            else:
+                forge.pr.assert_called_once_with(1)
+
+    def test_error_answer_for_an_unmerged_pr_is_a_refusal(self):
+        """#142: the read, not the status, makes the refusal."""
+        unmerged = SimpleNamespace(merged=False, merge_commit=None)
+        for status in (400, 403, 404, 405, 409, 422, 500, 502):
+            with self.subTest(status=status):
+                result, error = self.merge_after_answer(
+                    ForgeError("head out of date", status), unmerged)
+                self.assertIsNone(result)
+                self.assertIs(type(error), MergeRefused)
+                self.assertEqual(error.status, status)
+                self.assertEqual(str(error), "head out of date")
+
+    def test_error_answer_after_a_completed_merge_returns_the_merge(self):
+        """#142: F16 answers 403 or 500 when the deletion after a merge
+        fails; the merge is used and the answer is reported."""
+        merged = SimpleNamespace(merged=True, merge_commit="b" * 40)
+        for status, message in ((403, "the head branch is protected"),
+                                (500, ""), (502, "bad gateway")):
+            with self.subTest(status=status):
+                result, error = self.merge_after_answer(
+                    ForgeError(message, status), merged)
+                self.assertIsNone(error)
+                self.assertEqual(result, {
+                    "sha": "b" * 40, "message": "merge confirmed",
+                    "answer": {"status": status, "message": message},
+                })
+        forge = self.forge()
+        forge.api.return_value = None
+        forge.pr = Mock(return_value=merged)
+        self.assertEqual(forge.merge(1, "a" * 40, "merge"),
+                         {"sha": "b" * 40, "message": "merge confirmed"})
+
+    def test_unknown_outcomes_after_an_error_answer_drop_the_status(self):
+        protected = ForgeError("the head branch is protected", 403)
+        for read, expected in (
+            (ForgeError("read failed", 403),
+             "merge answered 403: the head branch is protected;"
+             " confirmation failed: read failed; re-read the PR"),
+            (SimpleNamespace(merged=True, merge_commit=None),
+             "merge answered 403: the head branch is protected;"
+             " merge not confirmed; re-read the PR"),
+        ):
+            with self.subTest(read=read):
+                result, error = self.merge_after_answer(protected, read)
+                self.assertIsNone(result)
+                self.assertIs(type(error), ForgeError)
+                self.assertIsNone(error.status)
+                self.assertEqual(str(error), expected)
+        _, error = self.merge_after_answer(
+            ForgeError("", 500), ForgeError("read failed", 404))
+        self.assertTrue(str(error).startswith(
+            "merge answered 500; confirmation failed"))
+        # No answer arrived, so nothing is read and nothing is classified.
+        timeout = ForgeError("forge request failed or timed out")
+        _, error = self.merge_after_answer(timeout, None)
+        self.assertIs(error, timeout)
 
     def test_failed_branch_delete_is_decided_by_a_fresh_read(self):
         """#120: a deletion by anyone else after the read answers 500."""

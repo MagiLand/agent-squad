@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Callable, Literal, Protocol, TypedDict, runtime_checkable
+from typing import (
+    Callable, Literal, NotRequired, Protocol, TypedDict, runtime_checkable,
+)
 import re
 
 from .initialization import AgentSquadError, Repository
@@ -34,6 +36,11 @@ class ForgeError(AgentSquadError):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class MergeRefused(ForgeError):
+    """An error answer to a merge request, after which a read of the PR
+    showed it still unmerged: a refusal whatever its status (#142)."""
 
 
 V = JsonValidator(ForgeError)
@@ -252,9 +259,16 @@ def exposed(
         raise
 
 
+class MergeAnswer(TypedDict):
+    status: int
+    message: str
+
+
 class MergeResult(TypedDict):
     sha: str
     message: str
+    # The error answer of a merge request the forge completed (#142).
+    answer: NotRequired[MergeAnswer]
 
 
 @runtime_checkable

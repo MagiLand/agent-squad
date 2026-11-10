@@ -31,6 +31,7 @@ from .forge import (
     ForgeError,
     IssueDependencies,
     IssueRecord,
+    MergeRefused,
     MergeResult,
     PullRequest,
     RelatedIssue,
@@ -1039,26 +1040,53 @@ class Forgejo:
         raise ForgeError("not supported on this forge")
 
     def merge(self, number: int, head: str, method: str) -> MergeResult:
-        self.api(
-            f"{self.prefix}/pulls/{number}/merge", method="POST",
-            body={"Do": method, "head_commit_id": head,
-                  "delete_branch_after_merge": True},
-        )
+        answer: ForgeError | None = None
+        try:
+            self.api(
+                f"{self.prefix}/pulls/{number}/merge", method="POST",
+                body={"Do": method, "head_commit_id": head,
+                      "delete_branch_after_merge": True},
+            )
+        except ForgeError as error:
+            if error.status is None:
+                # No answer arrived (a timeout or a broken connection), so
+                # the outcome stays unknown and nothing is read.
+                raise
+            # F16 merges before it deletes the head branch and answers 403
+            # or 500 when that deletion fails, with the PR already merged.
+            # One read of the PR decides, whatever the status (#142).
+            answer = error
+        context = "merge submitted"
+        if answer is not None:
+            context = f"merge answered {answer.status}" + (
+                f": {answer}" if str(answer) else ""
+            )
         # A successful POST may have no body. The merged PR's head can change
         # after branch deletion (E9); only its merge commit is used here.
         try:
             pr = self.pr(number)
         except ForgeError as error:
-            # A failed confirmation read is not a refusal of the POST that
-            # already succeeded. Drop its HTTP status so callers retain an
-            # uncertain merge outcome and all local resources.
+            # A failed read is not a refusal: the merge may have completed.
+            # Drop its HTTP status so callers retain an uncertain merge
+            # outcome and all local resources.
             raise ForgeError(
-                f"merge submitted; confirmation failed: {error}; "
-                "re-read the PR"
+                f"{context}; confirmation failed: {error}; re-read the PR"
             ) from None
+        if answer is not None and not pr.merged:
+            raise MergeRefused(str(answer), answer.status)
         if not pr.merged or pr.merge_commit is None:
-            raise ForgeError("merge not confirmed; re-read the PR")
-        return {"sha": pr.merge_commit, "message": "merge confirmed"}
+            raise ForgeError(
+                "merge not confirmed; re-read the PR" if answer is None
+                else f"{context}; merge not confirmed; re-read the PR"
+            )
+        result: MergeResult = {
+            "sha": pr.merge_commit, "message": "merge confirmed",
+        }
+        if answer is not None and answer.status is not None:
+            result["answer"] = {
+                "status": answer.status, "message": str(answer),
+            }
+        return result
 
     def branch_head(self, branch: str) -> str | None:
         try:
