@@ -80,10 +80,11 @@ class EventStoreTests(unittest.TestCase):
                     (event["exit_code"], event["project"], event["forge"]),
                     (exit_code, project, "github"),
                 )
+        # init records the configuration it wrote.
         self.assertEqual(
-            [(e["group"], e["command"], e["exit_code"])
+            [(e["group"], e["command"], e["exit_code"], e["project"])
              for e in self.events()[:2]],
-            [("init", None, 0), ("pr", "create", 0)],
+            [("init", None, 0, project), ("pr", "create", 0, project)],
         )
 
     def test_usage_errors_are_recorded_and_help_is_not(self) -> None:
