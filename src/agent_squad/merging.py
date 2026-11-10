@@ -12,7 +12,7 @@ import tempfile
 from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
-from .conventions import SHA
+from .conventions import SHA, closes_issue
 from .forge import ForgeError, Forge
 from .herdr import HerdrClient, HerdrError
 from .initialization import (
@@ -666,7 +666,8 @@ def merge_pr(
     method = repository.configuration.merge_method
     result = {
         "pr": pr, "head": target["head"], "merge_method": method,
-        "moved_base": moved, "mergeable_state": snapshot.pr.mergeable_state,
+        "moved_base": moved, "closes_issue": state["closes_issue"],
+        "mergeable_state": snapshot.pr.mergeable_state,
         "branch_rules": rules,
         "fast_forward": {
             "result": "skipped", "from": None, "to": None,
@@ -729,7 +730,8 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
     return complete_merge(repository, forge, record, merged.merge_commit, {
         "pr": pr, "head": record["head"],
         "merge_method": record["merge_method"],
-        "moved_base": record["moved_base"], "merged": True,
+        "moved_base": record["moved_base"],
+        "closes_issue": closes_issue(merged.evidence.body), "merged": True,
         "merge_commit": merged.merge_commit,
         "fast_forward": {
             "result": "skipped", "from": None, "to": None,

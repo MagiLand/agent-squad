@@ -12,9 +12,13 @@ from agent_squad.conventions import (  # noqa: E402
     MERGE_INSTRUCTION,
     MERGE_WITHDRAWAL,
     allocate_id,
+    closes_issue,
     derive,
     is_note,
     parse_line,
+    pr_footer,
+    refuse_closing_reference,
+    refuse_partial_closing,
     render_line,
     replace_section,
     review_findings,
@@ -292,6 +296,113 @@ class IssueTaskTests(unittest.TestCase):
                 issue = self.issue("Requirements") | overrides
                 with self.assertRaisesRegex(AgentSquadError, message):
                     task_from_issue(issue)
+
+
+class PartialDeliveryTests(unittest.TestCase):
+    """#146: Closes or Ref after the report, and the closing-keyword guard."""
+
+    UPDATED = REPORT.replace("Scripted fixture.", "Updated.")
+
+    def body(self, footer: str, report: str = REPORT) -> str:
+        return TASK + "\n" + report + "\n" + footer
+
+    def test_replacements_keep_either_footer_and_never_swap_it(self) -> None:
+        for word, other in (("Closes", "Ref"), ("Ref", "Closes")):
+            for tail in ("", "\n## Notes\n\nKeep this.\n"):
+                with self.subTest(word=word, tail=bool(tail)):
+                    body = self.body(f"{word} #42\n" + tail)
+                    replaced = replace_section(
+                        body, "Implementation report", self.UPDATED
+                    )
+                    self.assertEqual(
+                        replaced,
+                        TASK + "\n" + self.UPDATED.strip()
+                        + f"\n\n{word} #42\n" + tail,
+                    )
+                    self.assertNotIn(f"{other} #42", replaced)
+                    task = replace_section(
+                        body, "Task", TASK.replace("Exercise", "Amend")
+                    )
+                    self.assertTrue(task.endswith(f"\n{word} #42\n" + tail))
+                    self.assertNotIn(f"{other} #42", task)
+
+    def test_footer_is_the_last_reference_line_after_the_report(self) -> None:
+        # A reference line inside the report is content, not the footer.
+        report = REPORT.replace(
+            "### Scope\n\nScripted fixture.",
+            "### Scope\n\nClosing another issue:\n\nCloses #12\n\nRef #7",
+        )
+        body = self.body("Ref #42\n", report)
+        footer = pr_footer(body)
+        self.assertEqual((footer["word"], footer["issue"]), ("Ref", "42"))
+        self.assertFalse(closes_issue(body))
+        replaced = replace_section(body, "Implementation report", REPORT)
+        self.assertEqual(replaced, self.body("Ref #42\n"))
+        # A reference line in the Task is not a footer.
+        task = TASK + "\nCloses #42\n"
+        self.assertIsNone(pr_footer(task + "\n" + REPORT))
+
+    def test_closes_issue_is_true_false_or_null_from_the_footer(self) -> None:
+        for body, expected in (
+            (self.body("Closes #42\n"), True),
+            (self.body("Ref #42\n"), False),
+            (self.body("Ref #42  \n\n"), False),
+            (self.body(""), None),
+            (self.body("Fixes #42\n"), None),
+            (self.body("closes #42\n"), None),
+            (self.body("Closes #042\n"), None),
+            (TASK + "\nCloses #42\n\n" + REPORT, None),
+            (TASK + REPORT + "\nCloses #42\n" + REPORT, None),
+        ):
+            with self.subTest(body=body[-40:]):
+                self.assertIs(closes_issue(body), expected)
+                self.assertIs(
+                    derive_state(snapshot(body=body))["closes_issue"],
+                    expected,
+                )
+
+    def test_closing_keyword_before_the_own_issue_is_refused(self) -> None:
+        for text in (
+            "Closes #42", "closes #42", "CLOSES #42", "Closes: #42",
+            "close #42", "closed #42", "Fix #42", "fixes: #42",
+            "FIXED #42", "resolve #42", "Resolves #42", "rEsOlVeD:#42",
+            "Fixes  #42.", "This PR fixes #42 in part.", "(fixes #42)",
+            "Closes #042", "Closes:\n#42", "Closes : #42",
+            # Broader than the forges, which need a separator after #42.
+            "Closes #42a1",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(
+                    AgentSquadError, "must not close issue #42"
+                ):
+                    refuse_closing_reference(
+                        "## Task\n\nPrefix.\n" + text + "\n", 42, "Task"
+                    )
+        for text in (
+            "Closes #43", "Closes #421", "Closes #4", "Ref #42",
+            "Part of #42", "closing #42", "Closes issue #42",
+            "prefix #42", "unfixed #42", "fixture #42",
+        ):
+            with self.subTest(text=text):
+                refuse_closing_reference(text, 42, "Task")
+        with self.assertRaisesRegex(
+            AgentSquadError,
+            r"the Implementation report names it after a closing keyword"
+            r' on line 3 \("Fixes: #42"\)',
+        ):
+            refuse_closing_reference(
+                "One\nTwo\nThe change Fixes:\n  #42.", 42,
+                "Implementation report",
+            )
+
+    def test_guard_applies_only_while_the_footer_is_ref(self) -> None:
+        text = "## Task\n\nThis fixes #42 for now.\n"
+        with self.assertRaisesRegex(AgentSquadError, "issue #42"):
+            refuse_partial_closing(self.body("Ref #42\n"), text, "Task")
+        refuse_partial_closing(self.body("Closes #42\n"), text, "Task")
+        refuse_partial_closing(self.body(""), text, "Task")
+        # The guard reads the issue number from the footer itself.
+        refuse_partial_closing(self.body("Ref #43\n"), text, "Task")
 
 
 class StandingMergeTests(unittest.TestCase):

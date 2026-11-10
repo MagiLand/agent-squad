@@ -63,6 +63,16 @@ if absent and draft a file there starting with `## Task`: objective,
 acceptance criteria, constraints, and non-goals. Present it once and wait for
 approval before coding. Do not silently change the Task.
 
+Deliver an issue in stages, one PR each, when the issue itself schedules its
+delivery in more than one PR or the Developer approves a staged delivery. A
+stage delivers only part of the issue, so draft its Task as above: which part
+of the issue this PR delivers, the acceptance criteria that apply to it, and
+the rest of the issue as non-goals. Present it once and wait for approval, as
+for any drafted Task. Open every stage except the one that completes the issue
+with `--partial` (section 2). The remaining scope stays in the issue: do not
+file it as a new issue, and do not start the next stage without the
+Developer's instruction.
+
 Before coding ask only about a question the issue leaves open that would
 change the result. Record interpretations that do not change it under
 “Design decisions” in the report, where the Reviewer checks them. Create the
@@ -96,6 +106,16 @@ only when the Developer approved a drafted Task. The CLI records that
 worktree's identity for later cleanup. Read the returned PR number; issue and
 PR numbers need not match. On every later push update the report with
 `agent-squad pr report --as implementer --pr <PR> --report <report-file>`.
+
+For a stage that leaves part of the issue for a later PR (section 1), add
+`--partial`, which requires `--task`: the PR body then ends with `Ref #<N>`
+instead of `Closes #<N>`, so merging it leaves the issue open with its labels.
+The PR that completes the issue passes `--task` for its stage and no
+`--partial`. While a PR is partial, `pr create`, `pr report`, and
+`decision post --task` refuse a Task or report in which a closing keyword such
+as `Fixes` precedes `#<N>`; reword the text instead. Start a later stage in a
+fresh `<worktree_root>/issue-<N>` worktree on a branch no earlier PR used:
+`pr create` refuses a branch that already has a PR, even a merged one.
 
 At `pr create` and after every push, apply section 8's review-before-merge rule
 to the whole PR. Name any applicable item and its reason under “Areas worth
@@ -342,7 +362,9 @@ Report visible human-approval or required-check requirements and any forge
 refusal. After a successful merge the PR description is frozen: `pr report`
 refuses a PR that is not open. If the repository runs CI on base-branch pushes,
 wait for its run at the merge commit. Then send one report needing no answer:
-merge commit, method, integration check, CI at the approved head and the push
+merge commit, method, integration check, whether the merge closed the issue or
+left it open as a partial delivery (`closes_issue` in the `pr merge` or
+`pr cleanup` result), CI at the approved head and the push
 run's result, every cleanup step, fast-forward result, every optional
 finding with ID, title, and disposition, and every issue you filed with
 `issue create`. If the push run failed, say so and

@@ -262,7 +262,10 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
 
         # A second PR in this same repository exercises unmoved-base squash.
         model = f.read_model()
-        model["issues"]["2"] = dict(model["issues"]["1"], id=2, number=2)
+        # Merging PR 1 closed issue 1 (Closes #1), so the copy is reopened.
+        model["issues"]["2"] = dict(
+            model["issues"]["1"], id=2, number=2, state="open",
+        )
         f.save_model(model)
         config_path = f.repo / ".agent-squad/config.json"
         config = json.loads(config_path.read_text())

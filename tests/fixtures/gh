@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -766,6 +767,13 @@ if parts[5] == "merge":
                 "ref": f"refs/heads/{pr['head']['ref']}", "reads": deletion,
             }
     pr.update(merged=True, state="closed", merge_commit_sha=merge_commit)
+    # GitHub closes each issue a default closing keyword names in the body.
+    for key in re.findall(
+        r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):? +#([0-9]+)\b",
+        pr["body"] or "",
+    ):
+        if key in model["issues"]:
+            model["issues"][key]["state"] = "closed"
     if settings.get("merge_response_lost") == "after":
         lost()
     output(

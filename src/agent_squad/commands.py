@@ -21,6 +21,8 @@ from .conventions import (
     is_note,
     newer,
     parse_line,
+    refuse_closing_reference,
+    refuse_partial_closing,
     render_line,
     replace_section,
     require_open_issue,
@@ -357,7 +359,10 @@ def create_pr(
     task: str | None,
     report: str,
     title: str | None,
+    partial: bool = False,
 ) -> dict:
+    if partial and task is None:
+        raise AgentSquadError("--partial requires --task")
     issue_record = forge.issue(issue)
     # Also with --task: the issue number is then typed by hand.
     require_open_issue(issue_record)
@@ -365,7 +370,11 @@ def create_pr(
         task if task is not None else task_from_issue(issue_record), "Task"
     )
     report = validate_section(report, "Implementation report")
-    body = f"{task}\n\n{report}\n\nCloses #{issue}\n"
+    if partial:
+        refuse_closing_reference(task, issue, "Task")
+        refuse_closing_reference(report, issue, "Implementation report")
+    footer = "Ref" if partial else "Closes"
+    body = f"{task}\n\n{report}\n\n{footer} #{issue}\n"
     validate_pr_body(body)
     branch = git_output(
         repository.root, "symbolic-ref", "--quiet", "--short", "HEAD"
@@ -398,6 +407,7 @@ def report_pr(forge: Forge, number: int, report: str) -> dict:
     pr = forge.pr(number)
     if pr.state != "open":
         raise AgentSquadError("PR is not open")
+    refuse_partial_closing(pr.evidence.body, report, "Implementation report")
     return asdict(
         forge.update_body(
             number,
@@ -856,6 +866,9 @@ def post_decision(
         raise AgentSquadError("supply a Task amendment through --task")
     validate_merge_directive(body, finding, budget, task)
     snapshot = forge.snapshot(number)
+    if task is not None:
+        # Before the decision is posted, so its Task can always be mirrored.
+        refuse_partial_closing(snapshot.pr.evidence.body, task, "Task")
     state = state_for(repository, snapshot)
     if finding != "none":
         find_finding(state, finding)

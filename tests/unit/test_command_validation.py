@@ -15,8 +15,8 @@ add_src_to_path()
 
 from agent_squad.cli import main, positive_argument  # noqa: E402
 from agent_squad.commands import (  # noqa: E402
-    comment_issue, compose_reply, compose_review, create_issue, load_threads,
-    view_issue, workflow_paths,
+    comment_issue, compose_reply, compose_review, create_issue, create_pr,
+    load_threads, view_issue, workflow_paths,
 )
 from agent_squad.conventions import validate_review_body  # noqa: E402
 from agent_squad.forge import Evidence, ForgeError  # noqa: E402
@@ -297,6 +297,43 @@ class ReplyOptionTests(unittest.TestCase):
                     "--finding", "REV-1", "--body", "unused.md", *options,
                 ]), 0)
                 execute.assert_called_once()
+
+
+class PartialOptionTests(unittest.TestCase):
+    """#146: --partial needs the drafted Task of its stage."""
+
+    def test_partial_without_task_is_a_usage_error(self) -> None:
+        create = ["pr", "create", "--as", "implementer", "--issue", "1",
+                  "--report", "unused.md"]
+        stderr = io.StringIO()
+        with (
+            patch("agent_squad.cli.execute") as execute,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main([*create, "--partial"])
+        self.assertEqual(raised.exception.code, 2)
+        execute.assert_not_called()
+        self.assertIn("--partial requires --task", stderr.getvalue())
+        for options in ((), ("--task", "task.md"),
+                        ("--partial", "--task", "task.md")):
+            with (
+                self.subTest(options=options),
+                patch("agent_squad.cli.execute", return_value={}) as execute,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main([*create, *options]), 0)
+                self.assertEqual(execute.call_args.args[0].partial,
+                                 "--partial" in options)
+
+    def test_create_refuses_partial_without_task_before_any_read(
+        self,
+    ) -> None:
+        # No repository or forge: the refusal precedes every call.
+        with self.assertRaisesRegex(
+            AgentSquadError, "--partial requires --task"
+        ):
+            create_pr(None, None, 1, None, "", None, partial=True)
 
 
 class StubIssueForge:

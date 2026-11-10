@@ -329,7 +329,7 @@ shipped command path.
 | --- | --- |
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
 | `issue view`, `issue comment`, `issue create` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`. |
-| `pr create`, `pr report` | Publish the Task and implementation report; update the report on an open PR. |
+| `pr create`, `pr report` | Publish the Task and implementation report, ending with `Closes #<issue>`, or with `Ref #<issue>` under `pr create --partial --task <file>` for a PR that delivers part of an issue and leaves it open; update the report on an open PR, keeping that footer. |
 | `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head, and derived workflow state. |
 | `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
 | `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
