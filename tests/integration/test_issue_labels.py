@@ -213,11 +213,11 @@ class IssueLabelContract:
         for options, message in (
             (("--issue", "3", "--add", "ready-for-agent"),
              "issue #3 read back after the label change: ready-for-agent"
-             " was not added"),
+             " is not on the issue"),
             (("--issue", "2", "--remove", "ready-for-agent", "--add",
               "wontfix"),
-             "issue #2 read back after the label change: wontfix was not"
-             " added; ready-for-agent was not removed"),
+             "issue #2 read back after the label change: wontfix is not"
+             " on the issue; ready-for-agent is still on the issue"),
         ):
             with self.subTest(options=options):
                 refused = self.label(*options, expected=1)
@@ -269,6 +269,35 @@ class ForgejoIssueLabelTests(IssueLabelContract, unittest.TestCase):
         view = f.cli("issue", "view", "--issue", "2")
         self.assertEqual(view["blocked_by"], None)
         self.assertEqual(len(view["blocks"]), 2)
+
+    def test_a_page_of_unreadable_blocked_issues_hides_no_later_one(
+        self,
+    ) -> None:
+        """PR #156 REV-1: F16 pages blocks before it drops unreadable ones.
+
+        Issue 6 blocks 50 issues the account may not read and then one it
+        may, so a page of 50 holds no row at all before the readable one.
+        """
+        f = self.f
+        model = f.read_model()
+        for n in range(100, 150):
+            model["foreign_issues"][f"MagiLand/private#{n}"] = {
+                "title": "Private", "state": "open", "blocked_by": ["6"],
+                "unreadable": True,
+            }
+        model["foreign_issues"]["MagiLand/trial#20"] = {
+            "title": "Issue 20", "state": "open", "blocked_by": ["6"],
+        }
+        f.save_model(model)
+        start = len(f.read_model()["calls"])
+        view = f.cli("issue", "view", "--issue", "6")
+        self.assertEqual(view["blocks"], [related(20, "open")])
+        self.assertEqual(view["blocked_by"], [])
+        self.assertEqual(
+            [endpoint for method, endpoint, _, _ in self.requests(start)
+             if "/blocks" in endpoint],
+            [f"{REPO}/issues/6/blocks?limit=2147483647&page=1"],
+        )
 
 
 if __name__ == "__main__":

@@ -797,33 +797,43 @@ class MutationContractTests(unittest.TestCase):
             return {"number": number, "title": f"T{number}", "state": state,
                     "repository": {"full_name": full_name}}
 
-        # F16 drops unreadable rows from a blocks page after paging it.
+        # F16 GetIssueBlocks slices the whole list by page and limit before
+        # it drops unreadable issues and never caps limit, so one request
+        # holds every readable blocked issue (PR #156 REV-1). The blocked-by
+        # list is paged in the database and keeps a row per blocker.
         forge.api.side_effect = [
-            [row(i) for i in range(1, 50)], [row(50, "other/x", "closed")],
-            [], [row(60)], [],
+            [row(i) for i in range(1, 70)] + [row(70, "other/x", "closed")],
+            [row(i) for i in range(71, 121)], [row(121)], [],
         ]
         found = forge.issue_dependencies(5)
         self.assertEqual(
             [c.args[0] for c in forge.api.call_args_list],
-            ["/repos/owner/repo/issues/5/blocks?limit=50&page=1",
-             "/repos/owner/repo/issues/5/blocks?limit=50&page=2",
-             "/repos/owner/repo/issues/5/blocks?limit=50&page=3",
+            ["/repos/owner/repo/issues/5/blocks?limit=2147483647&page=1",
              "/repos/owner/repo/issues/5/dependencies?limit=50&page=1",
-             "/repos/owner/repo/issues/5/dependencies?limit=50&page=2"],
+             "/repos/owner/repo/issues/5/dependencies?limit=50&page=2",
+             "/repos/owner/repo/issues/5/dependencies?limit=50&page=3"],
         )
-        self.assertEqual(len(found["blocks"]), 50)
+        self.assertEqual(len(found["blocks"]), 70)
         self.assertEqual(found["blocks"][-1], {
-            "number": 50, "title": "T50", "state": "closed",
+            "number": 70, "title": "T70", "state": "closed",
             "repository": "other/x",
         })
-        self.assertEqual(found["blocked_by"], [{
-            "number": 60, "title": "T60", "state": "open",
+        self.assertEqual(len(found["blocked_by"]), 51)
+        self.assertEqual(found["blocked_by"][-1], {
+            "number": 121, "title": "T121", "state": "open",
             "repository": "owner/repo",
-        }])
+        })
+        # An empty blocks answer is a known-empty list.
+        forge.api.reset_mock()
+        forge.api.side_effect = [[], []]
+        self.assertEqual(forge.issue_dependencies(5),
+                         {"blocks": [], "blocked_by": []})
         # A server that ignores the page would otherwise never end.
         forge.api.reset_mock()
-        forge.api.side_effect = [[row(1)], [row(1)]]
-        with self.assertRaisesRegex(ForgeError, "blocks.* repeated a page"):
+        forge.api.side_effect = [[], [row(1)], [row(1)]]
+        with self.assertRaisesRegex(
+            ForgeError, "dependencies.* repeated a page"
+        ):
             forge.issue_dependencies(5)
 
     def test_hidden_or_refused_dependency_lists_are_null(self):
@@ -832,7 +842,7 @@ class MutationContractTests(unittest.TestCase):
                    "repository": {"full_name": "owner/repo"}}
         hidden = {"number": 0, "title": "HIDDEN", "state": "open",
                   "repository": None}
-        forge.api.side_effect = [[visible], [], [visible, hidden], []]
+        forge.api.side_effect = [[visible], [visible, hidden], []]
         self.assertEqual(forge.issue_dependencies(5), {
             "blocks": [{"number": 3, "title": "T", "state": "closed",
                         "repository": "owner/repo"}],

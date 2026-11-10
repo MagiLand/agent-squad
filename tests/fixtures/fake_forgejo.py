@@ -497,7 +497,8 @@ class Handler(BaseHTTPRequestHandler):
         while ``dependencies_disabled`` is set, and the ref ``hidden`` is
         served as an issue numbered 0, as F16 serves a blocker the identity
         may not read. As in GetIssueBlocks, the blocks list pages before it
-        drops a foreign issue marked ``unreadable``.
+        drops a foreign issue marked ``unreadable``, and never caps limit;
+        the blocked-by list caps it at 50 and keeps a row for every blocker.
         """
         settings = model["settings"]
         if issue is None or account in settings.get(
@@ -507,19 +508,29 @@ class Handler(BaseHTTPRequestHandler):
         if direction == "dependencies":
             if settings.get("dependencies_disabled"):
                 return 404, {"message": "not found"}
-            return 200, self.paged([
+            # F16 DefaultPagingNum 30 for a limit of 0; MaxResponseItems 50.
+            limit = int(query.get("limit", ["0"])[0]) or 30
+            page, limit = self.page_of(query), min(limit, 50)
+            return 200, [
                 self.dependency_row(model, ref)
-                for ref in issue.get("blocked_by", [])
-            ], query)
+                for ref in issue.get("blocked_by", [])[
+                    (page - 1) * limit:page * limit]
+            ]
         foreign = model.get("foreign_issues", {})
         rows = [*model.get("issues", {}).items(), *foreign.items()]
         refs = [ref for ref, row in rows
                 if number in row.get("blocked_by", [])]
+        limit = int(query.get("limit", ["0"])[0])
+        page, limit = self.page_of(query), limit if limit > 1 else 30
         return 200, [
             self.dependency_row(model, ref)
-            for ref in self.paged(refs, query)
+            for ref in refs[(page - 1) * limit:page * limit]
             if not foreign.get(ref, {}).get("unreadable")
         ]
+
+    @staticmethod
+    def page_of(query: dict) -> int:
+        return max(int(query.get("page", ["1"])[0]), 1)
 
     @staticmethod
     def dependency_row(model: dict, ref: str) -> dict:

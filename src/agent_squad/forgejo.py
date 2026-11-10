@@ -71,6 +71,10 @@ TIMESTAMP = re.compile(
 )
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
 FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
+# The page size of the one blocks read (#144): F16 FormInt parses the limit
+# with strconv.Atoi, and this is the largest value every platform's int
+# holds, above any number of issues one issue can block.
+FORGEJO_BLOCKS_LIMIT = 2**31 - 1
 
 
 def anchor_payload(anchor: Anchor) -> dict[str, object]:
@@ -639,11 +643,7 @@ class Forgejo:
         return record
 
     def _all_pages(self, endpoint: str) -> list:
-        """Read pages until an empty one.
-
-        F16 pages the blocks list before it drops the issues the identity
-        may not read, so a short page need not be the last one.
-        """
+        """Read pages until an empty one; fail a page that repeats."""
         result: list = []
         previous = None
         page = 1
@@ -660,18 +660,29 @@ class Forgejo:
             page += 1
 
     def issue_dependencies(self, number: int) -> IssueDependencies:
-        def read(direction: str) -> list[RelatedIssue] | None:
-            rows = [
-                parse_related_issue(row) for row in self._all_pages(
-                    f"{self.prefix}/issues/{number}/{direction}"
-                )
-            ]
+        endpoint = f"{self.prefix}/issues/{number}"
+
+        def parsed(rows: list) -> list[RelatedIssue] | None:
+            found = [parse_related_issue(row) for row in rows]
             # A hidden dependency leaves the list unknown, not shorter.
-            return None if None in rows else rows
+            return None if None in found else found
+
+        def blocks() -> list[RelatedIssue] | None:
+            # F16 GetIssueBlocks slices the whole list by page and limit
+            # before it drops the issues the identity may not read, so any
+            # page, even an empty one, may precede readable rows. It never
+            # caps limit, so this one page holds every readable issue.
+            return parsed(array(self.api(
+                f"{endpoint}/blocks?limit={FORGEJO_BLOCKS_LIMIT}&page=1"
+            ), "list"))
 
         return {
-            "blocks": exposed(lambda: read("blocks")),
-            "blocked_by": exposed(lambda: read("dependencies")),
+            "blocks": exposed(blocks),
+            # GetIssueDependencies pages in the database, caps limit, and
+            # keeps a row for every blocker, so paging ends at an empty page.
+            "blocked_by": exposed(
+                lambda: parsed(self._all_pages(f"{endpoint}/dependencies"))
+            ),
         }
 
     def change_issue_labels(

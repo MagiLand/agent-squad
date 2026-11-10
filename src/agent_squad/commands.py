@@ -298,9 +298,11 @@ def label_issue(
     if adding or removing:
         forge.change_issue_labels(number, adding, removing)
         after = forge.issue(number)["labels"]
-        missed = [f"{name} was not added" for name in adding
+        # Check every request, not only the writes: adding a label can
+        # remove another one in its exclusive scope on Forgejo (PR #156).
+        missed = [f"{name} is not on the issue" for name in add_names
                   if name not in after]
-        missed += [f"{name} was not removed" for name in removing
+        missed += [f"{name} is still on the issue" for name in remove_names
                    if name in after]
         if missed:
             raise AgentSquadError(

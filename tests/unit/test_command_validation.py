@@ -532,12 +532,37 @@ class IssueLabelTests(unittest.TestCase):
             (["area"], ["area"], [], []),
         )
 
+    def test_the_read_back_checks_every_requested_label(self) -> None:
+        """PR #156 REV-2: a write can undo a request that needed none."""
+
+        class SideEffects(StubLabelForge):
+            def change_issue_labels(self, number: int, add: tuple[str, ...],
+                                    remove: tuple[str, ...]) -> None:
+                super().change_issue_labels(number, add, remove)
+                # As F16 does within an exclusive scope, the added label
+                # displaces a present one; another writer adds stale.
+                self.record["labels"] = [
+                    name for name in self.record["labels"]
+                    if name != "ready-for-agent"
+                ] + ["stale"]
+
+        forge = SideEffects(["ready-for-agent"])
+        forge.repository_labels += ("stale",)
+        with self.assertRaisesRegex(
+            AgentSquadError,
+            "^issue #5 read back after the label change: ready-for-agent is"
+            " not on the issue; stale is still on the issue$",
+        ):
+            label_issue(forge, 5, ["ready-for-agent", "area"], ["stale"])
+        # Only the needed change was written.
+        self.assertIn(("change", 5, ("area",), ()), forge.calls)
+
     def test_a_read_back_without_the_change_names_each_label(self) -> None:
         forge = StubLabelForge(["ready-for-agent"], applied=False)
         with self.assertRaisesRegex(
             AgentSquadError,
-            "^issue #5 read back after the label change: area was not"
-            " added; ready-for-agent was not removed$",
+            "^issue #5 read back after the label change: area is not on"
+            " the issue; ready-for-agent is still on the issue$",
         ):
             label_issue(forge, 5, ["area"], ["ready-for-agent"])
         self.assertEqual(forge.calls[-1], ("issue", 5))
