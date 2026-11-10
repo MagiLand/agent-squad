@@ -16,7 +16,7 @@ add_src_to_path()
 from agent_squad.cli import main, positive_argument  # noqa: E402
 from agent_squad.commands import (  # noqa: E402
     comment_issue, compose_reply, compose_review, create_issue, create_pr,
-    load_threads, view_issue, workflow_paths,
+    label_issue, load_threads, view_issue, workflow_paths,
 )
 from agent_squad.conventions import validate_review_body  # noqa: E402
 from agent_squad.forge import Evidence, ForgeError  # noqa: E402
@@ -352,6 +352,10 @@ class StubIssueForge:
         self.calls.append(("issue", number))
         return self.record
 
+    def issue_dependencies(self, number: int) -> dict:
+        self.calls.append(("issue_dependencies", number))
+        return {"blocks": [], "blocked_by": None}
+
     def comment(self, number: int, body: str) -> Evidence:
         self.calls.append(("comment", number, body))
         return Evidence(7, "dev", "2026-01-01T00:00:07Z", body)
@@ -430,6 +434,113 @@ class IssueCommentTests(unittest.TestCase):
         self.assertEqual(view["comments"][0]["body"], comments[0].body)
         self.assertEqual(view["paths"]["issue_scratch"],
                          str(primary / ".agent-squad/review-scratch/issue-5"))
+        # The dependency lists come from their own read, null included.
+        self.assertEqual((view["blocks"], view["blocked_by"]), ([], None))
+
+
+class StubLabelForge(StubIssueForge):
+    """Record label reads and writes; ``applied`` False ignores writes."""
+
+    def __init__(self, labels: list[str], *, applied: bool = True,
+                 **record: object) -> None:
+        super().__init__(labels=list(labels), **record)
+        self.repository_labels = (
+            "needs-triage", "needs-info", "ready-for-human", "wontfix",
+            "ready-for-agent", "area",
+        )
+        self.applied = applied
+
+    def issue(self, number: int) -> dict:
+        return dict(super().issue(number), labels=list(self.record["labels"]))
+
+    def labels(self) -> tuple[str, ...]:
+        self.calls.append(("labels",))
+        return self.repository_labels
+
+    def change_issue_labels(self, number: int, add: tuple[str, ...],
+                            remove: tuple[str, ...]) -> None:
+        self.calls.append(("change", number, add, remove))
+        if self.applied:
+            self.record["labels"] = [
+                name for name in self.record["labels"] if name not in remove
+            ] + list(add)
+
+
+class IssueLabelTests(unittest.TestCase):
+    def test_argument_refusals_precede_every_forge_call(self) -> None:
+        for add, remove, message in (
+            ([], [], "requires --add or --remove"),
+            (["area"], ["area"], "cannot both add and remove area"),
+            ([], ["ready-for-agent", "wontfix"],
+             "never removes wontfix, which keeps an issue from being a"
+             " Task"),
+            ([], ["Needs-Info"], "never removes Needs-Info"),
+            ([], ["READY-FOR-HUMAN"], "never removes READY-FOR-HUMAN"),
+            ([], ["needs-triage"], "never removes needs-triage"),
+        ):
+            with self.subTest(add=add, remove=remove):
+                forge = StubLabelForge([])
+                with self.assertRaisesRegex(AgentSquadError, message):
+                    label_issue(forge, 5, add, remove)
+                self.assertEqual(forge.calls, [])
+
+    def test_issue_and_label_checks_precede_the_write(self) -> None:
+        forge = StubLabelForge([], is_pull_request=True)
+        with self.assertRaisesRegex(
+            AgentSquadError, "requires an issue, not pull request #5"
+        ):
+            label_issue(forge, 5, ["area"], [])
+        self.assertEqual(forge.calls, [("issue", 5)])
+        for add, remove, missing in (
+            (["area", "Area"], [], "Area"),
+            ([], ["ready"], "ready"),
+        ):
+            with self.subTest(missing=missing):
+                forge = StubLabelForge([])
+                with self.assertRaisesRegex(
+                    AgentSquadError,
+                    f"^repository has no label named {missing}; issue label"
+                    " never creates one$",
+                ):
+                    label_issue(forge, 5, add, remove)
+                self.assertEqual(forge.calls, [("issue", 5), ("labels",)])
+
+    def test_only_needed_changes_are_written_and_read_back(self) -> None:
+        forge = StubLabelForge(["ready-for-agent", "needs-triage"],
+                               state="closed")
+        result = label_issue(
+            forge, 5, ["area", "needs-triage", "area"],
+            ["ready-for-agent", "ready-for-agent"],
+        )
+        self.assertEqual(forge.calls, [
+            ("issue", 5), ("labels",),
+            ("change", 5, ("area",), ("ready-for-agent",)),
+            ("issue", 5),
+        ])
+        self.assertEqual(result, {
+            "issue": 5, "state": "closed",
+            "labels_before": ["ready-for-agent", "needs-triage"],
+            "labels_after": ["needs-triage", "area"],
+            "added": ["area"], "removed": ["ready-for-agent"],
+        })
+        forge = StubLabelForge(["area"])
+        result = label_issue(forge, 5, ["area"], ["ready-for-agent"])
+        self.assertEqual(forge.calls, [("issue", 5), ("labels",)])
+        self.assertEqual(
+            (result["labels_before"], result["labels_after"],
+             result["added"], result["removed"]),
+            (["area"], ["area"], [], []),
+        )
+
+    def test_a_read_back_without_the_change_names_each_label(self) -> None:
+        forge = StubLabelForge(["ready-for-agent"], applied=False)
+        with self.assertRaisesRegex(
+            AgentSquadError,
+            "^issue #5 read back after the label change: area was not"
+            " added; ready-for-agent was not removed$",
+        ):
+            label_issue(forge, 5, ["area"], ["ready-for-agent"])
+        self.assertEqual(forge.calls[-1], ("issue", 5))
 
 
 class IssueCommentOptionTests(unittest.TestCase):

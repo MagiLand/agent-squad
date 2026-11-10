@@ -790,6 +790,102 @@ class MutationContractTests(unittest.TestCase):
         forge.api.assert_called_once_with(
             "/repos/owner/repo/labels?limit=50&page=1")
 
+    def test_dependencies_read_pages_until_an_empty_one(self):
+        forge = self.forge()
+
+        def row(number, full_name="owner/repo", state="open"):
+            return {"number": number, "title": f"T{number}", "state": state,
+                    "repository": {"full_name": full_name}}
+
+        # F16 drops unreadable rows from a blocks page after paging it.
+        forge.api.side_effect = [
+            [row(i) for i in range(1, 50)], [row(50, "other/x", "closed")],
+            [], [row(60)], [],
+        ]
+        found = forge.issue_dependencies(5)
+        self.assertEqual(
+            [c.args[0] for c in forge.api.call_args_list],
+            ["/repos/owner/repo/issues/5/blocks?limit=50&page=1",
+             "/repos/owner/repo/issues/5/blocks?limit=50&page=2",
+             "/repos/owner/repo/issues/5/blocks?limit=50&page=3",
+             "/repos/owner/repo/issues/5/dependencies?limit=50&page=1",
+             "/repos/owner/repo/issues/5/dependencies?limit=50&page=2"],
+        )
+        self.assertEqual(len(found["blocks"]), 50)
+        self.assertEqual(found["blocks"][-1], {
+            "number": 50, "title": "T50", "state": "closed",
+            "repository": "other/x",
+        })
+        self.assertEqual(found["blocked_by"], [{
+            "number": 60, "title": "T60", "state": "open",
+            "repository": "owner/repo",
+        }])
+        # A server that ignores the page would otherwise never end.
+        forge.api.reset_mock()
+        forge.api.side_effect = [[row(1)], [row(1)]]
+        with self.assertRaisesRegex(ForgeError, "blocks.* repeated a page"):
+            forge.issue_dependencies(5)
+
+    def test_hidden_or_refused_dependency_lists_are_null(self):
+        forge = self.forge()
+        visible = {"number": 3, "title": "T", "state": "closed",
+                   "repository": {"full_name": "owner/repo"}}
+        hidden = {"number": 0, "title": "HIDDEN", "state": "open",
+                  "repository": None}
+        forge.api.side_effect = [[visible], [], [visible, hidden], []]
+        self.assertEqual(forge.issue_dependencies(5), {
+            "blocks": [{"number": 3, "title": "T", "state": "closed",
+                        "repository": "owner/repo"}],
+            "blocked_by": None,
+        })
+        for status in (401, 403, 404):
+            with self.subTest(status=status):
+                forge.api.side_effect = [[], ForgeError("refused", status)]
+                self.assertEqual(forge.issue_dependencies(5),
+                                 {"blocks": [], "blocked_by": None})
+        for failure, row in (
+            (ForgeError("server", 500), None),
+            (None, {**visible, "repository": None}),
+            (None, {**visible, "state": ""}),
+        ):
+            with self.subTest(failure=failure, row=row):
+                forge.api.side_effect = [failure] if failure else [[row], []]
+                with self.assertRaises(ForgeError):
+                    forge.issue_dependencies(5)
+
+    def test_label_changes_add_by_id_and_remove_by_encoded_name(self):
+        forge = self.forge()
+        forge.api.side_effect = [
+            [{"id": 41, "name": "ready-for-agent"},
+             {"id": 46, "name": "a/b c"}],
+            [], None, None,
+        ]
+        forge.change_issue_labels(
+            5, ("a/b c", "ready-for-agent"), ("12", "stale"))
+        self.assertEqual(
+            [(c.args, c.kwargs) for c in forge.api.call_args_list], [
+                (("/repos/owner/repo/labels?limit=50&page=1",), {}),
+                (("/repos/owner/repo/issues/5/labels",),
+                 {"method": "POST", "body": {"labels": [46, 41]}}),
+                (("/repos/owner/repo/issues/5/labels/12",),
+                 {"method": "DELETE"}),
+                (("/repos/owner/repo/issues/5/labels/stale",),
+                 {"method": "DELETE"}),
+            ])
+        forge.api.reset_mock()
+        forge.api.side_effect = [[{"id": 41, "name": "ready-for-agent"}]]
+        with self.assertRaisesRegex(
+            ForgeError, "^repository has no Ready label$"
+        ):
+            forge.change_issue_labels(5, ("Ready",), ("stale",))
+        forge.api.assert_called_once_with(
+            "/repos/owner/repo/labels?limit=50&page=1")
+        forge.api.reset_mock()
+        forge.api.side_effect = None
+        forge.change_issue_labels(5, (), ("x y",))
+        forge.api.assert_called_once_with(
+            "/repos/owner/repo/issues/5/labels/x%20y", method="DELETE")
+
     def test_open_issues_ask_for_issues_and_skip_pull_requests(self):
         forge = self.forge()
         row = {"number": 3, "title": " Same ", "pull_request": None}

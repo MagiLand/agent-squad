@@ -314,6 +314,9 @@ class IdentityConfigurationTests(unittest.TestCase):
                 if words == ("skill", "install"):
                     continue
                 args = list(words)
+                if words == ("issue", "label"):
+                    # Without an option the command exits 2 first.
+                    args += ["--add", "ready-for-agent"]
                 for action in command._actions:
                     if action.required and action.option_strings:
                         value = (
@@ -330,6 +333,6 @@ class IdentityConfigurationTests(unittest.TestCase):
                     )
                     self.assertIn(self.REMOVED, text)
                     commands += 1
-            self.assertEqual(commands, 26)
+            self.assertEqual(commands, 27)
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(len(f.read_model()["calls"]), calls)

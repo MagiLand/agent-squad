@@ -361,10 +361,34 @@ choice.
 Report visible human-approval or required-check requirements and any forge
 refusal. After a successful merge the PR description is frozen: `pr report`
 refuses a PR that is not open. If the repository runs CI on base-branch pushes,
-wait for its run at the merge commit. Then send one report needing no answer:
+wait for its run at the merge commit.
+
+After a verified merge and before the final report, apply the consuming
+repository's issue-closing rule. When `closes_issue` in the `pr merge` or
+`pr cleanup` result is true, read the closed Task issue with
+`agent-squad issue view --issue <N> --json`; if it is still open, report
+that and change no label. After a partial delivery the merge closed no
+issue, so there is nothing to apply; when `closes_issue` is `null`, report
+that and change no label. If the consuming
+repository documents an issue-closing rule, apply it with
+`agent-squad issue label --as implementer --issue <M> [--add <label>]...
+[--remove <label>]...`: typically remove the readiness label from the closed
+issue, and for each open issue in its `blocks` list whose `repository` is this
+repository, read that issue with `issue view` and, once every issue in its
+`blocked_by` list is closed, set the label the rule calls for. Change a label
+only as that rule states. When `blocks` or `blocked_by` is `null`, the forge
+does not expose those dependencies: report that and change no label that
+depends on them. If the repository documents no issue-closing rule, say so in
+the final report and change nothing. A failed label change is reported and
+does not affect the merge result. `issue label` never removes `needs-triage`,
+`needs-info`, `ready-for-human`, or `wontfix`.
+
+Then send one report needing no answer:
 merge commit, method, integration check, whether the merge closed the issue or
 left it open as a partial delivery (`closes_issue` in the `pr merge` or
-`pr cleanup` result), CI at the approved head and the push
+`pr cleanup` result), each issue whose labels the issue-closing rule changed
+and what changed, or that the repository documents no such rule, CI at the
+approved head and the push
 run's result, every cleanup step, fast-forward result, every optional
 finding with ID, title, and disposition, and every issue you filed with
 `issue create`. If the push run failed, say so and

@@ -510,3 +510,75 @@ class PartialDeliverySkillTests(unittest.TestCase):
                 self.assertIn(outline, self.spec_implementer)
         self.assertNotIn(
             "--partial", packaged_skill("squad-reviewer").decode())
+
+
+class IssueClosingRuleSkillTests(unittest.TestCase):
+    """The Implementer applies a documented issue-closing rule (#144)."""
+
+    def setUp(self) -> None:
+        self.implementer = flat(packaged_skill("squad-implementer").decode())
+        spec = flat((PROJECT_ROOT / "docs/agent-squad-spec.md").read_text())
+        self.spec_implementer = section(
+            spec, "### 12.2 `squad-implementer`: mandatory rules",
+            "### 12.3")
+
+    def test_finishing_step_applies_only_a_documented_rule(self) -> None:
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        steps = (
+            "After a verified merge and before the final report, apply the "
+            "consuming repository's issue-closing rule.",
+            "When `closes_issue` in the `pr merge` or `pr cleanup` result is "
+            "true, read the closed Task issue with `agent-squad issue view "
+            "--issue <N> --json`; if it is still open, report that and "
+            "change no label.",
+            "After a partial delivery the merge closed no issue, so there is "
+            "nothing to apply; when `closes_issue` is `null`, report that "
+            "and change no label.",
+            "`agent-squad issue label --as implementer --issue <M> [--add "
+            "<label>]... [--remove <label>]...`",
+            "typically remove the readiness label from the closed issue, and "
+            "for each open issue in its `blocks` list whose `repository` is "
+            "this repository, read that issue with `issue view` and, once "
+            "every issue in its `blocked_by` list is closed, set the label "
+            "the rule calls for.",
+            "Change a label only as that rule states.",
+            "When `blocks` or `blocked_by` is `null`, the forge does not "
+            "expose those dependencies: report that and change no label that "
+            "depends on them.",
+            "If the repository documents no issue-closing rule, say so in "
+            "the final report and change nothing.",
+            "A failed label change is reported and does not affect the merge "
+            "result.",
+            "Then send one report needing no answer:",
+        )
+        positions = []
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, finishing)
+                positions.append(finishing.index(step))
+        # The step comes after the merge and before the final report.
+        self.assertEqual(positions, sorted(positions))
+        self.assertLess(
+            finishing.index("wait for its run at the merge commit."),
+            positions[0])
+        self.assertIn(
+            "each issue whose labels the issue-closing rule changed and "
+            "what changed, or that the repository documents no such rule",
+            finishing[positions[-1]:])
+        for outline in (
+            "When `closes_issue` is true, read the closed issue with "
+            "`issue view`; if it is still open, report that and change no "
+            "label; if the consuming repository documents an "
+            "issue-closing rule, apply it with `issue label` (§10.2) and "
+            "only as that rule states",
+            "when the repository documents no such rule, say so and change "
+            "nothing; a failed label change is reported and does not affect "
+            "the merge result. After a partial delivery there is nothing to "
+            "apply, and when `closes_issue` is `null` no label is changed.",
+            "and which labels the issue-closing rule changed.",
+        ):
+            with self.subTest(outline=outline):
+                self.assertIn(outline, self.spec_implementer)
+        # The Reviewer never changes a label.
+        self.assertNotIn(
+            "issue label", packaged_skill("squad-reviewer").decode())

@@ -329,6 +329,13 @@ class Handler(BaseHTTPRequestHandler):
                     target.setdefault("conversation", []).append(row)
                     return 201, row
                 return 200, target.get("conversation", [])
+            if parts[5:6] in (["dependencies"], ["blocks"]) and (
+                self.command == "GET"
+            ):
+                return self.dependencies(
+                    model, account, issue, number, parts[5], query)
+            if parts[5:6] == ["labels"]:
+                return self.issue_labels(model, issue, parts[6:], body)
             if issue is None and pr is not None:
                 return 200, self.pr_issue(pr)
             return ((200, issue) if issue
@@ -479,6 +486,98 @@ class Handler(BaseHTTPRequestHandler):
                 rows = list(reversed(rows[offset:] + rows[:offset]))
             return 200, rows
         return 404, {"message": "unknown endpoint"}
+
+    def dependencies(
+        self, model: dict, account: str, issue: dict | None, number: str,
+        direction: str, query: dict,
+    ) -> tuple[int, object]:
+        """Serve F16's dependency lists (#144), modelled as on the fake gh.
+
+        As in F16 GetIssueDependencies, the blocked-by list answers 404
+        while ``dependencies_disabled`` is set, and the ref ``hidden`` is
+        served as an issue numbered 0, as F16 serves a blocker the identity
+        may not read. As in GetIssueBlocks, the blocks list pages before it
+        drops a foreign issue marked ``unreadable``.
+        """
+        settings = model["settings"]
+        if issue is None or account in settings.get(
+            "dependencies_denied", []
+        ):
+            return 404, {"message": "not found"}
+        if direction == "dependencies":
+            if settings.get("dependencies_disabled"):
+                return 404, {"message": "not found"}
+            return 200, self.paged([
+                self.dependency_row(model, ref)
+                for ref in issue.get("blocked_by", [])
+            ], query)
+        foreign = model.get("foreign_issues", {})
+        rows = [*model.get("issues", {}).items(), *foreign.items()]
+        refs = [ref for ref, row in rows
+                if number in row.get("blocked_by", [])]
+        return 200, [
+            self.dependency_row(model, ref)
+            for ref in self.paged(refs, query)
+            if not foreign.get(ref, {}).get("unreadable")
+        ]
+
+    @staticmethod
+    def dependency_row(model: dict, ref: str) -> dict:
+        if ref == "hidden":
+            return {"id": 0, "number": 0, "title": "HIDDEN",
+                    "state": "open", "repository": None}
+        source, _, key = ref.rpartition("#")
+        row = model["foreign_issues"][ref] if source else model["issues"][ref]
+        source = source or "MagiLand/trial"
+        return {
+            "id": 9000 + int(key), "number": int(key), "title": row["title"],
+            "state": row["state"],
+            "repository": {"id": 1, "name": source.split("/")[1],
+                           "owner": source.split("/")[0],
+                           "full_name": source},
+        }
+
+    def issue_labels(
+        self, model: dict, issue: dict | None, rest: list[str], body: object,
+    ) -> tuple[int, object]:
+        """Serve F16's issue label writes (#144).
+
+        POST takes all IDs or all names and drops an unknown one silently.
+        DELETE takes a name, or an ID when no label has that name, answers
+        422 when neither matches and 204 otherwise. ``ignore_label_writes``
+        answers as if the change were made and changes nothing.
+        """
+        if issue is None:
+            return 404, {"message": "issue not found"}
+        known = model.get("labels", [])
+        keep = not model["settings"].get("ignore_label_writes")
+        names = [label["name"] for label in issue["labels"]]
+        if self.command == "POST":
+            values = body.get("labels", [])
+            if len({type(value) for value in values}) > 1:
+                return 400, {"message": "labels should be an array of"
+                             " strings or integers"}
+            for label in known:
+                if keep and label["name"] not in names and (
+                    label["id"] in values or label["name"] in values
+                ):
+                    issue["labels"].append(dict(label))
+            return 200, issue["labels"]
+        if self.command == "DELETE" and len(rest) == 1:
+            match = next(
+                (label for label in known if label["name"] == rest[0]),
+                None,
+            ) or next(
+                (label for label in known if str(label["id"]) == rest[0]),
+                None,
+            )
+            if match is None:
+                return 422, {"message": "label does not exist"}
+            if keep:
+                issue["labels"] = [label for label in issue["labels"]
+                                   if label["name"] != match["name"]]
+            return 204, None
+        return 200, issue["labels"]
 
     @staticmethod
     def pr_issue(pr: dict) -> dict:

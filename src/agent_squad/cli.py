@@ -82,7 +82,7 @@ def parser() -> argparse.ArgumentParser:
             )
         p.add_argument("--json", action="store_true")
 
-    issue = command("issue", ("view", "comment", "create"))
+    issue = command("issue", ("view", "comment", "create", "label"))
     common(issue["view"], number="issue")
     common(
         issue["comment"], role="implementer", number="issue", mutation=True
@@ -93,6 +93,9 @@ def parser() -> argparse.ArgumentParser:
         issue["create"].add_argument("--" + name, required=True)
     for name in ("from-issue", "from-pr"):
         issue["create"].add_argument("--" + name, type=positive_argument)
+    common(issue["label"], role="implementer", number="issue", mutation=True)
+    for name in ("add", "remove"):
+        issue["label"].add_argument("--" + name, action="append", default=[])
     skill = command("skill", ("install",))["install"]
     for name in ("claude", "codex", "force", "json"):
         skill.add_argument("--" + name, action="store_true")
@@ -249,6 +252,8 @@ def execute(args: argparse.Namespace) -> dict:
             from_issue=args.from_issue,
             from_pr=args.from_pr,
         )
+    if key == ("issue", "label"):
+        return commands.label_issue(forge, args.issue, args.add, args.remove)
     if key == ("pr", "create"):
         return commands.create_pr(
             repository,
@@ -417,6 +422,10 @@ def main(argv: list[str] | None = None) -> int:
     ):
         # A partial delivery needs a drafted, approved Task for its stage.
         root.error("--partial requires --task")
+    if (args.group, getattr(args, "command", None)) == ("issue", "label") and (
+        not args.add and not args.remove
+    ):
+        root.error("issue label requires --add or --remove")
     try:
         result = execute(args)
         if args.json:
@@ -462,6 +471,15 @@ def main(argv: list[str] | None = None) -> int:
             "issue", "create",
         ):
             print(f'Created issue #{result["issue"]} for triage.')
+            print(json.dumps(result, indent=2, default=json_default))
+        elif (args.group, getattr(args, "command", None)) == (
+            "issue", "label",
+        ):
+            changes = [f"added {name}" for name in result["added"]] + [
+                f"removed {name}" for name in result["removed"]
+            ]
+            print(f'Issue #{result["issue"]}: '
+                  + ("; ".join(changes) or "no label changed") + ".")
             print(json.dumps(result, indent=2, default=json_default))
         else:
             print(json.dumps(result, indent=2, default=json_default))

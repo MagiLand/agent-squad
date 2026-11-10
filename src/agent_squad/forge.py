@@ -205,6 +205,53 @@ class IssueRecord(TypedDict):
     comments: tuple[Evidence, ...]
 
 
+class RelatedIssue(TypedDict):
+    """An issue on the other side of a dependency (#144)."""
+
+    number: int
+    title: str
+    state: str
+    # The related issue's repository as ``owner/name``.
+    repository: str
+
+
+class IssueDependencies(TypedDict):
+    """Each list is null when the forge does not expose it (#144)."""
+
+    blocks: list[RelatedIssue] | None
+    blocked_by: list[RelatedIssue] | None
+
+
+# HTTP statuses with which a forge refuses a dependency read for the acting
+# identity after the issue itself was read (#144).
+DEPENDENCY_REFUSALS = (401, 403, 404)
+
+
+def related_issue(
+    number: object, title: object, state: object, repository: str,
+) -> RelatedIssue:
+    if state not in ("open", "closed"):
+        raise ForgeError("related issue state must be open or closed")
+    return {
+        "number": positive(number, "related issue number"),
+        "title": text_value(title, "related issue title"),
+        "state": state,
+        "repository": repository,
+    }
+
+
+def exposed(
+    read: Callable[[], list[RelatedIssue] | None],
+) -> list[RelatedIssue] | None:
+    """Return one dependency list, or null when the forge refuses it."""
+    try:
+        return read()
+    except ForgeError as error:
+        if error.status in DEPENDENCY_REFUSALS:
+            return None
+        raise
+
+
 class MergeResult(TypedDict):
     sha: str
     message: str
@@ -253,6 +300,12 @@ class Forge(Protocol):
     def create_issue(
         self, title: str, body: str, label: str,
     ) -> IssueRecord: ...
+
+    def issue_dependencies(self, number: int) -> IssueDependencies: ...
+
+    def change_issue_labels(
+        self, number: int, add: tuple[str, ...], remove: tuple[str, ...],
+    ) -> None: ...
 
     def pr(self, number: int) -> PullRequest: ...
     def reviews(self, number: int) -> tuple[Review, ...]: ...

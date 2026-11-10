@@ -9,13 +9,14 @@ import re
 import shutil
 import subprocess
 import time
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from .forge import (
     CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable, Comment,
-    Evidence, ForgeError, IssueRecord, MergeResult, PullRequest, Review,
-    ReviewPublication, ReviewState, Role, Snapshot, ThreadState, V, array,
-    boolean, branch_present, delete_and_confirm, object_value, oid, positive,
+    Evidence, ForgeError, IssueDependencies, IssueRecord, MergeResult,
+    PullRequest, RelatedIssue, Review, ReviewPublication, ReviewState, Role,
+    Snapshot, ThreadState, V, array, boolean, branch_present,
+    delete_and_confirm, exposed, object_value, oid, positive, related_issue,
     text_value,
 )
 from .initialization import Repository, decode_json
@@ -138,6 +139,19 @@ def parse_issue(value: object) -> IssueRecord:
         ],
         "comments": (),
     }
+
+
+def parse_related_issue(value: object) -> RelatedIssue:
+    """Read a dependency row; ``repository_url`` names its repository."""
+    data = object_value(value, "related issue")
+    url = text_value(data.get("repository_url"), "repository_url")
+    parts = urlsplit(url).path.split("/")
+    if len(parts) != 4 or parts[:2] != ["", "repos"] or not all(parts[2:]):
+        raise ForgeError("repository_url must name a repository")
+    return related_issue(
+        data.get("number"), data.get("title"), data.get("state"),
+        f"{unquote(parts[2])}/{unquote(parts[3])}",
+    )
 
 
 def parse_pullrequest(value: object) -> PullRequest:
@@ -808,6 +822,28 @@ class GitHub:
             f"{self.prefix}/issues", method="POST",
             body={"title": title, "body": body, "labels": [label]},
         ))
+
+    def issue_dependencies(self, number: int) -> IssueDependencies:
+        base = f"{self.prefix}/issues/{number}/dependencies"
+
+        def read(direction: str) -> list[RelatedIssue]:
+            return [parse_related_issue(row)
+                    for row in self.listing(f"{base}/{direction}")]
+
+        return {
+            "blocks": exposed(lambda: read("blocking")),
+            "blocked_by": exposed(lambda: read("blocked_by")),
+        }
+
+    def change_issue_labels(
+        self, number: int, add: tuple[str, ...], remove: tuple[str, ...],
+    ) -> None:
+        """Add, then remove one at a time; never replace the whole set."""
+        endpoint = f"{self.prefix}/issues/{number}/labels"
+        if add:
+            self.api(endpoint, method="POST", body={"labels": list(add)})
+        for name in remove:
+            self.api(f'{endpoint}/{quote(name, safe="")}', method="DELETE")
 
     def pr(self, number: int) -> PullRequest:
         return parse_pullrequest(self.api(f"{self.prefix}/pulls/{number}"))

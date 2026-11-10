@@ -116,6 +116,22 @@ def root_record(pr, body, anchor, review_id=None):
     return comment
 
 
+def blocking(number):
+    """The refs of the issues that issue ``number`` blocks (#144)."""
+    rows = [*model["issues"].items(), *model.get("foreign_issues", {}).items()]
+    return [ref for ref, row in rows if number in row.get("blocked_by", [])]
+
+
+def dependency_row(ref, here):
+    source, _, key = ref.rpartition("#")
+    row = model["foreign_issues"][ref] if source else model["issues"][ref]
+    return {
+        "id": 9000 + int(key), "number": int(key), "title": row["title"],
+        "state": row["state"],
+        "repository_url": "https://api.github.com/repos/" + (source or here),
+    }
+
+
 def paged(values, query):
     size = int(query.get("per_page", ["100"])[0])
     page = int(query.get("page", ["1"])[0])
@@ -666,6 +682,40 @@ if kind == "issues":
             target.setdefault("conversation", []).append(comment)
             output(comment)
         output(paged(target.get("conversation", []), query))
+    if parts[5:6] == ["dependencies"] and method == "GET":
+        # Issue dependencies (#144), modelled as on the Forgejo fake: an
+        # issue's "blocked_by" names each issue blocking it, as a number in
+        # this repository or as "owner/repo#N" in model["foreign_issues"].
+        if issue is None:
+            fail("Not Found", 404)
+        if account in settings.get("dependencies_denied", []):
+            fail("Not Found", 404)
+        here = "/".join(parts[1:3])
+        rows = {"blocked_by": issue.get("blocked_by", []),
+                "blocking": blocking(number)}[parts[6]]
+        output(paged([dependency_row(ref, here) for ref in rows], query))
+    if parts[5:6] == ["labels"]:
+        # Label writes reach the issue on a number a PR shares; the command
+        # refuses a PR before writing. ignore_label_writes answers as if
+        # the change were made and changes nothing.
+        if issue is None:
+            fail("Not Found", 404)
+        names = [label["name"] for label in issue["labels"]]
+        keep = not settings.get("ignore_label_writes")
+        if method == "POST":
+            # Only existing labels apply, as for issue creation (§19).
+            known = [label["name"] for label in model.get("labels", [])]
+            for name in payload["labels"]:
+                if keep and name in known and name not in names:
+                    issue["labels"].append({"name": name})
+                    names.append(name)
+        elif method == "DELETE":
+            if parts[6] not in names:
+                fail("Label does not exist", 404)
+            if keep:
+                issue["labels"] = [label for label in issue["labels"]
+                                   if label["name"] != parts[6]]
+        output(issue["labels"])
 if kind != "pulls":
     fail("unsupported endpoint", 404)
 if number is None:

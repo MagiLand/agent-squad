@@ -219,6 +219,14 @@ Implementer's `NOTE` line. It waits for your triage; the Implementer never
 starts work on it and lists it in its report. The repository needs a label
 named exactly `needs-triage`; without one the command creates nothing.
 
+After a merge that closes the issue, the Implementer applies the issue-
+closing rule your repository documents, if it documents one, through
+`issue label`: typically it removes the readiness label from the closed
+issue and labels the issues that the merge unblocked. It changes labels
+only as that rule states, never removes `needs-triage`, `needs-info`,
+`ready-for-human`, or `wontfix`, and lists each change in its final
+report. Without a documented rule it says so and changes nothing.
+
 A successful Herdr handoff ends the sending agent's step. It becomes idle;
 there is no polling of the receiving agent. The Reviewer posts on the configured forge
 before notifying the Implementer, so a missing notification loses no review.
@@ -328,7 +336,7 @@ shipped command path.
 | Commands | Purpose |
 | --- | --- |
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
-| `issue view`, `issue comment`, `issue create` | Read the governing issue, comments, labels, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`. |
+| `issue view`, `issue comment`, `issue create`, `issue label` | Read the governing issue, comments, labels, dependencies, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`; add or remove existing labels on an issue to apply a closing rule the repository documents, never removing `needs-triage`, `needs-info`, `ready-for-human`, or `wontfix`. |
 | `pr create`, `pr report` | Publish the Task and implementation report, ending with `Closes #<issue>`, or with `Ref #<issue>` under `pr create --partial --task <file>` for a PR that delivers part of an issue and leaves it open; update the report on an open PR, keeping that footer. |
 | `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head, and derived workflow state. |
 | `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
