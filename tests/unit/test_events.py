@@ -203,6 +203,20 @@ class StoreTests(unittest.TestCase):
             self.run_cli("status", "--pr", "1", result=KeyboardInterrupt())
         self.assertEqual([e["exit_code"] for e in self.events()], [1, 130])
 
+    def test_each_run_forgets_the_previous_runs_configuration(self) -> None:
+        events.observe(ForgeConfiguration("github", "owner", "repo"))
+        self.run_cli("MARKER")
+        self.assertEqual([e["project"] for e in self.events()], [None])
+
+    def test_a_fifo_with_a_reader_is_not_written(self) -> None:
+        self.store.mkdir(parents=True)
+        name = "events-2026-01.jsonl"
+        os.mkfifo(self.store / name)
+        reader = os.open(self.store / name, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, reader)
+        with self.assertRaisesRegex(OSError, "not a regular file"):
+            events.open_store(self.store, name)
+
     def test_disabled_recording_writes_nothing(self) -> None:
         environ = {**self.environ, "AGENT_SQUAD_EVENTS": "off"}
         self.run_cli("pr", "head", "--pr", "1", environ=environ)

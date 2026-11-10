@@ -27,7 +27,8 @@ to these events later by `project` and PR or issue number.
   event's `time`.
 - Each line is one event: a JSON object followed by a newline, written with a
   single append to a file opened in append mode.
-- The CLI creates missing directories with mode `0700` and the file with mode
+- The CLI creates the `agent-squad` and `events` directories, and the state
+  directory when it is missing, with mode `0700`, and the file with mode
   `0600`. The state directory itself may be reached through a symbolic link;
   a symbolic link at `agent-squad`, at `events`, or at the file is not
   followed, and nothing is recorded.
