@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import subprocess
 import tempfile
@@ -205,6 +206,14 @@ class Handler(BaseHTTPRequestHandler):
                 git("push", "origin", f":refs/heads/{pr['head']['ref']}")
                 self._branch_refs = None
         pr.update(merged=True, state="closed", merge_commit_sha=sha)
+        # Forgejo closes each issue a default closing keyword names in the
+        # body (confirmed on 16.0.3 in the #146 triage).
+        for key in re.findall(
+            r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):? +#([0-9]+)\b",
+            pr.get("body") or "",
+        ):
+            if key in model.get("issues", {}):
+                model["issues"][key]["state"] = "closed"
         if settings.get("post_merge_head_discrepancy"):
             pr["head"]["sha"] = pr["base"]["sha"]
             pr["head"]["ref"] = "synthetic-pull-ref"

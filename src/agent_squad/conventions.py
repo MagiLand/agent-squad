@@ -27,6 +27,12 @@ VERIFICATIONS = {
     "not-fixed": "NOT FIXED",
 }
 PREFIXES = ("AGENT_SQUAD/", "[REV-", "DISPOSITION", "VERIFIED", "NOT FIXED")
+# pr create's last body line: Closes for a whole delivery, Ref for a partial.
+FOOTER = re.compile(
+    rf"^(?P<word>Closes|Ref) #(?P<issue>{NUMBER})[ \t]*$", re.MULTILINE
+)
+# The nine default closing keywords of GitHub and Forgejo.
+CLOSING_KEYWORD = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
 PATTERNS = {
     "review": re.compile(
         rf"{re.escape(TAG)} REVIEW pr=(?P<pr>{NUMBER}) head=(?P<head>{SHA})"
@@ -209,6 +215,52 @@ def validate_section(body: str, name: str) -> str:
     return body.strip()
 
 
+def pr_footer(body: str) -> re.Match[str] | None:
+    """Find pr create's issue reference after the report's content (§7.2).
+
+    The footer is the last ``Closes #<N>`` or ``Ref #<N>`` line in the
+    report's section, so a reference line inside the report never wins.
+    """
+    found = headings(body)
+    reports = [h for h in found if h[0] == "Implementation report"]
+    if len(reports) != 1:
+        return None
+    i = found.index(reports[0])
+    end = found[i + 1][1] if i + 1 < len(found) else len(body)
+    matches = list(FOOTER.finditer(body, found[i][2], end))
+    return matches[-1] if matches else None
+
+
+def closes_issue(body: str) -> bool | None:
+    """True for a closing footer, false for a partial one, else None."""
+    footer = pr_footer(body)
+    return None if footer is None else footer["word"] == "Closes"
+
+
+def refuse_closing_reference(text: str, issue: int, name: str) -> None:
+    """Keep a partial PR from closing its issue through other text."""
+    match = re.search(
+        rf"\b{CLOSING_KEYWORD}\s*:?\s*#0*{issue}(?![0-9])",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        line = text.count("\n", 0, match.start()) + 1
+        raise AgentSquadError(
+            f"a partial PR must not close issue #{issue}: the {name} names"
+            f' it after a closing keyword on line {line} ("'
+            + " ".join(match[0].split())
+            + '"); reword it so the issue stays open'
+        )
+
+
+def refuse_partial_closing(body: str, text: str, name: str) -> None:
+    """Apply the closing-keyword refusal while the body's footer is Ref."""
+    footer = pr_footer(body)
+    if footer is not None and footer["word"] == "Ref":
+        refuse_closing_reference(text, int(footer["issue"]), name)
+
+
 def replace_section(body: str, name: str, replacement: str) -> str:
     validate_pr_body(body)
     replacement = validate_section(replacement, name)
@@ -216,13 +268,12 @@ def replace_section(body: str, name: str, replacement: str) -> str:
     i = next(i for i, h in enumerate(found) if h[0] == name)
     start = found[i][1]
     end = found[i + 1][1] if i + 1 < len(found) else len(body)
-    # pr create's closing reference follows the report, outside its content.
+    # pr create's footer follows the report, outside its content; it is
+    # kept as written, whether it closes the issue or not.
     if name == "Implementation report":
-        footer = re.search(
-            r"^Closes #[1-9][0-9]*\s*$", body[start:end], re.MULTILINE
-        )
+        footer = pr_footer(body)
         if footer:
-            end = start + footer.start()
+            end = footer.start()
     return body[:start] + replacement + "\n\n" + body[end:]
 
 
@@ -960,6 +1011,7 @@ def derive(
         "pr": asdict(pr),
         "task": task,
         "implementation_report": report,
+        "closes_issue": closes_issue(pr.evidence.body),
         "effective_task": effective_task,
         "merge_instruction": merge_instruction,
         "merge_hold": merge_hold,

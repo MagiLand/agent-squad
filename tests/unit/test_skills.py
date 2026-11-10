@@ -439,3 +439,74 @@ class CiResultSkillTests(unittest.TestCase):
                            "supply evidence"):
                 with self.subTest(phrase=phrase):
                     self.assertNotIn(phrase, text)
+
+
+class PartialDeliverySkillTests(unittest.TestCase):
+    """The Implementer delivers a staged issue one PR per stage (#146)."""
+
+    def setUp(self) -> None:
+        self.implementer = flat(packaged_skill("squad-implementer").decode())
+        spec = flat((PROJECT_ROOT / "docs/agent-squad-spec.md").read_text())
+        self.spec_implementer = section(
+            spec, "### 12.2 `squad-implementer`: mandatory rules",
+            "### 12.3")
+
+    def test_stages_need_an_approved_task_and_keep_scope_in_the_issue(
+        self,
+    ) -> None:
+        task = section(self.implementer, "## 1. Read the issue", "## 2.")
+        for rule in (
+            "Deliver an issue in stages, one PR each, when the issue itself "
+            "schedules its delivery in more than one PR or the Developer "
+            "approves a staged delivery.",
+            "draft its Task as above: which part of the issue this PR "
+            "delivers, the acceptance criteria that apply to it, and the rest "
+            "of the issue as non-goals. Present it once and wait for "
+            "approval, as for any drafted Task.",
+            "Open every stage except the one that completes the issue with "
+            "`--partial` (section 2).",
+            "The remaining scope stays in the issue: do not file it as a new "
+            "issue, and do not start the next stage without the Developer's "
+            "instruction.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, task)
+        for outline in (
+            "Deliver an issue in stages, one PR each,",
+            "open every stage except the one that completes the issue with "
+            "`--partial`",
+            "never file it as a new issue, and do not start the next stage "
+            "without the Developer's instruction",
+        ):
+            with self.subTest(outline=outline):
+                self.assertIn(outline, self.spec_implementer)
+
+    def test_partial_flag_closing_pr_and_final_report(self) -> None:
+        publish = section(self.implementer, "## 2. Implement", "## 3.")
+        for rule in (
+            "add `--partial`, which requires `--task`: the PR body then ends "
+            "with `Ref #<N>` instead of `Closes #<N>`, so merging it leaves "
+            "the issue open with its labels.",
+            "The PR that completes the issue passes `--task` for its stage "
+            "and no `--partial`.",
+            "Start a later stage in a fresh `<worktree_root>/issue-<N>` "
+            "worktree on a branch no earlier PR used",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, publish)
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        self.assertIn(
+            "whether the merge closed the issue or left it open as a partial "
+            "delivery", finishing)
+        for outline in (
+            "and `--partial` with it for a stage that leaves part of the "
+            "issue for a later PR",
+            "the PR that completes the issue passes `--task` without "
+            "`--partial`",
+            "which says whether the merge closed the issue or left it open "
+            "as a partial delivery",
+        ):
+            with self.subTest(outline=outline):
+                self.assertIn(outline, self.spec_implementer)
+        self.assertNotIn(
+            "--partial", packaged_skill("squad-reviewer").decode())

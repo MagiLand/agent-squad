@@ -1286,6 +1286,9 @@ def is_write(call: dict) -> bool:
     if "method" in call:  # One HTTP request to the Forgejo fake.
         return call["method"] != "GET"
     arguments = call["arguments"]  # One process of the fake gh.
+    if arguments[:2] == ["api", "graphql"]:
+        # The snapshot read is a GraphQL query sent with POST.
+        return not call["body"]["query"].lstrip().startswith("query ")
     return (
         arguments[0] == "api" and "--method" in arguments
         and arguments[arguments.index("--method") + 1] != "GET"
@@ -1358,6 +1361,183 @@ class PrCreateIssueTests(unittest.TestCase):
                 self.assertEqual(row["title"], original["title"])
         record = json.loads(ownership.read_text())
         self.assertEqual((record["issue"], record["pr"]), (1, numbers[1]))
+
+
+class PartialPrTests(unittest.TestCase):
+    """#146: a partial PR ends with Ref #<issue> and leaves the issue open."""
+
+    CREATE = ("pr", "create", "--as", "implementer", "--issue", "1")
+
+    def each_fake(self, check) -> None:
+        for fixture in (ForgeFixture, ForgejoFixture):
+            with self.subTest(forge=fixture.__name__):
+                f = fixture()
+                self.addCleanup(f.close)
+                f.initialize()
+                f.candidate()
+                check(f)
+
+    def refused(self, f: ForgeFixture, args: tuple, message: str) -> None:
+        """A refusal with exit 1 that writes nothing to the forge."""
+        start = len(f.read_model()["calls"])
+        prs = f.read_model()["prs"]
+        error = f.cli(*args, expected=1)
+        self.assertIn(message, error["error"])
+        after = f.read_model()
+        self.assertEqual(after["prs"], prs)
+        self.assertEqual(
+            [c for c in after["calls"][start:] if is_write(c)], [])
+
+    def body(self, f: ForgeFixture, pr: int = 1) -> str:
+        return f.read_model()["prs"][str(pr)]["body"]
+
+    def test_partial_create_report_and_amendment_keep_ref(self) -> None:
+        self.each_fake(self.check_partial_texts)
+
+    def check_partial_texts(self, f: ForgeFixture) -> None:
+        ownership = Path(
+            f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree)
+        ) / "agent-squad-implementation.json"
+        start = len(f.read_model()["calls"])
+        error = f.cli(
+            *self.CREATE, "--partial", "--report", f.report, expected=2,
+        )
+        self.assertIn("--partial requires --task", error["error"])
+        self.assertEqual(len(f.read_model()["calls"]), start)
+        self.assertFalse(ownership.exists())
+        task = TASK.strip() + "\n\nFixes #2 as well.\n"
+        for name, text in (
+            ("task", TASK + "\nThis CLOSES #1 for now.\n"),
+            ("task", TASK + "\nfixes:\n#1\n"),
+            ("report", REPORT.replace(
+                "### Scope\n\nScripted fixture.",
+                "### Scope\n\nResolved: #1 in part.")),
+        ):
+            with self.subTest(refused=text[-30:]):
+                files = {"task": f.task, "report": f.report}
+                files[name] = f.write(f"closing-{name}.md", text)
+                self.refused(f, (
+                    *self.CREATE, "--partial", "--task", files["task"],
+                    "--report", files["report"],
+                ), "must not close issue #1")
+                self.assertFalse(ownership.exists())
+        created = f.cli(
+            *self.CREATE, "--partial", "--task", f.write("task-2.md", task),
+            "--report", f.report,
+        )
+        self.assertEqual(created["number"], 1)
+        self.assertEqual(
+            self.body(f),
+            task.strip() + "\n\n" + REPORT.strip() + "\n\nRef #1\n",
+        )
+        self.assertNotIn("Closes #1", self.body(f))
+        self.assertIs(f.status()["closes_issue"], False)
+        report = ("pr", "report", "--as", "implementer", "--pr", "1")
+        before = self.body(f)
+        self.refused(f, (*report, "--report", f.write(
+            "closing-report.md", REPORT.replace("fixture.", "fix #1.", 1),
+        )), "must not close issue #1")
+        self.assertEqual(self.body(f), before)
+        updated = REPORT.replace("Scripted fixture.", "Fixes #12 too.")
+        f.cli(*report, "--report", f.write("updated-report.md", updated))
+        self.assertEqual(
+            self.body(f),
+            task.strip() + "\n\n" + updated.strip() + "\n\nRef #1\n",
+        )
+        decisions = len(f.status()["decisions"])
+        self.refused(f, (
+            "decision", "post", "--as", "implementer", "--pr", "1",
+            "--finding", "none", "--body", f.write("decision.md", "Amend."),
+            "--task", f.write("closing-amendment.md", TASK + "\nCloses: #1\n"),
+        ), "must not close issue #1")
+        self.assertEqual(len(f.status()["decisions"]), decisions)
+        amended = TASK.replace("Exercise", "Amend")
+        f.decision(task=amended)
+        state = f.status()
+        self.assertEqual(
+            self.body(f),
+            amended.strip() + "\n\n" + updated.strip() + "\n\nRef #1\n",
+        )
+        self.assertFalse(state["task_body_stale"])
+        self.assertIs(state["closes_issue"], False)
+        # Without a footer the PR neither closes nor leaves the issue open.
+        model = f.read_model()
+        model["prs"]["1"]["body"] = before.removesuffix("\n\nRef #1\n")
+        f.save_model(model)
+        self.assertIsNone(f.status()["closes_issue"])
+
+    def test_partial_merge_leaves_the_issue_open_for_a_later_pr(self) -> None:
+        self.each_fake(self.check_two_stages)
+
+    def merge_and_cleanup(self, f: ForgeFixture, pr: int) -> list[dict]:
+        """Merge with cleanup held back by a scratch symlink, then finish."""
+        scratch = f.repo / f".agent-squad/review-scratch/pr{pr}"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        target = f.root / f"held-scratch-{pr}"
+        target.mkdir()
+        scratch.symlink_to(target, target_is_directory=True)
+        command = ("--as", "implementer", "--pr", str(pr))
+        result = f.run([
+            sys.executable, "-m", "agent_squad", "pr", "merge", *command,
+            "--json",
+        ], cwd=f.repo)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        merged = json.loads(result.stdout)
+        self.assertTrue(merged["merged"])
+        self.assertEqual(merged["cleanup"][-1]["step"], "scratch directory")
+        scratch.unlink()
+        cleaned = f.cli("pr", "cleanup", *command, cwd=f.repo)
+        self.assertTrue(all(s["ok"] for s in cleaned["cleanup"]))
+        return [merged, cleaned]
+
+    def check_two_stages(self, f: ForgeFixture) -> None:
+        f.cli(*self.CREATE, "--partial", "--task", f.task,
+              "--report", f.report)
+        issue_scratch = f.repo / ".agent-squad/review-scratch/issue-1"
+        issue_scratch.mkdir(parents=True)
+        (issue_scratch / "report.md").write_text("first stage")
+        f.review("approved")
+        results = self.merge_and_cleanup(f, 1)
+        self.assertEqual([r["closes_issue"] for r in results], [False, False])
+        issue = f.read_model()["issues"]["1"]
+        self.assertEqual(issue["state"], "open")
+        self.assertEqual(issue["labels"], [{"name": "ready-for-agent"}])
+        self.assertFalse(f.worktree.exists())
+        self.assertEqual(f.git("branch", "--list", "issue-1"), "")
+        self.assertEqual(
+            f.git("ls-remote", "--heads", "origin", "issue-1"), "")
+        self.assertFalse(issue_scratch.exists())
+        self.assertEqual(
+            f.git("worktree", "list", "--porcelain").count("worktree "), 1)
+        # The next stage starts from a fresh issue worktree; its branch must
+        # be new, because pr create refuses a branch that already had a PR.
+        f.git("worktree", "add", "-b", "issue-1", str(f.worktree))
+        f.push("value = 1\nstage = 2\n")
+        task = f.write("closing-task.md", TASK + "\nFixes #1 at last.\n")
+        self.refused(f, (*self.CREATE, "--task", task, "--report", f.report),
+                     "a PR already exists for this branch")
+        f.git("branch", "-m", "issue-1-stage-2", cwd=f.worktree)
+        f.git("push", "-u", "origin", "HEAD", cwd=f.worktree)
+        created = f.cli(*self.CREATE, "--task", task, "--report", f.report)
+        self.assertEqual(created["number"], 2)
+        self.assertEqual(self.body(f, 2), (
+            (TASK + "\nFixes #1 at last.\n").strip() + "\n\n"
+            + REPORT.strip() + "\n\nCloses #1\n"
+        ))
+        self.assertIs(
+            f.cli("status", "--pr", "2")["closes_issue"], True)
+        head = f.git("rev-parse", "HEAD", cwd=f.worktree)
+        f.cli(
+            "review", "post", "--as", "reviewer", "--pr", "2",
+            "--head", head, "--base", f.git("rev-parse", "origin/main"),
+            "--verdict", "approved", "--summary", f.summary,
+            "--verified-dispositions", f.verified,
+            "--threads", f.write("threads.json", "[]"),
+        )
+        results = self.merge_and_cleanup(f, 2)
+        self.assertEqual([r["closes_issue"] for r in results], [True, True])
+        self.assertEqual(f.read_model()["issues"]["1"]["state"], "closed")
+        self.assertFalse(f.worktree.exists())
 
 
 # Every list the GitHub snapshot reads through GraphQL (#149).

@@ -107,6 +107,7 @@ def parser() -> argparse.ArgumentParser:
     pr["create"].add_argument("--task")
     pr["create"].add_argument("--report", required=True)
     pr["create"].add_argument("--title")
+    pr["create"].add_argument("--partial", action="store_true")
     common(pr["report"], role="implementer", mutation=True)
     pr["report"].add_argument("--report", required=True)
     common(pr["merge"], role="implementer", mutation=True)
@@ -256,6 +257,7 @@ def execute(args: argparse.Namespace) -> dict:
             commands.read_file(args.task) if args.task else None,
             commands.read_file(args.report),
             args.title,
+            partial=args.partial,
         )
     if key == ("pr", "report"):
         return commands.report_pr(
@@ -410,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
         error = reply_option_error(args)
         if error:
             root.error(error)
+    if (args.group, getattr(args, "command", None)) == ("pr", "create") and (
+        args.partial and args.task is None
+    ):
+        # A partial delivery needs a drafted, approved Task for its stage.
+        root.error("--partial requires --task")
     try:
         result = execute(args)
         if args.json:

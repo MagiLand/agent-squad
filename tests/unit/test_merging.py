@@ -274,7 +274,8 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = False
         forge.merge.side_effect = error
-        state = {"pr": {"merged": merged}, "target": {"head": H}}
+        state = {"pr": {"merged": merged}, "target": {"head": H},
+                 "closes_issue": True}
         gate = (
             {"return_value": False} if error
             else {"side_effect": GateError("pr merge refused: x")}
