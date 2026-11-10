@@ -58,6 +58,20 @@ def other_fields(state: dict) -> dict:
     return {key: value for key, value in state.items() if key != "ci"}
 
 
+def graphql_check_read(body: object) -> bool:
+    """Whether a GraphQL request reads checks (#149)."""
+    if not isinstance(body, dict) or "query" not in body:
+        return False
+    query = body["query"]
+    return (
+        query.startswith("query SquadChecks")
+        or (query.startswith("query SquadSnapshot")
+            and body["variables"]["checks"])
+        or (query.startswith("query SquadPage")
+            and ("on Commit " in query or "on CheckSuite " in query))
+    )
+
+
 class CheckFixtureMixin:
     """Shared setup: one open PR whose current head carries checks."""
 
@@ -222,11 +236,28 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
         return [c for c in self.f.read_model()["calls"]
                 if c["arguments"][:1] == ["api"]
                 and ("/commits/" in c["arguments"][1]
-                     or "/actions/runs" in c["arguments"][1])]
+                     or "/actions/runs" in c["arguments"][1]
+                     or graphql_check_read(c["body"]))]
 
     @staticmethod
     def account_of(call: dict) -> str:
         return call["account"]
+
+    def test_each_wait_poll_reads_the_checks_then_the_head(self) -> None:
+        # One checks query, then the PR record; never a snapshot (#149).
+        self.sequence(self.pending(), self.passing())
+        start = len(self.f.read_model()["calls"])
+        self.assertEqual(self.checks("--wait", "5")["summary"], "passed")
+        reads = [
+            c["body"]["query"].split("(", 1)[0]
+            if c["arguments"][1] == "graphql" else c["arguments"][1]
+            for c in self.f.read_model()["calls"][start:]
+            if c["arguments"][:1] == ["api"]
+        ]
+        pull = reads[0]
+        self.assertTrue(pull.endswith("/pulls/1"), pull)
+        poll = ["query SquadChecks", pull]
+        self.assertEqual(reads, [pull, *poll, *poll])
 
     def test_check_runs_and_statuses_are_both_reported(self) -> None:
         self.seed({

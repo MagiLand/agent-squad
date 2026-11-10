@@ -1,5 +1,6 @@
 """CI result classification, summary, and the checks wait (#145)."""
 
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 import unittest
@@ -138,11 +139,21 @@ class RefusalTests(unittest.TestCase):
             return [GitHub(github, "reviewer"),
                     Forgejo(forgejo, "reviewer")]
 
+    @staticmethod
+    def graphql_refused(forge: object):
+        """GitHub's GraphQL read reports a refusal without a status (#149)."""
+        if not isinstance(forge, GitHub):
+            return nullcontext()
+        return patch.object(forge, "graphql", side_effect=ForgeError(
+            "gh: Resource not accessible by integration"
+        ))
+
     def test_refusals_are_unavailable_and_other_errors_raise(self) -> None:
         for forge in self.adapters():
             for status in (401, 403, 404, 422, 500, None):
                 error = ForgeError("refused", status)
                 with self.subTest(forge=type(forge).__name__, status=status), \
+                        self.graphql_refused(forge), \
                         patch.object(forge, "api", side_effect=error):
                     if status in (401, 403, 404):
                         record = ci_record(forge, H)
@@ -169,7 +180,8 @@ class RefusalTests(unittest.TestCase):
             seen.append(endpoint)
             return next(v for k, v in pages.items() if k in endpoint)
 
-        with patch.object(forge, "api", side_effect=api):
+        with self.graphql_refused(forge), \
+                patch.object(forge, "api", side_effect=api):
             self.assertEqual(ci_record(forge, H)["summary"], "none")
         self.assertEqual(seen, [
             f"/repos/org/repo/commits/{H}/check-runs"
@@ -177,6 +189,95 @@ class RefusalTests(unittest.TestCase):
             f"/repos/org/repo/commits/{H}/status?per_page=100&page=1",
             f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
         ])
+
+
+def graphql_run(ident: int, name: str) -> dict:
+    return {
+        "databaseId": ident, "name": name, "status": "COMPLETED",
+        "conclusion": "SUCCESS", "startedAt": "2026-11-09T10:00:00Z",
+        "permalink": f"https://github.com/org/repo/actions/runs/{ident}",
+        "completedAt": "2026-11-09T10:05:00Z",
+    }
+
+
+def graphql_commit(suites: list, contexts: list | None = None) -> dict:
+    def page(nodes: list) -> dict:
+        return {"nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None}}
+
+    return {
+        "id": "C-1", "oid": H,
+        "checkSuites": page([
+            {"id": f"CS-{n}", "app": {"slug": "github-actions"},
+             "workflowRun": None if event is None else {"event": event},
+             "checkRuns": page(runs)}
+            for n, (event, runs) in enumerate(suites)
+        ]),
+        "status": None if contexts is None else {"contexts": contexts},
+    }
+
+
+class GraphQLCheckTests(unittest.TestCase):
+    """GitHub reads the checks at one commit in one GraphQL query (#149)."""
+
+    def setUp(self) -> None:
+        path = Path("/repo")
+        with patch("agent_squad.github.shutil.which", return_value="/gh"):
+            self.forge = GitHub(
+                Repository(path, path, path / ".git", config()), "reviewer"
+            )
+
+    def read(self, commit: dict) -> tuple[Check, ...]:
+        response = {"repository": {"object": commit}}
+        with patch.object(self.forge, "graphql", return_value=response), \
+                patch.object(self.forge, "api",
+                             side_effect=AssertionError("REST read")):
+            return self.forge.checks(H)
+
+    def test_runs_and_statuses_read_as_rest_reads_them(self) -> None:
+        checks = self.read(graphql_commit(
+            [("pull_request",
+              [graphql_run(5, "test"), graphql_run(9, "test")]),
+             (None, [graphql_run(7, "lint")])],
+            [{"context": "deploy", "state": "FAILURE",
+              "targetUrl": "https://ci.example/deploy",
+              "creator": {"__typename": "Bot", "login": "ci"}},
+             {"context": "docs", "state": "SUCCESS", "targetUrl": None,
+              "creator": None}],
+        ))
+        self.assertEqual(
+            [(c.name, c.event, c.state, c.result, c.source, c.url)
+             for c in checks],
+            [("deploy", None, "failure", "failed", "ci[bot]",
+              "https://ci.example/deploy"),
+             ("docs", None, "success", "passed", None, None),
+             ("lint", None, "completed/success", "passed", "github-actions",
+              "https://github.com/org/repo/actions/runs/7"),
+             # REST lists the newer run with the same name and event first.
+             ("test", "pull_request", "completed/success", "passed",
+              "github-actions", "https://github.com/org/repo/actions/runs/9"),
+             ("test", "pull_request", "completed/success", "passed",
+              "github-actions", "https://github.com/org/repo/actions/runs/5")],
+        )
+
+    def test_a_full_status_list_is_read_by_rest(self) -> None:
+        contexts = [{"context": f"s-{n}", "state": "SUCCESS",
+                     "targetUrl": None, "creator": None}
+                    for n in range(100)]
+        response = {"repository": {"object": graphql_commit([], contexts)}}
+        with patch.object(self.forge, "graphql", return_value=response), \
+                patch.object(self.forge, "rest_checks",
+                             return_value=()) as rest:
+            self.assertEqual(self.forge.checks(H), ())
+        rest.assert_called_once_with(H)
+
+    def test_snapshot_checks_must_be_at_the_head(self) -> None:
+        commit = graphql_commit([("push", [graphql_run(1, "test")])])
+        self.assertEqual(len(self.forge.head_checks(commit, H)), 1)
+        self.assertIsNone(self.forge.head_checks(commit, OTHER))
+        self.assertIsNone(self.forge.head_checks(None, H))
+        commit["checkSuites"] = None
+        self.assertIsNone(self.forge.head_checks(commit, H))
 
 
 class StubForge:

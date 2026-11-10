@@ -345,9 +345,12 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("pr", "checks"):
         # Only the PR record and its checks: no fetch and no Herdr read.
         return commands.pr_checks(forge, args.pr, args.wait)
+    # Only the status report reads CI, in the same read where it can.
+    report_ci = key not in (("pr", "head"), ("pr", "reviews"))
+    snapshot = forge.snapshot(args.pr, with_checks=report_ci)
     state = commands.state_for(
         repository,
-        forge.snapshot(args.pr),
+        snapshot,
         include_reviewer=args.group == "status",
     )
     if key == ("pr", "head"):
@@ -361,7 +364,10 @@ def execute(args: argparse.Namespace) -> dict:
             "diagnostics": state["diagnostics"],
         }
     # Reported beside the derived state; no other field depends on it (§7.9).
-    return {**state, "ci": commands.ci_record(forge, state["target"]["head"])}
+    head = state["target"]["head"]
+    return {**state, "ci": commands.ci_record(
+        forge, head, snapshot.head_checks if head == snapshot.pr.head else None
+    )}
 
 
 def reply_option_error(args: argparse.Namespace) -> str | None:

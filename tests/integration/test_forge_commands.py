@@ -803,7 +803,7 @@ class ForgeCommandTests(unittest.TestCase):
             and c["arguments"][c["arguments"].index("--method") + 1] != "GET"
             and not (
                 c["arguments"][1] == "graphql"
-                and "query SquadThreads" in c["body"]["query"]
+                and c["body"]["query"].startswith("query ")
             )
         ]
         self.assertTrue(mutations)
@@ -1279,6 +1279,155 @@ class ForgeCommandTests(unittest.TestCase):
                 parse_pullrequest(value)
             with self.assertRaises(ForgeError):
                 parse_review(value)
+
+
+# Every list the GitHub snapshot reads through GraphQL (#149).
+SNAPSHOT_LISTS = (
+    "PullRequest.reviews", "PullRequestReview.comments",
+    "PullRequest.reviewThreads", "PullRequestReviewThread.comments",
+    "PullRequest.comments", "Commit.checkSuites", "CheckSuite.checkRuns",
+)
+
+
+def check_run(name: str, suite: int) -> dict:
+    return {
+        "name": name, "status": "completed", "conclusion": "success",
+        "check_suite": {"id": suite}, "app": {"slug": "github-actions"},
+        "html_url": f"https://github.example/runs/{name}",
+        "started_at": "2026-11-09T10:00:00Z",
+        "completed_at": "2026-11-09T10:05:00Z",
+    }
+
+
+class GitHubSnapshotReadTests(unittest.TestCase):
+    """One GraphQL read stands for the REST reads behind ``status``."""
+
+    def setUp(self) -> None:
+        self.f = ForgeFixture()
+        self.addCleanup(self.f.close)
+        self.f.initialize()
+        self.f.candidate()
+        self.f.create_pr()
+        self.f.seed_read_scenario()
+
+    def gh_calls(self, *args: str) -> list[dict]:
+        start = len(self.f.read_model()["calls"])
+        self.f.cli(*args)
+        return self.f.read_model()["calls"][start:]
+
+    def snapshot(self):
+        with patch.dict("os.environ", self.f.env, clear=True):
+            forge = GitHub(
+                load_initialized_repository(self.f.worktree), "implementer"
+            )
+            return forge.snapshot(1, with_checks=True)
+
+    def seed_reviews(self, count: int) -> None:
+        """``count`` reviews, each with one inline comment in its thread."""
+        model = self.f.read_model()
+        pr = model["prs"]["1"]
+        template = next(
+            c for c in pr["comments"] if c["in_reply_to_id"] is None
+        )
+        pr["reviews"] = [
+            dict(pr["reviews"][0], id=200 + n, state="COMMENTED",
+                 body=f"Review {n}.")
+            for n in range(count)
+        ]
+        pr["comments"] = [
+            dict(template, id=300 + n, pull_request_review_id=200 + n,
+                 body=f"Note {n}.")
+            for n in range(count)
+        ]
+        pr["threads"] = [
+            {"id": f"T-{300 + n}", "isResolved": False,
+             "comments": {"nodes": [{"databaseId": 300 + n}]}}
+            for n in range(count)
+        ]
+        self.f.save_model(model)
+
+    def seed_every_list(self) -> None:
+        """Two or more entries in every list the snapshot reads."""
+        model = self.f.read_model()
+        pr = model["prs"]["1"]
+        root = next(c for c in pr["comments"] if c["id"] == 103)
+        pr["comments"].append(dict(
+            root, id=107, pull_request_review_id=106, line=3,
+            body="Note on line 3.", created_at="2026-01-01T00:00:07Z",
+        ))
+        pr["threads"].append({
+            "id": "T-107", "isResolved": False,
+            "comments": {"nodes": [{"databaseId": 107}]},
+        })
+        pr["conversation"] = [
+            {"id": 108 + n, "body": f"Conversation {n}.",
+             "user": {"login": "developer"},
+             "created_at": f"2026-01-01T00:00:0{8 + n}Z"}
+            for n in range(2)
+        ]
+        model.setdefault("checks", {})[pr["head"]["sha"]] = {
+            "check_runs": [check_run("lint", 1), check_run("test", 1),
+                           check_run("deploy", 2)],
+            "workflow_runs": [
+                {"check_suite_id": 1, "event": "pull_request"},
+                {"check_suite_id": 2, "event": "push"},
+            ],
+        }
+        self.f.save_model(model)
+
+    def test_status_starts_at_most_three_gh_processes(self) -> None:
+        for count in (1, 5):
+            with self.subTest(reviews=count):
+                self.seed_reviews(count)
+                calls = self.gh_calls("status", "--pr", "1")
+                self.assertLessEqual(
+                    len(calls), 3, [c["arguments"][:2] for c in calls]
+                )
+                snapshot = self.snapshot()
+                self.assertEqual(len(snapshot.reviews), count)
+                self.assertEqual(len(snapshot.comments), count)
+
+    def test_every_list_is_read_past_its_first_page(self) -> None:
+        self.seed_every_list()
+        baseline = self.snapshot()
+        self.assertEqual(
+            [len(baseline.reviews), len(baseline.comments),
+             len(baseline.threads), len(baseline.conversation),
+             len(baseline.head_checks)],
+            [2, 4, 2, 2, 3],
+        )
+        for sizes in [{key: 1} for key in SNAPSHOT_LISTS] + [
+            dict.fromkeys(SNAPSHOT_LISTS, 1)
+        ]:
+            with self.subTest(sizes=sizes):
+                self.f.settings(page_sizes=sizes)
+                start = len(self.f.read_model()["calls"])
+                self.assertEqual(self.snapshot(), baseline)
+                queries = [
+                    (c["body"] or {}).get("query", "")
+                    for c in self.f.read_model()["calls"][start:]
+                ]
+                for key in sizes:
+                    owner, field = key.split(".")
+                    self.assertTrue(any(
+                        q.startswith("query SquadPage")
+                        and f"... on {owner} {{ {field}(" in q
+                        for q in queries
+                    ), key)
+
+    def test_status_equals_the_rest_shaped_evidence(self) -> None:
+        # Replies in the flat listing carry the thread's side (#149).
+        self.seed_every_list()
+        state = self.f.status()
+        self.assertEqual(state["ci"]["summary"], "passed")
+        self.assertEqual(
+            [(c["name"], c["event"]) for c in state["ci"]["checks"]],
+            [("deploy", "push"), ("lint", "pull_request"),
+             ("test", "pull_request")],
+        )
+        self.assertEqual(
+            [r["id"] for r in state["findings"][0]["replies"]], [104, 105]
+        )
 
 
 class ForgejoReadCommandTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """Forge response boundaries, including values produced by the browser."""
 
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -10,11 +11,13 @@ add_src_to_path()
 
 from agent_squad.forge import (  # noqa: E402
     ForgeError,
+    ThreadState,
     boolean,
     oid,
 )
 from agent_squad.github import (  # noqa: E402
-    GitHub, parse_comment, parse_evidence, parse_pullrequest, parse_review,
+    REVIEWS, CommandFailed, GitHub, actor, database_id, parse_comment,
+    parse_evidence, parse_pullrequest, parse_review, rest_pullrequest,
 )
 from agent_squad.initialization import Repository  # noqa: E402
 from tests.unit.test_conventions import (  # noqa: E402
@@ -35,6 +38,46 @@ def forge_evidence(body: object = "") -> dict:
         "created_at": "2026-01-01T00:00:10Z",
         "body": body,
     }
+
+
+def page(nodes: list, cursor: str | None = None) -> dict:
+    return {"nodes": nodes, "pageInfo": {
+        "hasNextPage": cursor is not None, "endCursor": cursor,
+    }}
+
+
+def graphql_comment(ident: int = 30, reply: int | None = None) -> dict:
+    return {
+        "fullDatabaseId": str(ident),
+        "author": {"__typename": "User", "login": "reviewer"},
+        "body": "finding", "createdAt": "2026-01-01T00:00:30Z",
+        "path": "example.py", "line": 4, "originalLine": 4,
+        "startLine": None, "originalStartLine": None,
+        "replyTo": None if reply is None else {"fullDatabaseId": str(reply)},
+        "pullRequestReview": {"fullDatabaseId": "20"},
+    }
+
+
+def graphql_thread(*comments: dict) -> dict:
+    return {
+        "id": "T-30", "isResolved": False, "diffSide": "RIGHT",
+        "comments": page(list(comments) or [graphql_comment()]),
+    }
+
+
+def graphql_pull(**lists: list) -> dict:
+    """A SquadSnapshot response for one open PR at H (#149)."""
+    return {"repository": {"pullRequest": {
+        "id": "PR-1", "fullDatabaseId": "10",
+        "author": {"__typename": "User", "login": "dev"}, "body": "",
+        "createdAt": "2026-01-01T00:00:10Z", "number": 1, "title": "Task",
+        "headRefOid": H, "headRefName": "feat/topic", "baseRefOid": A,
+        "baseRefName": "main", "state": "OPEN", "merged": False,
+        "mergeCommit": None, "potentialMergeCommit": None,
+        "mergeStateStatus": "CLEAN",
+        **{key: page(lists.get(key, []))
+           for key in ("reviews", "reviewThreads", "comments")},
+    }}}
 
 
 class ForgeValidationTests(unittest.TestCase):
@@ -445,16 +488,174 @@ class ForgeBoundaryTests(unittest.TestCase):
 
     def test_snapshot_skips_unreadable_resolution(self) -> None:
         self.forge.can_read_thread_resolution = False
-        with (
-            patch.object(self.forge, 'pr', return_value=snapshot().pr),
-            patch.object(self.forge, 'reviews', return_value=()),
-            patch.object(self.forge, 'listing', return_value=[]),
-            patch.object(self.forge, 'thread_states') as threads,
-        ):
+        with patch.object(self.forge, 'graphql', return_value=graphql_pull(
+            reviewThreads=[graphql_thread()]
+        )):
             result = self.forge.snapshot(1)
         self.assertFalse(result.can_read_thread_resolution)
         self.assertEqual(result.threads, ())
-        threads.assert_not_called()
+        # The thread's comment remains evidence.
+        self.assertEqual([c.evidence.id for c in result.comments], [30])
+
+
+class GraphQLReadTests(unittest.TestCase):
+    """The GitHub snapshot read and its REST-shaped records (#149)."""
+
+    def setUp(self) -> None:
+        path = Path('/repo')
+        with patch('agent_squad.github.shutil.which',
+                   return_value='/fake/gh'):
+            self.forge = GitHub(
+                Repository(path, path, path / '.git', config()), 'reviewer'
+            )
+        self.forge._token = 'secret-token'
+
+    def failing(self, response: object, stderr: str = 'gh: failed'):
+        """``gh`` exits 1 and prints ``response`` on standard output."""
+        output = response if isinstance(response, str) else (
+            json.dumps(response)
+        )
+        return patch.object(self.forge, '_run', side_effect=CommandFailed(
+            stderr, None, output
+        ))
+
+    def test_errors_under_the_optional_field_null_it(self) -> None:
+        data = {'repository': {'pullRequest': {'id': 'PR-1'}, 'head': {}}}
+        error = {'message': 'Resource not accessible by integration',
+                 'path': ['repository', 'head', 'checkSuites']}
+        with self.failing({'data': data, 'errors': [error]}):
+            result = self.forge.graphql('query Q', {}, optional='head')
+        self.assertEqual(result['repository'], {
+            'pullRequest': {'id': 'PR-1'}, 'head': None,
+        })
+
+    def test_other_errors_fail_the_read(self) -> None:
+        missing = {
+            'data': {'repository': {'pullRequest': None}},
+            'errors': [{'type': 'NOT_FOUND', 'message': 'Could not resolve'
+                        ' to a PullRequest with the number of 9.',
+                        'path': ['repository', 'pullRequest']}],
+        }
+        for response, optional, message in (
+            (missing, 'head', 'gh: Could not resolve'),
+            (missing, None, 'gh: Could not resolve'),
+            ({'data': None, 'errors': [{'message': 'syntax'}]}, 'head',
+             'gh: syntax'),
+            ('not JSON', 'head', 'gh: HTTP 502'),
+            ('', None, 'gh: HTTP 502'),
+        ):
+            with self.subTest(response=response, optional=optional), \
+                    self.failing(response, message):
+                with self.assertRaisesRegex(ForgeError, message):
+                    self.forge.graphql('query Q', {}, optional=optional)
+
+    def test_errors_after_success_are_redacted(self) -> None:
+        response = json.dumps({'data': {}, 'errors': [
+            {'message': 'bad secret-token'}, {'message': 'second'},
+        ]})
+        with patch.object(self.forge, '_run', return_value=response):
+            with self.assertRaises(ForgeError) as raised:
+                self.forge.graphql('query Q', {})
+        self.assertEqual(str(raised.exception), 'bad [redacted]; second')
+
+    def test_a_list_is_read_to_its_last_page(self) -> None:
+        pages = [
+            {'node': {'reviews': page([{'id': 'R-2', 'comments': page(
+                [{'n': 3}], 'c1')}], None)}},
+            {'node': {'comments': page([{'n': 4}], None)}},
+        ]
+        first = page([{'id': 'R-1', 'comments': page([{'n': 1}])}], 'p1')
+        with patch.object(self.forge, 'graphql', side_effect=pages) as read:
+            nodes = self.forge.complete(first, REVIEWS, 'PR-1')
+        self.assertEqual(
+            [(n['id'], n['comments']) for n in nodes],
+            [('R-1', [{'n': 1}]), ('R-2', [{'n': 3}, {'n': 4}])],
+        )
+        self.assertEqual(
+            [call.args[1] for call in read.call_args_list],
+            [{'id': 'PR-1', 'cursor': 'p1'}, {'id': 'R-2', 'cursor': 'c1'}],
+        )
+        self.assertIn(
+            '... on PullRequestReview { comments(first:100, after:$cursor',
+            read.call_args_list[1].args[0],
+        )
+
+    def test_a_repeated_cursor_fails_the_read(self) -> None:
+        again = {'node': {'reviews': page([], 'p1')}}
+        with patch.object(self.forge, 'graphql', return_value=again):
+            with self.assertRaisesRegex(ForgeError, 'repeated a cursor'):
+                self.forge.complete(page([], 'p1'), REVIEWS, 'PR-1')
+
+    def test_actors_and_ids_read_as_rest_names_them(self) -> None:
+        self.assertEqual(actor({'__typename': 'Bot', 'login': 'ci'}, 'a'),
+                         {'login': 'ci[bot]'})
+        self.assertEqual(actor({'__typename': 'User', 'login': 'dev'}, 'a'),
+                         {'login': 'dev'})
+        self.assertEqual(actor(None, 'a'), {'login': 'ghost'})
+        self.assertEqual(database_id('6753922008', 'id'), 6753922008)
+        for invalid in ('0', '01', '-1', '1.5', '', 7, None):
+            with self.subTest(value=invalid):
+                with self.assertRaises(ForgeError):
+                    database_id(invalid, 'id')
+
+    def test_pull_request_states_and_merge_commits(self) -> None:
+        node = graphql_pull()['repository']['pullRequest']
+        for fields, expected in (
+            ({}, ('open', False, None, 'clean')),
+            ({'state': 'CLOSED', 'potentialMergeCommit': {'oid': A},
+              'mergeStateStatus': 'CLEAN'}, ('closed', False, A, 'clean')),
+            ({'state': 'MERGED', 'merged': True, 'mergeCommit': {'oid': H},
+              'potentialMergeCommit': {'oid': A},
+              'mergeStateStatus': 'UNKNOWN'}, ('closed', True, H, 'unknown')),
+        ):
+            with self.subTest(fields=fields):
+                pr = parse_pullrequest(rest_pullrequest(node | fields))
+                self.assertEqual(
+                    (pr.state, pr.merged, pr.merge_commit,
+                     pr.mergeable_state), expected,
+                )
+        with self.assertRaises(ForgeError):
+            parse_pullrequest(rest_pullrequest(node | {'state': 'DRAFT'}))
+
+    def test_snapshot_comments_follow_the_rest_listings(self) -> None:
+        root, reply, extra, later = (
+            graphql_comment(), graphql_comment(31, reply=30),
+            graphql_comment(32, reply=30), graphql_comment(40),
+        )
+        review = {
+            'id': 'PRR-20', 'fullDatabaseId': '20', 'author': None,
+            'body': '', 'state': 'PENDING', 'submittedAt': None,
+            'commit': {'oid': H},
+            'comments': page([root, extra, reply, later]),
+        }
+        response = graphql_pull(reviews=[review], reviewThreads=[
+            graphql_thread(later) | {'id': 'T-40', 'diffSide': 'LEFT'},
+            graphql_thread(root, reply),
+        ])
+        with patch.object(self.forge, 'graphql', return_value=response):
+            result = self.forge.snapshot(1)
+        self.assertEqual(result.threads, (
+            ThreadState(40, 'T-40', False), ThreadState(30, 'T-30', False),
+        ))
+        # Thread comments by ID, as the flat listing orders them, then those
+        # read only under a review, which carry no anchor; a reply has its
+        # thread's side.
+        self.assertEqual(
+            [(c.evidence.id, c.line, c.side) for c in result.comments],
+            [(30, 4, 'RIGHT'), (31, 4, 'RIGHT'), (40, 4, 'LEFT'),
+             (32, None, None)],
+        )
+        pending = result.reviews[0]
+        self.assertEqual(pending.evidence.author, 'ghost')
+        self.assertEqual(pending.evidence.created_at, '1970-01-01T00:00:00Z')
+        self.assertIsNone(result.head_checks)
+
+    def test_a_thread_without_comments_fails_the_read(self) -> None:
+        thread = graphql_thread() | {'comments': page([])}
+        with patch.object(self.forge, 'graphql',
+                          return_value=graphql_pull(reviewThreads=[thread])):
+            with self.assertRaisesRegex(ForgeError, 'no root comment'):
+                self.forge.snapshot(1)
 
 
 class GitHubBranchDeletionTests(unittest.TestCase):

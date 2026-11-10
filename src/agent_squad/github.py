@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import json
 import os
 import re
@@ -238,16 +239,246 @@ def parse_commit_status(value: object) -> Check:
     )
 
 
-THREAD_QUERY = """query SquadThreads(
-  $owner:String!, $repo:String!, $pr:Int!, $cursor:String
-) {
-  repository(owner:$owner, name:$repo) { pullRequest(number:$pr) {
-    reviewThreads(first:100, after:$cursor) {
-      nodes { id isResolved comments(first:1) { nodes { databaseId } } }
-      pageInfo { hasNextPage endCursor }
+def ordered(checks: list[Check]) -> tuple[Check, ...]:
+    return tuple(sorted(
+        checks, key=lambda check: (check.name, check.event or "")
+    ))
+
+
+# One GraphQL read of the PR record and every list behind `status` (#149).
+# Each node is rewritten into the record the REST read returns, so the REST
+# parsers above validate both reads.
+PAGE_SIZE = 100
+
+
+@dataclass(frozen=True)
+class Connection:
+    """One paginated GraphQL list, read to its last page.
+
+    ``owner`` is the GraphQL type holding the list; a further page is read
+    through ``node(id:)`` with the owner's ID, which every node that holds a
+    nested list selects.
+    """
+
+    field: str
+    owner: str
+    nodes: str
+    nested: tuple[Connection, ...] = ()
+    arguments: str = ""
+
+
+def selection(connection: Connection, *, after: bool = False) -> str:
+    arguments = ", ".join(filter(None, (
+        f"first:{PAGE_SIZE}", "after:$cursor" if after else "",
+        connection.arguments,
+    )))
+    nodes = " ".join((connection.nodes, *map(selection, connection.nested)))
+    return (
+        f"{connection.field}({arguments}) {{ nodes {{ {nodes} }}"
+        " pageInfo { hasNextPage endCursor } }"
+    )
+
+
+def page_query(connection: Connection) -> str:
+    return (
+        "query SquadPage($id:ID!, $cursor:String) { node(id:$id) {"
+        f" ... on {connection.owner} {{ {selection(connection, after=True)} }}"
+        " } }"
+    )
+
+
+ACTOR = "author { __typename login }"
+REVIEW_COMMENT = Connection(
+    "comments", "", f"fullDatabaseId {ACTOR} body createdAt path line"
+    " originalLine startLine originalStartLine replyTo { fullDatabaseId }"
+    " pullRequestReview { fullDatabaseId }",
+)
+REVIEWS = Connection(
+    "reviews", "PullRequest",
+    f"id fullDatabaseId {ACTOR} body state submittedAt commit {{ oid }}",
+    (replace(REVIEW_COMMENT, owner="PullRequestReview"),),
+)
+THREADS = Connection(
+    "reviewThreads", "PullRequest", "id isResolved diffSide",
+    (replace(REVIEW_COMMENT, owner="PullRequestReviewThread"),),
+)
+CONVERSATION = Connection(
+    "comments", "PullRequest", f"fullDatabaseId {ACTOR} body createdAt"
+)
+CHECK_SUITES = Connection(
+    "checkSuites", "Commit", "id app { slug } workflowRun { event }",
+    (Connection(
+        "checkRuns", "CheckSuite", "databaseId name status conclusion"
+        " permalink startedAt completedAt",
+        arguments="filterBy:{checkType:LATEST}",
+    ),),
+)
+COMMIT = (
+    f"id oid {selection(CHECK_SUITES)} status {{ contexts {{ context state"
+    " targetUrl creator { __typename login } } }"
+)
+SNAPSHOT_QUERY = f"""query SquadSnapshot(
+  $owner:String!, $repo:String!, $pr:Int!, $head:String!, $checks:Boolean!
+) {{
+  repository(owner:$owner, name:$repo) {{
+    pullRequest(number:$pr) {{
+      id fullDatabaseId {ACTOR} body createdAt number title
+      headRefOid headRefName baseRefOid baseRefName state merged
+      mergeCommit {{ oid }} potentialMergeCommit {{ oid }} mergeStateStatus
+      {selection(REVIEWS)}
+      {selection(THREADS)}
+      {selection(CONVERSATION)}
+    }}
+    head: object(expression:$head) @include(if:$checks) {{
+      ... on Commit {{ {COMMIT} }}
+    }}
+  }}
+}}"""
+CHECKS_QUERY = f"""query SquadChecks(
+  $owner:String!, $repo:String!, $sha:GitObjectID!
+) {{
+  repository(owner:$owner, name:$repo) {{
+    object(oid:$sha) {{ ... on Commit {{ {COMMIT} }} }}
+  }}
+}}"""
+PR_STATES = {"OPEN": "open", "CLOSED": "closed", "MERGED": "closed"}
+
+
+def actor(value: object, label: str) -> dict[str, object]:
+    """REST's user record for a GraphQL actor.
+
+    REST names a GitHub App's account ``<slug>[bot]`` and an account deleted
+    since as ``ghost``; GraphQL gives the bare slug and null.
+    """
+    if value is None:
+        return {"login": "ghost"}
+    data = object_value(value, label)
+    login = V.require_string(data.get("login"), f"{label}.login")
+    if data.get("__typename") == "Bot":
+        login += "[bot]"
+    return {"login": login}
+
+
+def database_id(value: object, label: str) -> int:
+    """Read a ``fullDatabaseId``, which GraphQL encodes as a decimal string."""
+    text = V.require_string(value, label)
+    if re.fullmatch(r"[1-9][0-9]*", text) is None:
+        raise ForgeError(f"{label} must be a positive decimal ID")
+    return int(text)
+
+
+def lower(value: object) -> object:
+    """Lower-case a GraphQL enum; other values reach the REST validators."""
+    return value.lower() if isinstance(value, str) else value
+
+
+def oid_of(value: object, label: str) -> object:
+    return None if value is None else object_value(value, label).get("oid")
+
+
+def rest_evidence(node: dict, label: str) -> dict[str, object]:
+    return {
+        "id": database_id(node.get("fullDatabaseId"), f"{label}.id"),
+        "user": actor(node.get("author"), f"{label}.author"),
+        "created_at": node.get("createdAt"),
+        "body": node.get("body"),
     }
-  } }
-}"""
+
+
+def rest_pullrequest(node: dict) -> dict[str, object]:
+    return {
+        **rest_evidence(node, "pullRequest"),
+        "number": node.get("number"),
+        "title": node.get("title"),
+        **{side: {"sha": node.get(f"{side}RefOid"),
+                  "ref": node.get(f"{side}RefName")}
+           for side in ("head", "base")},
+        "state": PR_STATES.get(node.get("state")),
+        "merged": node.get("merged"),
+        # REST reports the merge commit, or else the latest test merge.
+        "merge_commit_sha": oid_of(
+            node.get("mergeCommit") or node.get("potentialMergeCommit"),
+            "pullRequest.mergeCommit",
+        ),
+        "mergeable_state": lower(node.get("mergeStateStatus")),
+    }
+
+
+def rest_review(node: dict) -> dict[str, object]:
+    record = rest_evidence(node, "review")
+    # A REST review has no created_at, which orders a PENDING one.
+    del record["created_at"]
+    return {
+        **record,
+        "state": node.get("state"),
+        "submitted_at": node.get("submittedAt"),
+        "commit_id": oid_of(node.get("commit"), "review.commit"),
+    }
+
+
+def rest_comment(node: dict, thread: dict | None) -> dict[str, object]:
+    """REST's record of a review comment read in ``thread``.
+
+    A comment read only under its review gets no anchor, as REST's
+    per-review listing reports none.
+    """
+    review = object_value(node.get("pullRequestReview"), "comment.review")
+    reply = node.get("replyTo")
+    record = {
+        **rest_evidence(node, "comment"),
+        "pull_request_review_id": database_id(
+            review.get("fullDatabaseId"), "comment.review.id"
+        ),
+        "in_reply_to_id": None if reply is None else database_id(
+            object_value(reply, "comment.replyTo").get("fullDatabaseId"),
+            "comment.replyTo.id",
+        ),
+        "path": node.get("path"),
+    }
+    if thread is not None:
+        record.update(
+            line=node.get("line"),
+            original_line=node.get("originalLine"),
+            start_line=node.get("startLine"),
+            original_start_line=node.get("originalStartLine"),
+            side=thread.get("diffSide"),
+        )
+    return record
+
+
+def rest_check_run(node: dict, suite: int, app: object) -> dict[str, object]:
+    return {
+        "name": node.get("name"),
+        "status": lower(node.get("status")),
+        "conclusion": lower(node.get("conclusion")),
+        "check_suite": {"id": suite},
+        "app": app,
+        "html_url": node.get("permalink"),
+        "started_at": node.get("startedAt"),
+        "completed_at": node.get("completedAt"),
+    }
+
+
+def rest_status(node: dict) -> dict[str, object]:
+    creator = node.get("creator")
+    return {
+        "context": node.get("context"),
+        "state": lower(node.get("state")),
+        "creator": None if creator is None else actor(
+            creator, "status.creator"
+        ),
+        "target_url": node.get("targetUrl"),
+    }
+
+
+class CommandFailed(ForgeError):
+    """A failed ``gh`` command and what it printed on standard output."""
+
+    def __init__(self, message: str, status: int | None, output: str) -> None:
+        super().__init__(message, status)
+        self.output = output
+
+
 RESOLVE_MUTATION = """mutation SquadResolve($id:ID!) {
   resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
 }"""
@@ -330,9 +561,10 @@ class GitHub:
             if self._token:
                 detail = detail.replace(self._token, "[redacted]")
             status = re.search(r"HTTP (\d{3})", detail)
-            raise ForgeError(
+            raise CommandFailed(
                 " ".join(detail.splitlines()),
                 int(status[1]) if status else None,
+                result.stdout,
             )
         return result.stdout
 
@@ -377,6 +609,24 @@ class GitHub:
         mutating = method != "GET" if mutation is None else mutation
         if mutating:
             self.verify_identity()
+        output = self._run(
+            self.arguments(endpoint, method, body is not None),
+            authenticated=True, body=body,
+        )
+        try:
+            value = decode_json(output) if output.strip() else None
+        except ValueError:
+            raise ForgeError("gh returned invalid JSON") from None
+        if (
+            endpoint == "graphql"
+            and isinstance(value, dict)
+            and value.get("errors")
+        ):
+            raise ForgeError(self.graphql_errors(value["errors"]))
+        return value
+
+    @staticmethod
+    def arguments(endpoint: str, method: str, body: bool) -> list[str]:
         args = [
             "api",
             endpoint,
@@ -389,29 +639,101 @@ class GitHub:
             "-H",
             "X-GitHub-Api-Version: 2022-11-28",
         ]
-        if body is not None:
+        if body:
             args.extend(["--input", "-"])
-        output = self._run(args, authenticated=True, body=body)
+        return args
+
+    def graphql_errors(self, errors: object) -> str:
+        messages = [
+            text_value(
+                object_value(e, "GraphQL error").get("message"), "message"
+            )
+            for e in array(errors, "GraphQL errors")
+        ]
+        detail = "; ".join(messages)
+        if self._token:
+            detail = detail.replace(self._token, "[redacted]")
+        return detail
+
+    def graphql(
+        self, query: str, variables: dict[str, object],
+        *, optional: str | None = None,
+    ) -> dict[str, object]:
+        """Send one read query and return its ``data`` (#149).
+
+        ``gh`` exits 1 on a response that carries errors but still prints
+        it. Errors that all lie under ``repository.<optional>`` null that
+        field; any other error fails the read.
+        """
+        body = {"query": query, "variables": variables}
+        failure = None
         try:
-            value = decode_json(output) if output.strip() else None
+            output = self._run(
+                self.arguments("graphql", "POST", True),
+                authenticated=True, body=body,
+            )
+        except CommandFailed as error:
+            output, failure = error.output, error
+        try:
+            value = decode_json(output)
         except ValueError:
+            if failure is not None:
+                raise failure from None
             raise ForgeError("gh returned invalid JSON") from None
-        if (
-            endpoint == "graphql"
-            and isinstance(value, dict)
-            and value.get("errors")
+        errors = value.get("errors") if isinstance(value, dict) else None
+        if not errors:
+            if failure is not None:
+                raise failure
+            return object_value(
+                object_value(value, "GraphQL response").get("data"),
+                "GraphQL data",
+            )
+        detail = self.graphql_errors(errors)
+        paths = [object_value(e, "GraphQL error").get("path") for e in errors]
+        if optional is None or not all(
+            isinstance(path, list) and path[:2] == ["repository", optional]
+            for path in paths
         ):
-            messages = [
-                text_value(
-                    object_value(e, "GraphQL error").get("message"), "message"
+            raise failure or ForgeError(detail)
+        data = object_value(value.get("data"), "GraphQL data")
+        object_value(data.get("repository"), "repository")[optional] = None
+        return data
+
+    def complete(
+        self, value: object, connection: Connection, owner: object,
+    ) -> list[dict]:
+        """Return every node of one list, completing nested lists in place.
+
+        A further page is one ``node(id:)`` query for the owner's list.
+        """
+        nodes: list[dict] = []
+        seen = set()
+        while True:
+            page = object_value(value, connection.field)
+            nodes.extend(
+                object_value(node, connection.field)
+                for node in array(page.get("nodes"), connection.field)
+            )
+            info = object_value(page.get("pageInfo"), "pageInfo")
+            if not boolean(info.get("hasNextPage"), "hasNextPage"):
+                break
+            cursor = V.require_string(info.get("endCursor"), "endCursor")
+            if cursor in seen:
+                raise ForgeError("GraphQL pagination repeated a cursor")
+            seen.add(cursor)
+            data = self.graphql(page_query(connection), {
+                "id": V.require_string(owner, f"{connection.owner}.id"),
+                "cursor": cursor,
+            })
+            value = object_value(
+                data.get("node"), connection.owner
+            ).get(connection.field)
+        for node in nodes:
+            for inner in connection.nested:
+                node[inner.field] = self.complete(
+                    node.get(inner.field), inner, node.get("id")
                 )
-                for e in array(value["errors"], "GraphQL errors")
-            ]
-            detail = "; ".join(messages)
-            if self._token:
-                detail = detail.replace(self._token, "[redacted]")
-            raise ForgeError(detail)
-        return value
+        return nodes
 
     def listing(self, endpoint: str, key: str | None = None) -> list:
         """Read every page; ``key`` names the array of a wrapped page."""
@@ -496,39 +818,61 @@ class GitHub:
             for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
         )
 
-    def snapshot(self, number: int) -> Snapshot:
-        pr = self.pr(number)
-        reviews = self.reviews(number)
-        flat = {
-            c.evidence.id: c
-            for c in (
-                parse_comment(c)
-                for c in self.listing(f"{self.prefix}/pulls/{number}/comments")
+    def snapshot(self, number: int, *, with_checks: bool = False) -> Snapshot:
+        """Read the PR and every list behind ``status`` in one query (#149).
+
+        With ``with_checks`` the query also reads the checks at the PR's
+        head ref; ``head_checks`` stays null when that commit is not the
+        head or its checks could not be read, and ``checks`` reads them.
+        """
+        config = self.repository.configuration
+        data = self.graphql(SNAPSHOT_QUERY, {
+            "owner": config.forge.owner, "repo": config.forge.repo,
+            "pr": number, "head": f"refs/pull/{number}/head",
+            "checks": with_checks,
+        }, optional="head")
+        repository = object_value(data.get("repository"), "repository")
+        node = object_value(repository.get("pullRequest"), "pullRequest")
+        lists = {
+            connection.field: self.complete(
+                node.get(connection.field), connection, node.get("id")
             )
+            for connection in (REVIEWS, THREADS, CONVERSATION)
         }
-        comments = dict(flat)
-        for review in reviews:
-            for value in self.listing(
-                f"{self.prefix}/pulls/{number}/reviews/"
-                f"{review.evidence.id}/comments"
-            ):
-                comment = parse_comment(value)
-                # The flat endpoint has anchors; the per-review endpoint has
-                # all replies.
-                comments[comment.evidence.id] = flat.get(
-                    comment.evidence.id, comment
-                )
-        conversation = tuple(
-            parse_evidence(c)
-            for c in self.listing(f"{self.prefix}/issues/{number}/comments")
-        )
+        pr = parse_pullrequest(rest_pullrequest(node))
+        reviews = tuple(parse_review(rest_review(r)) for r in lists["reviews"])
+        # Thread comments stand for REST's flat listing, which has anchors
+        # and lists by ID; review comments for its per-review listing, which
+        # has every reply.
+        comments = {}
+        threads = []
+        for thread in lists["reviewThreads"]:
+            members = [
+                parse_comment(rest_comment(value, thread))
+                for value in thread["comments"]
+            ]
+            if not members:
+                raise ForgeError("thread has no root comment")
+            threads.append(ThreadState(
+                members[0].evidence.id,
+                V.require_string(thread.get("id"), "thread.id"),
+                boolean(thread.get("isResolved"), "thread.isResolved"),
+            ))
+            comments.update((c.evidence.id, c) for c in members)
+        comments = dict(sorted(comments.items()))
+        for review in lists["reviews"]:
+            for value in review["comments"]:
+                comment = parse_comment(rest_comment(value, None))
+                comments.setdefault(comment.evidence.id, comment)
         return Snapshot(
             pr,
             reviews,
             tuple(comments.values()),
-            conversation,
-            (self.thread_states(number)
-             if self.can_read_thread_resolution else ()),
+            tuple(
+                parse_evidence(rest_evidence(c, "comment"))
+                for c in lists["comments"]
+            ),
+            tuple(threads) if self.can_read_thread_resolution else (),
             self.can_resolve_threads,
             self.can_read_thread_resolution,
             self.can_read_branch_rules,
@@ -536,64 +880,19 @@ class GitHub:
             tuple(r.evidence.id for r in reviews
                   if r.state == ReviewState.PENDING
                   and r.evidence.author.casefold() == self.account.casefold()),
+            head_checks=self.head_checks(repository.get("head"), pr.head),
         )
 
-    def thread_states(self, number: int) -> tuple[ThreadState, ...]:
-        config = self.repository.configuration
-        cursor = None
-        seen = set()
-        result = []
-        while True:
-            data = self.api(
-                "graphql",
-                method="POST",
-                mutation=False,
-                body={
-                    "query": THREAD_QUERY,
-                    "variables": {
-                        "owner": config.forge.owner,
-                        "repo": config.forge.repo,
-                        "pr": number,
-                        "cursor": cursor,
-                    },
-                },
-            )
-            try:
-                connection = object_value(
-                    data["data"]["repository"]["pullRequest"]["reviewThreads"],
-                    "threads",
-                )
-            except (KeyError, TypeError):
-                raise ForgeError(
-                    "missing GraphQL reviewThreads response"
-                ) from None
-            for value in array(connection.get("nodes"), "thread nodes"):
-                node = object_value(value, "thread")
-                roots = array(
-                    object_value(node.get("comments"), "thread comments").get(
-                        "nodes"
-                    ),
-                    "root nodes",
-                )
-                if not roots:
-                    raise ForgeError("thread has no root comment")
-                result.append(
-                    ThreadState(
-                        positive(
-                            object_value(roots[0], "root").get("databaseId"),
-                            "root id",
-                        ),
-                        V.require_string(node.get("id"), "thread.id"),
-                        boolean(node.get("isResolved"), "thread.isResolved"),
-                    )
-                )
-            page = object_value(connection.get("pageInfo"), "pageInfo")
-            if not boolean(page.get("hasNextPage"), "hasNextPage"):
-                return tuple(result)
-            cursor = V.require_string(page.get("endCursor"), "endCursor")
-            if cursor in seen:
-                raise ForgeError("GraphQL pagination repeated a cursor")
-            seen.add(cursor)
+    def head_checks(
+        self, commit: object, head: str,
+    ) -> tuple[Check, ...] | None:
+        """Checks read with the snapshot, or null when ``checks`` must."""
+        if commit is None or object_value(commit, "head").get("oid") != head:
+            return None
+        try:
+            return self.commit_checks(commit)
+        except ForgeError:
+            return None
 
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str,
@@ -635,6 +934,67 @@ class GitHub:
         return result
 
     def checks(self, sha: str) -> tuple[Check, ...]:
+        """Read check runs and commit statuses at one commit in one query.
+
+        Any failure of the query leaves the result to the REST reads, which
+        decide between checks, a refusal, and an error as before (#149).
+        """
+        config = self.repository.configuration
+        try:
+            data = self.graphql(CHECKS_QUERY, {
+                "owner": config.forge.owner, "repo": config.forge.repo,
+                "sha": sha,
+            })
+            return self.commit_checks(object_value(
+                object_value(data.get("repository"), "repository").get(
+                    "object"
+                ),
+                "commit",
+            ))
+        except ForgeError:
+            return self.rest_checks(sha)
+
+    def commit_checks(self, commit: dict) -> tuple[Check, ...]:
+        """Check records of one GraphQL commit, as ``rest_checks`` reads them.
+
+        ``LATEST`` keeps each check run's latest attempt and ``contexts`` the
+        latest status per context. REST lists check runs newest first; that
+        order is kept for runs with the same name and event.
+        """
+        suites = self.complete(
+            commit.get("checkSuites"), CHECK_SUITES, commit.get("id")
+        )
+        events: dict[int, str] = {}
+        runs = []
+        # Each suite's position stands for its ID, which binds a check run
+        # to the event of the suite's workflow run.
+        for key, suite in enumerate(suites, 1):
+            workflow = suite.get("workflowRun")
+            if workflow is not None:
+                events[key] = V.require_string(
+                    object_value(workflow, "workflowRun").get("event"),
+                    "workflowRun.event",
+                )
+            runs.extend(
+                (positive(run.get("databaseId"), "checkRun.databaseId"),
+                 rest_check_run(run, key, suite.get("app")))
+                for run in suite["checkRuns"]
+            )
+        status = commit.get("status")
+        contexts = [] if status is None else array(
+            object_value(status, "status").get("contexts"), "status contexts"
+        )
+        # The list has no pages; one that may be cut off is read by REST.
+        if len(contexts) >= PAGE_SIZE:
+            raise ForgeError("status contexts may be incomplete")
+        return ordered(
+            [parse_check_run(run, events)
+             for _, run in sorted(runs, key=lambda r: r[0], reverse=True)]
+            + [parse_commit_status(rest_status(object_value(s, "context")))
+               for s in contexts]
+        )
+
+    def rest_checks(self, sha: str) -> tuple[Check, ...]:
         """Read check runs and commit statuses at one commit (#145).
 
         The default check-run filter keeps each run's latest attempt, and the
@@ -660,11 +1020,10 @@ class GitHub:
             events[positive(data.get("check_suite_id"), "check_suite_id")] = (
                 V.require_string(data.get("event"), "workflow_run.event")
             )
-        return tuple(sorted(
+        return ordered(
             [parse_check_run(run, events) for run in runs]
-            + [parse_commit_status(status) for status in statuses],
-            key=lambda check: (check.name, check.event or ""),
-        ))
+            + [parse_commit_status(status) for status in statuses]
+        )
 
     def merge(self, number: int, head: str, method: str) -> MergeResult:
         data = object_value(self.api(
