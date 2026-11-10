@@ -15,7 +15,7 @@ from tests._support import PROJECT_ROOT, add_src_to_path
 
 add_src_to_path()
 
-from agent_squad import events  # noqa: E402
+from agent_squad import __version__, events  # noqa: E402
 from agent_squad.cli import main, parser  # noqa: E402
 from agent_squad.initialization import ForgeConfiguration  # noqa: E402
 
@@ -151,8 +151,9 @@ class StoreTests(unittest.TestCase):
         event = written[0]
         self.assertEqual(
             {k: event[k] for k in events.FIELDS
-             if k not in ("id", "time", "duration_ms", "tool_version")},
-            {"schema_version": 1, "project": None, "forge": None,
+             if k not in ("id", "time", "duration_ms")},
+            {"schema_version": 1, "tool_version": __version__,
+             "project": None, "forge": None,
              "group": "pr", "command": "head", "role": None, "pr": 7,
              "issue": None, "exit_code": 0},
         )

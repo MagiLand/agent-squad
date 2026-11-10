@@ -45,6 +45,8 @@ to these events later by `project` and PR or issue number.
 - A run that ends in an uncaught exception is recorded with exit code `1`,
   and one interrupted with Ctrl-C with `130`.
 - `--help` and `--version` are not recorded.
+- A run killed by another signal, such as a shell timeout's `SIGTERM`, ends
+  without running the recorder and leaves no event.
 - Setting `AGENT_SQUAD_EVENTS=off` records nothing and creates no directory.
   Any other value, including an empty one, leaves recording on.
 
