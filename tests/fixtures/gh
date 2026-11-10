@@ -121,6 +121,266 @@ def paged(values, query):
     return values[(page - 1) * size:page * size]
 
 
+def graphql_errors(data, errors):
+    # gh exits 1 on a response with errors but still prints it.
+    save()
+    print(json.dumps({"data": data, "errors": errors}))
+    print("gh: " + "\n".join(e["message"] for e in errors), file=sys.stderr)
+    raise SystemExit(1)
+
+
+# GraphQL view of the REST-shaped model (#149). Each list is paged with a
+# size from settings["page_sizes"]["<Owner>.<list>"] and an offset cursor.
+def gql_page(values, key, cursor=None):
+    default = settings.get("thread_page_size", 100) if (
+        key == "PullRequest.reviewThreads") else 100
+    size = settings.get("page_sizes", {}).get(key, default)
+    offset = int(cursor or 0)
+    has_next = offset + size < len(values)
+    return {
+        "nodes": values[offset:offset + size],
+        "pageInfo": {
+            "hasNextPage": has_next,
+            "endCursor": str(offset + size) if has_next else None,
+        },
+    }
+
+
+def gql_actor(user):
+    # GraphQL names an app account without [bot]; a deleted one is null.
+    if user is None:
+        return None
+    if user["login"].endswith("[bot]"):
+        return {"__typename": "Bot", "login": user["login"][:-5]}
+    return {"__typename": "User", "login": user["login"]}
+
+
+def gql_evidence(value):
+    return {
+        "fullDatabaseId": str(value["id"]),
+        "author": gql_actor(value.get("user")),
+        "body": value.get("body") or "",
+        "createdAt": value.get("created_at"),
+    }
+
+
+def gql_comment(comment):
+    reply = comment.get("in_reply_to_id")
+    return {
+        **gql_evidence(comment),
+        "path": comment.get("path"),
+        "line": comment.get("line"),
+        "originalLine": comment.get("original_line"),
+        "startLine": comment.get("start_line"),
+        "originalStartLine": comment.get("original_start_line"),
+        "replyTo": None if reply is None else {"fullDatabaseId": str(reply)},
+        "pullRequestReview": {
+            "fullDatabaseId": str(comment["pull_request_review_id"])
+        },
+    }
+
+
+def review_lists(pr, review):
+    return {"comments": [
+        gql_comment(c) for c in pr.get("comments", [])
+        if c["pull_request_review_id"] == review["id"]
+    ]}
+
+
+def thread_lists(pr, thread):
+    root = thread["comments"]["nodes"][0]["databaseId"]
+    comments = pr.get("comments", [])
+    # omit_flat_replies also leaves replies out of a thread's comments.
+    members = [c for c in comments if c["id"] == root] + [
+        c for c in comments if c.get("in_reply_to_id") == root
+        and not settings.get("omit_flat_replies")
+    ]
+    return {"comments": [gql_comment(c) for c in members]}
+
+
+def gql_review(pr, review):
+    return {
+        **{k: v for k, v in gql_evidence(review).items() if k != "createdAt"},
+        "id": f"PRR-{review['id']}",
+        "state": review["state"],
+        "submittedAt": review.get("submitted_at"),
+        "commit": {"oid": review["commit_id"]},
+        "comments": gql_page(
+            review_lists(pr, review)["comments"], "PullRequestReview.comments"
+        ),
+    }
+
+
+def gql_thread(pr, thread):
+    root = thread["comments"]["nodes"][0]["databaseId"]
+    side = next(
+        (c.get("side") for c in pr.get("comments", []) if c["id"] == root),
+        None,
+    )
+    return {
+        "id": thread["id"],
+        "isResolved": thread["isResolved"],
+        "diffSide": side,
+        "comments": gql_page(
+            thread_lists(pr, thread)["comments"],
+            "PullRequestReviewThread.comments",
+        ),
+    }
+
+
+def pr_lists(pr):
+    return {
+        "reviews": [gql_review(pr, r) for r in pr.get("reviews", [])],
+        # A thread is served only while its root comment exists.
+        "reviewThreads": [
+            gql_thread(pr, t) for t in pr.get("threads", [])
+            if any(c["id"] == t["comments"]["nodes"][0]["databaseId"]
+                   for c in pr.get("comments", []))
+        ],
+        "comments": [gql_evidence(c) for c in pr.get("conversation", [])],
+    }
+
+
+def gql_pull(number, pr):
+    merge = pr.get("merge_commit_sha")
+    lists = pr_lists(pr)
+    return {
+        **gql_evidence(pr),
+        "id": f"PR-{number}",
+        "number": pr["number"],
+        "title": pr["title"],
+        "headRefOid": pr["head"]["sha"],
+        "headRefName": pr["head"]["ref"],
+        "baseRefOid": pr["base"]["sha"],
+        "baseRefName": pr["base"]["ref"],
+        "state": "MERGED" if pr["merged"] else pr["state"].upper(),
+        "merged": pr["merged"],
+        "mergeCommit": {"oid": merge} if merge and pr["merged"] else None,
+        "potentialMergeCommit": (
+            {"oid": merge} if merge and not pr["merged"] else None
+        ),
+        "mergeStateStatus": (
+            None if pr.get("mergeable_state") is None
+            else pr["mergeable_state"].upper()
+        ),
+        **{key: gql_page(lists[key], f"PullRequest.{key}") for key in lists},
+    }
+
+
+def recorded_checks(sha, advance):
+    # Each complete read takes the next scripted state.
+    checks = model.setdefault("checks", {})
+    sequence = model.get("check_sequence", {}).get(sha)
+    if advance and sequence:
+        checks[sha] = sequence.pop(0)
+    return checks.get(sha, {})
+
+
+def latest_runs(runs):
+    latest = {}
+    for run in runs:
+        key = (run.get("check_suite", {}).get("id"), run["name"])
+        latest.pop(key, None)
+        latest[key] = run
+    return list(latest.values())
+
+
+def latest_statuses(statuses):
+    latest = {}
+    for status in statuses:
+        latest.pop(status["context"], None)
+        latest[status["context"]] = status
+    return list(latest.values())
+
+
+def commit_lists(sha, advance=False):
+    recorded = recorded_checks(sha, advance)
+    events = {w["check_suite_id"]: w["event"]
+              for w in recorded.get("workflow_runs", [])}
+    runs = latest_runs(recorded.get("check_runs", []))
+    suites = {}
+    for index, run in enumerate(runs):
+        suite = run.get("check_suite", {}).get("id")
+        suites.setdefault(suite, []).append({
+            # GitHub lists check runs newest first; number them so.
+            "databaseId": len(runs) - index,
+            "name": run["name"],
+            "status": run["status"].upper(),
+            "conclusion": (run["conclusion"] or "").upper() or None,
+            "permalink": run.get("html_url"),
+            "startedAt": run.get("started_at"),
+            "completedAt": run.get("completed_at"),
+        })
+    rows = latest_statuses(recorded.get("statuses", []))
+    return {
+        "checkSuites": [
+            {
+                "id": f"CS-{sha}-{suite}",
+                "app": next(r.get("app") for r in runs
+                            if r.get("check_suite", {}).get("id") == suite),
+                "workflowRun": (
+                    {"event": events[suite]} if suite in events else None
+                ),
+                "checkRuns": gql_page(nodes, "CheckSuite.checkRuns"),
+            }
+            for suite, nodes in suites.items()
+        ],
+        "suites": suites,
+        "status": {"contexts": [
+            {
+                "context": s["context"],
+                "state": s["state"].upper(),
+                "targetUrl": s.get("target_url"),
+                "creator": gql_actor(s.get("creator")),
+            }
+            for s in rows
+        ]} if rows else None,
+    }
+
+
+def gql_commit(sha):
+    lists = commit_lists(sha, advance=True)
+    return {
+        "id": f"C-{sha}",
+        "oid": sha,
+        "checkSuites": gql_page(lists["checkSuites"], "Commit.checkSuites"),
+        "status": lists["status"],
+    }
+
+
+def owner_lists(node_id):
+    kind, _, key = node_id.partition("-")
+    if kind == "PR":
+        return pr_lists(refresh(prs_model()[key]))
+    for pr in prs_model().values():
+        for review in pr.get("reviews", []):
+            if f"PRR-{review['id']}" == node_id:
+                return review_lists(pr, review)
+        for thread in pr.get("threads", []):
+            if thread["id"] == node_id:
+                return thread_lists(pr, thread)
+    if kind == "C":
+        return {"checkSuites": commit_lists(key)["checkSuites"]}
+    if kind == "CS":
+        sha, _, suite = key.rpartition("-")
+        nodes = commit_lists(sha)["suites"]
+        return {"checkRuns": next(
+            v for k, v in nodes.items() if str(k) == suite
+        )}
+    fail("unknown node " + node_id, 404)
+
+
+def prs_model():
+    return model.setdefault("prs", {})
+
+
+def checks_refused(alias):
+    return [{
+        "type": "FORBIDDEN", "path": ["repository", alias],
+        "message": "Resource not accessible by integration",
+    }]
+
+
 if arguments == ["--version"]:
     save()
     print(settings.get("version", "gh version fixture-1"))
@@ -170,6 +430,45 @@ if endpoint == "graphql":
                         }
                     )
         fail("unknown thread", 404)
+    operation = payload["query"].split("(", 1)[0].split()[-1]
+    if operation == "SquadSnapshot":
+        number = str(variables["pr"])
+        if number not in prs_model():
+            graphql_errors({"repository": {"pullRequest": None}}, [{
+                "type": "NOT_FOUND", "path": ["repository", "pullRequest"],
+                "message": "Could not resolve to a PullRequest with the"
+                f" number of {number}.",
+            }])
+        pr = refresh(prs_model()[number])
+        repository = {"pullRequest": gql_pull(number, pr)}
+        if variables["checks"]:
+            if account in settings.get("checks_denied", []):
+                repository["head"] = None
+                graphql_errors({"repository": repository},
+                               checks_refused("head"))
+            # The PR's head ref names its current head commit.
+            repository["head"] = gql_commit(pr["head"]["sha"])
+        output({"data": {"repository": repository}})
+    if operation == "SquadChecks":
+        if account in settings.get("checks_denied", []):
+            graphql_errors({"repository": {"object": None}},
+                           checks_refused("object"))
+        output({"data": {"repository": {
+            "object": gql_commit(variables["sha"])
+        }}})
+    if operation == "SquadPage":
+        import re
+
+        owner, field = re.search(
+            r"\.\.\. on (\w+) \{ (\w+)\(", payload["query"]
+        ).groups()
+        lists = owner_lists(variables["id"])
+        output({"data": {"node": {field: gql_page(
+            lists[field], f"{owner}.{field}", variables["cursor"]
+        )}}})
+    if operation != "SquadThreads":
+        fail("unknown GraphQL operation " + operation, 400)
+    # The thread read before #149, kept for older source trees.
     pr = model["prs"][str(variables["pr"])]
     offset = int(variables.get("cursor") or 0)
     size = settings.get("thread_page_size", 100)
@@ -276,32 +575,18 @@ if (kind == "commits" and parts[5:] in (["check-runs"], ["status"])) or (
     # attempt, every commit status in creation order, and the workflow runs.
     if account in settings.get("checks_denied", []):
         fail("Resource not accessible by integration", 403)
-    checks = model.setdefault("checks", {})
     sha = number if kind == "commits" else query.get("head_sha", [""])[0]
     first = query.get("page", ["1"])[0] == "1"
-    sequence = model.get("check_sequence", {}).get(sha)
-    if parts[5:] == ["check-runs"] and first and sequence:
-        # Each complete read takes the next scripted state.
-        checks[sha] = sequence.pop(0)
-    recorded = checks.get(sha, {})
+    recorded = recorded_checks(sha, parts[5:] == ["check-runs"] and first)
     if kind == "actions":
         runs = recorded.get("workflow_runs", [])
         output({"total_count": len(runs), "workflow_runs": paged(runs, query)})
     if parts[5] == "check-runs":
         runs = recorded.get("check_runs", [])
         if query.get("filter", ["latest"])[0] == "latest":
-            latest = {}
-            for run in runs:
-                key = (run.get("check_suite", {}).get("id"), run["name"])
-                latest.pop(key, None)
-                latest[key] = run
-            runs = list(latest.values())
+            runs = latest_runs(runs)
         output({"total_count": len(runs), "check_runs": paged(runs, query)})
-    latest = {}
-    for status in recorded.get("statuses", []):
-        latest.pop(status["context"], None)
-        latest[status["context"]] = status
-    rows = list(latest.values())
+    rows = latest_statuses(recorded.get("statuses", []))
     states = {status["state"] for status in rows}
     output({
         # GitHub reports pending for a commit without statuses.

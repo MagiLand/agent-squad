@@ -168,13 +168,17 @@ def summarize_checks(checks: tuple[Check, ...]) -> str:
     )
 
 
-def ci_record(forge: Forge, head: str) -> dict:
+def ci_record(
+    forge: Forge, head: str, checks: tuple[Check, ...] | None = None,
+) -> dict:
     """Read and classify the checks at ``head``; never a gate (§7.9).
 
-    The result is derived on every read and never stored (§3).
+    ``checks`` are the checks at ``head`` when the snapshot already read
+    them (#149). The result is derived on every read and never stored (§3).
     """
     try:
-        checks = forge.checks(head)
+        if checks is None:
+            checks = forge.checks(head)
     except ChecksUnavailable as error:
         return {
             "head": head, "summary": "unavailable", "reason": str(error),
