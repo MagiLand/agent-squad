@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import (
-    ForgeFixture, REPORT, SUMMARY, TASK, finding,
+    ForgeFixture, ForgejoFixture, REPORT, SUMMARY, TASK, finding,
 )
 from agent_squad.forge import ForgeError
 from agent_squad.github import GitHub, parse_pullrequest, parse_review
@@ -1279,6 +1279,85 @@ class ForgeCommandTests(unittest.TestCase):
                 parse_pullrequest(value)
             with self.assertRaises(ForgeError):
                 parse_review(value)
+
+
+def is_write(call: dict) -> bool:
+    """Whether a recorded fake-forge call could change the forge."""
+    if "method" in call:  # One HTTP request to the Forgejo fake.
+        return call["method"] != "GET"
+    arguments = call["arguments"]  # One process of the fake gh.
+    return (
+        arguments[0] == "api" and "--method" in arguments
+        and arguments[arguments.index("--method") + 1] != "GET"
+    )
+
+
+class PrCreateIssueTests(unittest.TestCase):
+    """#151: every pr create refuses a pull request and a closed issue."""
+
+    def test_task_file_does_not_bypass_the_issue_refusals(self) -> None:
+        for fixture in (ForgeFixture, ForgejoFixture):
+            with self.subTest(forge=fixture.__name__):
+                f = fixture()
+                self.addCleanup(f.close)
+                self.check_refusals_and_created_bodies(f)
+
+    def check_refusals_and_created_bodies(self, f: ForgeFixture) -> None:
+        f.initialize()
+        f.candidate()
+        ownership = Path(
+            f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree)
+        ) / "agent-squad-implementation.json"
+        original = dict(f.read_model()["issues"]["1"])
+        for fields, message in (
+            ({"state": "closed"}, "Task requires an open issue"),
+            ({"pull_request": {"url": "https://example.org/pr/1"}},
+             "Task requires an issue, not a pull request"),
+        ):
+            for task in ((), ("--task", f.task)):
+                with self.subTest(fields=fields, task=bool(task)):
+                    model = f.read_model()
+                    model["issues"]["1"] = original | fields
+                    f.save_model(model)
+                    refused = f.cli(
+                        "pr", "create", "--as", "implementer", "--issue",
+                        "1", *task, "--report", f.report, expected=1,
+                    )
+                    self.assertEqual(refused["error"], "error: " + message)
+                    after = f.read_model()
+                    self.assertEqual(after["prs"], {})
+                    calls = after["calls"][len(model["calls"]):]
+                    self.assertTrue(calls)
+                    self.assertEqual([c for c in calls if is_write(c)], [])
+                    self.assertFalse(ownership.exists())
+        model = f.read_model()
+        model["issues"]["1"] = original
+        # --task never copies the issue, so its body may be empty.
+        model["issues"]["2"] = original | {
+            "id": 2, "number": 2, "body": " \n",
+        }
+        f.save_model(model)
+        numbers = {}
+        for issue in (1, 2):
+            with self.subTest(issue=issue):
+                if issue == 2:
+                    f.worktree = f.repo / ".agent-squad/worktrees/issue-2"
+                    f.git("worktree", "add", "-b", "issue-2",
+                          str(f.worktree))
+                    f.push("value = 2\n")
+                created = f.cli(
+                    "pr", "create", "--as", "implementer", "--issue",
+                    str(issue), "--task", f.task, "--report", f.report,
+                )
+                numbers[issue] = created["number"]
+                row = f.read_model()["prs"][str(created["number"])]
+                self.assertEqual(row["body"], (
+                    TASK.strip() + "\n\n" + REPORT.strip()
+                    + f"\n\nCloses #{issue}\n"
+                ))
+                self.assertEqual(row["title"], original["title"])
+        record = json.loads(ownership.read_text())
+        self.assertEqual((record["issue"], record["pr"]), (1, numbers[1]))
 
 
 # Every list the GitHub snapshot reads through GraphQL (#149).
