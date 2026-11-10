@@ -274,6 +274,7 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = False
         forge.merge.side_effect = error
+        self.forge = forge
         state = {"pr": {"merged": merged}, "target": {"head": H},
                  "closes_issue": True}
         gate = (
@@ -309,6 +310,34 @@ class MergeRecordRefusalTests(unittest.TestCase):
         self.assertEqual(result["merge_record"]["reason"], "busy")
         self.assertIsNone(result["cleanup_command"])
         self.assertTrue((common / "agent-squad-merge-pr1.json").exists())
+
+    def test_read_confirmed_refusal_deletes_the_record_whatever_its_status(
+        self,
+    ):
+        """#142: the Forgejo adapter's read classified the answer."""
+        from agent_squad.forge import MergeRefused
+
+        result, common = self.merge(
+            merged=False, error=MergeRefused("injected", 500))
+        self.assertIs(result["merged"], False)
+        self.assertEqual(result["error"], "injected")
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertIsNone(result["cleanup_command"])
+        self.assertIsNone(result["merge_answer"])
+        self.assertFalse((common / "agent-squad-merge-pr1.json").exists())
+
+    def test_unclassified_server_error_stays_unknown_without_a_read(self):
+        """GitHub's answers are classified by status alone, as before."""
+        from agent_squad.forge import ForgeError
+
+        result, common = self.merge(
+            merged=False, error=ForgeError("server error", 500))
+        self.assertIsNone(result["merged"])
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertEqual(result["cleanup_command"],
+                         "agent-squad pr cleanup --as implementer --pr 1")
+        self.assertTrue((common / "agent-squad-merge-pr1.json").exists())
+        self.forge.pr.assert_not_called()
 
 
 class SurvivingOwnerTests(unittest.TestCase):

@@ -201,8 +201,11 @@ class Handler(BaseHTTPRequestHandler):
             sha = git("rev-parse", "HEAD")
             git("push", "origin", f"HEAD:refs/heads/{pr['base']['ref']}")
             self._branch_refs = None
+            # F16 answers 403 or 500 when its deletion after the merge
+            # fails, with the PR merged and the head branch kept (#142).
+            answer = settings.get("answer_after_merge")
             if (body["delete_branch_after_merge"]
-                    and not settings.get("leave_branch")):
+                    and not settings.get("leave_branch") and not answer):
                 git("push", "origin", f":refs/heads/{pr['head']['ref']}")
                 self._branch_refs = None
         pr.update(merged=True, state="closed", merge_commit_sha=sha)
@@ -217,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
         if settings.get("post_merge_head_discrepancy"):
             pr["head"]["sha"] = pr["base"]["sha"]
             pr["head"]["ref"] = "synthetic-pull-ref"
+        if answer:
+            return answer["status"], {"message": answer["message"]}
         return 200, None
 
     def dispatch(

@@ -531,15 +531,139 @@ class ForgejoMutationTests(unittest.TestCase):
         f = self.f
         f.review("approved")
         before = f.git("worktree", "list", "--porcelain")
-        for fault in ("head_race_409", "merge_405", "merge_422"):
+        for fault, message in (
+            ("head_race_409", "head out of date"),
+            ("merge_405",
+             "not allowed to merge [reason: Does not have enough approvals]"),
+            ("merge_422", "injected merge refusal"),
+        ):
             f.settings(**{fault: True}, protection_403=True)
+            start = len(f.read_model()["calls"])
             result = self.merge(1)
             self.assertIs(result["merged"], False)
+            self.assertEqual(result["error"], message)
+            self.assertEqual(result["merge_record"]["result"], "deleted")
+            self.assertIsNone(result["cleanup_command"])
+            self.assertIsNone(result["merge_answer"])
             self.assertEqual(
                 result["branch_rules"], {"visibility": "not visible"})
             self.assertEqual(f.git("worktree", "list", "--porcelain"), before)
+            # #142: one read of the PR is the only request after the answer.
+            calls = f.read_model()["calls"][start:]
+            post = next(i for i, c in enumerate(calls)
+                        if c["path"].endswith("/merge"))
+            self.assertEqual(
+                [(c["method"], c["path"]) for c in calls[post + 1:]],
+                [("GET", "/instance/api/v1/repos/MagiLand/trial/pulls/1")],
+            )
             self.assertFalse(f.status()["pr"]["merged"])
             f.settings(**{fault: False})
+
+    def merge_answered_after_merging(
+        self, status: int, message: str, *, deletion_refused: bool,
+        expected: int,
+    ) -> dict:
+        """#142: Forgejo merges, keeps the head branch, and answers
+        ``status``, as when its deletion after the merge fails."""
+        f = self.f
+        f.review("approved")
+        f.settings(answer_after_merge={"status": status, "message": message},
+                   branch_delete_403=deletion_refused)
+        start = len(f.read_model()["calls"])
+        result = self.merge(expected)
+        calls = f.read_model()["calls"][start:]
+        post = next(i for i, c in enumerate(calls)
+                    if c["path"].endswith("/merge"))
+        self.assertEqual(calls[post]["body"], {
+            "Do": "merge", "head_commit_id": self.head,
+            "delete_branch_after_merge": True,
+        })
+        self.assertEqual(
+            (calls[post + 1]["method"], calls[post + 1]["path"]),
+            ("GET", "/instance/api/v1/repos/MagiLand/trial/pulls/1"),
+        )
+        self.assertEqual(
+            len([c for c in calls if c["path"].endswith("/merge")]), 1)
+        self.assertIs(result["merged"], True)
+        self.assertEqual(result["merge_commit"],
+                         f.read_model()["prs"]["1"]["merge_commit_sha"])
+        self.assertEqual(result["merge_answer"],
+                         {"status": status, "message": message})
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(f.git("rev-parse", "HEAD"), result["merge_commit"])
+        return result
+
+    def assert_finished_by_cleanup(self, status: int, message: str) -> None:
+        f = self.f
+        record = f.repo / ".git/agent-squad-merge-pr1.json"
+        result = self.merge_answered_after_merging(
+            status, message, deletion_refused=True, expected=3)
+        self.assertEqual(result["cleanup"][-1], {
+            "step": "remote branch", "ok": False,
+            "detail": "branch deletion forbidden",
+        })
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertTrue(record.exists())
+        self.assertEqual(result["cleanup_command"],
+                         "agent-squad pr cleanup --as implementer --pr 1")
+        self.assertTrue(f.worktree.exists())
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
+        f.settings(branch_delete_403=False)
+        result = self.cleanup()
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertIsNone(result["merge_answer"])
+        self.assertFalse(record.exists())
+        self.assertFalse(f.worktree.exists())
+        self.assertEqual(f.git("branch", "-r", "--list", "origin/issue-1"), "")
+
+    def test_merge_answered_403_after_merging_is_finished_by_cleanup(self):
+        """The answer the triage of #142 observed on Forgejo 16.0.3."""
+        self.assert_finished_by_cleanup(403, "the head branch is protected")
+
+    def test_merge_answered_500_after_merging_is_finished_by_cleanup(self):
+        self.assert_finished_by_cleanup(500, "injected deletion failure")
+
+    def assert_completed(self, status: int, message: str) -> None:
+        f = self.f
+        result = self.merge_answered_after_merging(
+            status, message, deletion_refused=False, expected=0)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertIsNone(result["cleanup_command"])
+        self.assertFalse(f.worktree.exists())
+        deleted = [c for c in self.writes() if c["method"] == "DELETE"]
+        self.assertEqual([c["path"] for c in deleted],
+                         ["/instance/api/v1/repos/MagiLand/trial"
+                          "/branches/issue-1"])
+        self.assertEqual(f.git("branch", "-r", "--list", "origin/issue-1"), "")
+
+    def test_merge_answered_403_with_a_deletable_branch_completes(self):
+        self.assert_completed(403, "the head branch is protected")
+
+    def test_merge_answered_500_with_a_deletable_branch_completes(self):
+        self.assert_completed(500, "")
+
+    def test_failed_read_after_an_error_answer_keeps_outcome_unknown(self):
+        f = self.f
+        f.review("approved")
+        f.settings(answer_after_merge={
+            "status": 403, "message": "the head branch is protected",
+        }, merge_confirmation_403=True)
+        result = self.merge(1)
+        self.assertIsNone(result["merged"])
+        self.assertIsNone(result["merge_answer"])
+        self.assertEqual(
+            result["error"],
+            "merge answered 403: the head branch is protected; confirmation"
+            " failed: merge confirmation unreadable; re-read the PR",
+        )
+        self.assertEqual(result["merge_record"]["result"], "kept")
+        self.assertTrue((f.repo / ".git/agent-squad-merge-pr1.json").exists())
+        self.assertEqual(result["cleanup_command"],
+                         "agent-squad pr cleanup --as implementer --pr 1")
+        self.assertTrue(f.worktree.exists())
+        self.assertEqual(f.git("rev-parse", "origin/issue-1"), self.head)
 
     def test_failed_confirmation_read_keeps_merge_outcome_unknown(self):
         f = self.f

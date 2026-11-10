@@ -13,7 +13,7 @@ from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
 from .conventions import SHA, closes_issue
-from .forge import ForgeError, Forge
+from .forge import ForgeError, Forge, MergeRefused
 from .herdr import HerdrClient, HerdrError
 from .initialization import (
     AgentSquadError,
@@ -678,6 +678,7 @@ def merge_pr(
             "path": str(merge_record_path(repository, pr)),
             "result": "not written", "reason": None,
         },
+        "merge_answer": None,
         "cleanup_command": None,
     }
     try:
@@ -695,8 +696,12 @@ def merge_pr(
     try:
         merged = forge.merge(pr, target["head"], method)
     except AgentSquadError as error:
-        refused = isinstance(error, ForgeError) and error.status in (
-            400, 401, 403, 404, 405, 409, 422,
+        # A Forgejo error answer has already been classified by a read of
+        # the PR (#142); another forge's refusal is known by its status.
+        refused = isinstance(error, MergeRefused) or (
+            isinstance(error, ForgeError) and error.status in (
+                400, 401, 403, 404, 405, 409, 422,
+            )
         )
         if refused:
             try:
@@ -712,7 +717,9 @@ def merge_pr(
             "resources_retained": True,
         }
     result.update(
-        merged=True, merge_commit=merged["sha"], message=merged["message"])
+        merged=True, merge_commit=merged["sha"], message=merged["message"],
+        merge_answer=merged.get("answer"),
+    )
     return complete_merge(repository, forge, record, merged["sha"], result)
 
 
@@ -742,5 +749,7 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
             "path": str(merge_record_path(repository, pr)),
             "result": "kept", "reason": None,
         },
+        # The merge record does not keep the merge request's answer.
+        "merge_answer": None,
         "cleanup_command": None,
     })
