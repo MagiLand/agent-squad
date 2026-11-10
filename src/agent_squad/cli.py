@@ -8,8 +8,10 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 
 from . import __version__
+from . import events
 from .anchors import Anchor
 from . import commands
 from . import reviewer
@@ -403,8 +405,33 @@ def json_default(value: object) -> object:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run one command and record its event (docs/events.md)."""
+    started = time.monotonic()
+    events.forget()
     root = parser()
-    args = root.parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else list(argv)
+    args = None
+    exit_code = 1
+    try:
+        args = root.parse_args(arguments)
+        exit_code = run(root, args)
+        return exit_code
+    except SystemExit as stop:
+        exit_code = (
+            stop.code if isinstance(stop.code, int)
+            else 0 if stop.code is None else 1
+        )
+        raise
+    except KeyboardInterrupt:
+        exit_code = 130
+        raise
+    finally:
+        # --help and --version exit 0 before any command is reached.
+        if args is not None or exit_code != 0:
+            events.record(root, arguments, args, exit_code, started)
+
+
+def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.group == "init" and args.forge == "forgejo":
         for name in (
             "base_url", "implementer_token_file", "reviewer_token_file",

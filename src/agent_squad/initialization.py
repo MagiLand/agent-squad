@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from urllib.parse import urlsplit
 
+from . import events
 from .validation import JsonValidator
 
 CONTROL_DIRECTORY_NAME = ".agent-squad"
@@ -457,6 +458,7 @@ def load_initialized_repository(start: Path) -> Repository:
                 repository.configuration_path.read_text(encoding="utf-8")
             )
         )
+        events.observe(config.forge)
         repository = replace(repository, configuration=config)
         validate_roots(repository, worktrees=repository.discovered_worktrees)
         validate_token_files(repository)
@@ -619,6 +621,7 @@ def initialize_repository(
             )
     if not exists:
         atomic_config(repository.configuration_path, config)
+        events.observe(config.forge)
     differences = {
         k: {"configured": v, "default": defaults.to_dict()[k]}
         for k, v in config.to_dict().items()

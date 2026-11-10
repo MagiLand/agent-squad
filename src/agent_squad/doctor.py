@@ -9,6 +9,7 @@ import re
 import tempfile
 from typing import Callable, Iterator
 
+from . import events
 from .forge import Forge, PullRequest, make_forge
 from .herdr import HerdrClient, HerdrError, HerdrSessionError
 from .initialization import (
@@ -271,8 +272,14 @@ def diagnose(
         repository = load_initialized_repository(start)
     except (AgentSquadError, OSError, ValueError, RuntimeError) as error:
         add("repository and configuration", "fail", error)
+        repository = None
+    else:
+        add("repository and configuration", "pass",
+            repository.configuration_path)
+    # The user-level store is reported with or without a configuration.
+    add("event store", *events.diagnose())
+    if repository is None:
         return result()
-    add("repository and configuration", "pass", repository.configuration_path)
     config = repository.configuration
 
     def exclusions() -> None:

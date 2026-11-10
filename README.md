@@ -412,6 +412,23 @@ the record once every step succeeded. The Implementer runs it once without
 asking and reports a second failure to you. A PR merged outside `pr merge` has
 no record; `doctor` reports its leftover resources.
 
+## What the tool records locally
+
+Every `agent-squad` run, except `--help` and `--version`, appends one line to
+a monthly file under `$XDG_STATE_HOME/agent-squad/events/`, which defaults to
+`~/.local/state/agent-squad/events/`. The line holds the command name, the
+`--as` role, the `--pr` and `--issue` numbers, the exit code, the duration,
+the tool version, and a short hash that identifies the configured repository
+without naming it. It never holds a title, body, path, branch name, account
+name, or commit id. The records exist so that agents can measure how the tool
+is used across repositories; nothing is sent anywhere, and no command reads
+them or treats them as authority.
+
+`doctor` reports whether the directory is writable. A store that cannot be
+written never changes a command's output or exit code. To turn recording off,
+set `AGENT_SQUAD_EVENTS=off` in the environment. The
+[event store reference](docs/events.md) defines every field.
+
 ## Verify this project
 
 ```bash
