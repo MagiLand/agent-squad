@@ -465,7 +465,9 @@ Source-export smoke runs both forges without `.git`; CI reserves that duplicate
 export run for main pushes and the weekly schedule.
 `make doctor` checks your real configured environment. Live reviews, decisions,
 and merges are separate evidence in [workflow verification](docs/workflow-verification.md).
-Agent Squad's own implementation PRs use this review loop. Release acceptance
+Agent Squad's own implementation PRs use this review loop, and so do its
+release pull requests; the [release procedure](docs/release.md) describes a
+release from its issue to the published release page. Release acceptance
 remains a separate Developer decision based on the recorded live-trial evidence.
 
 Licensed under [Apache 2.0](LICENSE).
