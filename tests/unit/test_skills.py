@@ -379,11 +379,55 @@ class CiResultSkillTests(unittest.TestCase):
             "On every forge, read whether the checks at a head passed, "
             "failed, or are still pending from `ci` in `agent-squad status "
             "--pr <N> --json` or from `agent-squad pr checks --pr <N> "
-            "[--wait <seconds>] --json`.", preamble)
-        self.assertIn("(logs, durations, required-check configuration, and "
-                      "the run at the merge commit)", preamble)
+            "[--wait <seconds>] --json`, and read the result of the run at "
+            "a merged PR's merge commit from `agent-squad pr checks --pr <N> "
+            "--merge-commit [--wait <seconds>] --json`.", preamble)
+        self.assertIn("(logs, durations, and required-check configuration)",
+                      preamble)
+        self.assertNotIn("the run at the merge commit)", preamble)
         self.assertIn("`agent-squad pr checks --pr <N> [--wait <seconds>] "
                       "--json`", self.reviewer.split("## 1.", 1)[0])
+
+    def test_implementer_reads_the_push_run_through_the_cli(self) -> None:
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        for rule in (
+            "After a verified merge, in a repository that runs CI on "
+            "base-branch pushes, wait for the run at the merge commit with "
+            "`agent-squad pr checks --pr <PR> --merge-commit --wait 300 "
+            "--json`, giving the shell command a timeout longer than the "
+            "wait, and repeat it while `summary` is `pending`.",
+            "`passed`: report it.",
+            "`failed`: name the failed checks and ask the Developer to "
+            "choose a fix or a revert; change nothing else.",
+            "`none` after the wait, or `unavailable`: report that limitation "
+            "explicitly, with any `reason`.",
+            "the push run's result from that read (the merge commit, the "
+            "summary, and each check with its result)",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, finishing)
+        # The read keeps its place: before the closing step and the report.
+        self.assertLess(finishing.index("--merge-commit --wait 300"),
+                        finishing.index("issue-closing rule"))
+        self.assertLess(finishing.index("issue-closing rule"),
+                        finishing.index("Then send one report"))
+        # The instruction is the same on every forge; `gh` is not named.
+        step = finishing.split("After a verified merge, in a repository",
+                               1)[1].split("issue-closing rule", 1)[0]
+        self.assertNotIn("gh ", step)
+        self.assertNotIn("GitHub", step)
+        # The spec outline names the same rule.
+        for rule in (
+            "`pr checks --merge-commit --wait 300`, on every forge, repeated "
+            "while `summary` is `pending`",
+            "the merge commit, the summary, and each check with its result",
+            "name the failed checks, ask for a fix or revert, and change "
+            "nothing else",
+            "report `none` after the wait, or `unavailable`, with any "
+            "`reason`",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, self.spec_implementer)
 
     def test_reviewer_rules_for_ci_results(self) -> None:
         review = section(self.reviewer, "## 5. Two-axis review", "## 6.")
@@ -559,7 +603,7 @@ class IssueClosingRuleSkillTests(unittest.TestCase):
         # The step comes after the merge and before the final report.
         self.assertEqual(positions, sorted(positions))
         self.assertLess(
-            finishing.index("wait for its run at the merge commit."),
+            finishing.index("wait for the run at the merge commit with"),
             positions[0])
         self.assertIn(
             "each issue whose labels the issue-closing rule changed and "

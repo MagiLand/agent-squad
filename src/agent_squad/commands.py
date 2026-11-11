@@ -38,6 +38,7 @@ from .forge import (
     ChecksUnavailable,
     ForgeError,
     Forge,
+    PullRequest,
     ReviewComment,
     ReviewPublication,
     Snapshot,
@@ -197,22 +198,47 @@ def ci_record(
     }
 
 
-def pr_checks(forge: Forge, number: int, wait: int | None = None) -> dict:
-    """Report the checks at the PR's current head, optionally waiting.
+def merged_commit(pr: PullRequest) -> str:
+    """The merge commit of a merged PR; anything else is refused (#157).
+
+    Only the merged flag says that a PR merged: GitHub also reports a merge
+    commit for a PR closed without merging.
+    """
+    if not pr.merged:
+        raise GateError(f"pull request #{pr.number} is not merged")
+    if pr.merge_commit is None:
+        raise GateError(
+            f"the forge reports no merge commit for merged pull request"
+            f" #{pr.number}"
+        )
+    return pr.merge_commit
+
+
+def pr_checks(
+    forge: Forge,
+    number: int,
+    wait: int | None = None,
+    *,
+    merge_commit: bool = False,
+) -> dict:
+    """Report the checks at the PR's head or merge commit, optionally waiting.
 
     With ``wait`` the read repeats through ``pending`` and ``none``, because
     checks appear some seconds after a push. The PR head is read again after
     every checks read, so a head that moved before or during the read that
     ends the wait is reported as ``head_changed`` with the old head's result.
+    A merge commit does not change, so with ``merge_commit`` the PR is read
+    only once and ``head_changed`` stays false (#157).
     """
-    head = forge.pr(number).head
+    pr = forge.pr(number)
+    head = merged_commit(pr) if merge_commit else pr.head
     if wait is None:
         return ci_record(forge, head)
     start = time.monotonic()
     timed_out = head_changed = False
     while True:
         record = ci_record(forge, head)
-        if forge.pr(number).head != head:
+        if not merge_commit and forge.pr(number).head != head:
             head_changed = True
             break
         if record["summary"] not in ("pending", "none"):

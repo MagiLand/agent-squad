@@ -17,14 +17,15 @@ state through
 `agent-squad pr reviews --pr <N> --json`. On every forge, read whether the
 checks at a head passed, failed, or are still pending from `ci` in
 `agent-squad status --pr <N> --json` or from
-`agent-squad pr checks --pr <N> [--wait <seconds>] --json`.
+`agent-squad pr checks --pr <N> [--wait <seconds>] --json`, and read the result
+of the run at a merged PR's merge commit from
+`agent-squad pr checks --pr <N> --merge-commit [--wait <seconds>] --json`.
 
 Filter `--json` output to read what is needed instead of saving whole responses
 to disk. A saved response is never authority.
 
 For a GitHub repository, for CI evidence and required-check metadata these
-commands do not expose (logs, durations, required-check configuration, and
-the run at the merge commit),
+commands do not expose (logs, durations, and required-check configuration),
 use read-only `gh run list`, `gh run view` (including logs),
 `gh run watch <run-id> --exit-status`, `gh pr checks`,
 or `gh api --method GET` against Actions, check, branch-protection, or branch-rule
@@ -360,8 +361,20 @@ choice.
 
 Report visible human-approval or required-check requirements and any forge
 refusal. After a successful merge the PR description is frozen: `pr report`
-refuses a PR that is not open. If the repository runs CI on base-branch pushes,
-wait for its run at the merge commit.
+refuses a PR that is not open.
+
+After a verified merge, in a repository that runs CI on base-branch pushes,
+wait for the run at the merge commit with
+`agent-squad pr checks --pr <PR> --merge-commit --wait 300 --json`, giving the
+shell command a timeout longer than the wait, and repeat it while `summary` is
+`pending`. The command is the same on every forge. Then act on `summary` in
+the final report:
+
+- `passed`: report it.
+- `failed`: name the failed checks and ask the Developer to choose a fix or a
+  revert; change nothing else.
+- `none` after the wait, or `unavailable`: report that limitation explicitly,
+  with any `reason`.
 
 After a verified merge and before the final report, apply the consuming
 repository's issue-closing rule. When `closes_issue` in the `pr merge` or
@@ -388,12 +401,10 @@ merge commit, method, integration check, whether the merge closed the issue or
 left it open as a partial delivery (`closes_issue` in the `pr merge` or
 `pr cleanup` result), each issue whose labels the issue-closing rule changed
 and what changed, or that the repository documents no such rule, CI at the
-approved head and the push
-run's result, every cleanup step, fast-forward result, every optional
-finding with ID, title, and disposition, and every issue you filed with
-`issue create`. If the push run failed, say so and
-ask the Developer to choose a fix or a revert; change nothing else. If push
-CI evidence is missing or inaccessible, report that limitation explicitly.
+approved head, the push run's result from that read (the merge commit, the
+summary, and each check with its result), every cleanup step, fast-forward
+result, every optional finding with ID, title, and disposition, and every
+issue you filed with `issue create`.
 
 `pr merge` removes `<scratch_root>/issue-<N>` after a verified merge, subject
 to cleanup safeguards; do not recreate it for a post-merge report. When the

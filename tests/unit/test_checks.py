@@ -21,10 +21,11 @@ from agent_squad.forgejo import Forgejo, parse_status  # noqa: E402
 from agent_squad.github import (  # noqa: E402
     GitHub, check_run_result, parse_check_run, parse_commit_status,
 )
-from agent_squad.initialization import Repository  # noqa: E402
+from agent_squad.initialization import GateError, Repository  # noqa: E402
 from tests.unit.test_forgejo import forgejo_config  # noqa: E402
 
 OTHER = "c" * 40
+MERGE = "d" * 40
 
 
 def row(result: str, name: str = "test") -> Check:
@@ -385,6 +386,92 @@ class WaitTests(unittest.TestCase):
                 result, _ = self.run_wait(forge, 600)
                 self.assertFalse(result["head_changed"])
                 self.assertEqual(result["summary"], "passed")
+
+
+class MergedForge(StubForge):
+    """A closed PR; counts its reads, which must stay at one (#157)."""
+
+    def __init__(
+        self,
+        results: list,
+        *,
+        merged: bool = True,
+        merge_commit: str | None = MERGE,
+    ) -> None:
+        super().__init__(results)
+        self.merged = merged
+        self.merge_commit = merge_commit
+        self.pr_reads = 0
+
+    def pr(self, number: int):
+        self.pr_reads += 1
+        return type("PR", (), {
+            "number": number, "head": self.head, "merged": self.merged,
+            "merge_commit": self.merge_commit,
+        })()
+
+
+class MergeCommitTests(unittest.TestCase):
+    def run_wait(self, forge: MergedForge, wait: int | None) -> tuple:
+        clock = FakeClock()
+        with patch("agent_squad.commands.time", clock):
+            return pr_checks(forge, 1, wait, merge_commit=True), clock.sleeps
+
+    def test_without_wait_reads_the_merge_commit_once(self) -> None:
+        forge = MergedForge(["failed"])
+        result, sleeps = self.run_wait(forge, None)
+        self.assertEqual((result["head"], result["summary"]),
+                         (MERGE, "failed"))
+        self.assertNotIn("head_changed", result)
+        self.assertEqual((forge.reads, forge.pr_reads, sleeps),
+                         ([MERGE], 1, []))
+
+    def test_wait_moves_through_none_and_pending_to_final(self) -> None:
+        forge = MergedForge(["none", "pending", "failed"])
+        result, sleeps = self.run_wait(forge, 60)
+        self.assertEqual(result, {
+            "head": MERGE, "summary": "failed",
+            "checks": result["checks"], "waited_seconds": 20,
+            "timed_out": False, "head_changed": False,
+        })
+        self.assertEqual(sleeps, [CHECK_POLL_INTERVAL] * 2)
+        self.assertEqual(forge.reads, [MERGE] * 3)
+        self.assertEqual(forge.pr_reads, 1)
+
+    def test_wait_times_out_with_the_last_summary(self) -> None:
+        forge = MergedForge(["pending"])
+        result, sleeps = self.run_wait(forge, 15)
+        self.assertEqual(result["summary"], "pending")
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["head_changed"])
+        self.assertEqual(sleeps, [10, 5])
+        self.assertEqual(forge.pr_reads, 1)
+
+    def test_unavailable_ends_the_wait_at_once(self) -> None:
+        forge = MergedForge(["unavailable"])
+        result, sleeps = self.run_wait(forge, 60)
+        self.assertEqual(result["summary"], "unavailable")
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(sleeps, [])
+
+    def test_refuses_before_any_checks_read(self) -> None:
+        for merged, merge_commit, message in (
+            (False, None, "not merged"),
+            (False, MERGE, "not merged"),
+            (True, None, "no merge commit"),
+        ):
+            with self.subTest(merged=merged, merge_commit=merge_commit):
+                forge = MergedForge(
+                    ["passed"], merged=merged, merge_commit=merge_commit,
+                )
+                with self.assertRaisesRegex(GateError, message):
+                    pr_checks(forge, 1, merge_commit=True)
+                self.assertEqual(forge.reads, [])
+
+    def test_without_the_flag_a_merged_pr_reads_its_head(self) -> None:
+        forge = MergedForge(["passed"])
+        self.assertEqual(pr_checks(forge, 1)["head"], H)
+        self.assertEqual(forge.reads, [H])
 
 
 class RecordTests(unittest.TestCase):

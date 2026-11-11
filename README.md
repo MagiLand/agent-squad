@@ -233,9 +233,12 @@ before notifying the Implementer, so a missing notification loses no review.
 The CLI reads CI results on both forges but does not orchestrate CI, gate on
 its results, or certify that the checks a repository expects ran. `status`
 reports them under `ci` for the current head, and `pr checks` prints the same
-result and can wait for pending checks. The skills act on them: a failed check
-is a defect, the Implementer waits for a head's checks before requesting
-review, and the Reviewer does not approve a head with a failed check. Any
+result and can wait for pending checks. With `--merge-commit`, `pr checks`
+reads a merged PR's merge commit instead, which is how the Implementer reads
+the run that a merge started on the base branch. The skills act on them: a
+failed check is a defect, the Implementer waits for a head's checks before
+requesting review and for the push run after a merge, and the Reviewer does
+not approve a head with a failed check. Any
 other repository review-readiness policy must be satisfied separately for the
 exact revision.
 
@@ -246,6 +249,7 @@ agent-squad issue view --issue 42 --json
 agent-squad pr head --pr 43 --json
 agent-squad pr reviews --pr 43 --json
 agent-squad pr checks --pr 43 --json
+agent-squad pr checks --pr 43 --merge-commit --json
 agent-squad status --pr 43 --json
 ```
 
@@ -338,7 +342,7 @@ shipped command path.
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
 | `issue view`, `issue comment`, `issue create`, `issue label` | Read the governing issue, comments, labels, dependencies, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`; add or remove existing labels on an issue to apply a closing rule the repository documents, never removing `needs-triage`, `needs-info`, `ready-for-human`, or `wontfix`. |
 | `pr create`, `pr report` | Publish the Task and implementation report, ending with `Closes #<issue>`, or with `Ref #<issue>` under `pr create --partial --task <file>` for a PR that delivers part of an issue and leaves it open; update the report on an open PR, keeping that footer. |
-| `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head, and derived workflow state. |
+| `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head or a merged PR's merge commit, and derived workflow state. |
 | `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
 | `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
 | `reviewer launch`, `reviewer adopt`, `reviewer close` | Start a fresh Reviewer, adopt after a human startup answer, or close owned resources. |
