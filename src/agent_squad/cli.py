@@ -108,6 +108,7 @@ def parser() -> argparse.ArgumentParser:
     for name in ("head", "reviews", "checks"):
         common(pr[name])
     pr["checks"].add_argument("--wait", type=positive_argument)
+    pr["checks"].add_argument("--merge-commit", action="store_true")
     common(pr["create"], role="implementer", number="issue", mutation=True)
     pr["create"].add_argument("--task")
     pr["create"].add_argument("--report", required=True)
@@ -353,7 +354,9 @@ def execute(args: argparse.Namespace) -> dict:
         )
     if key == ("pr", "checks"):
         # Only the PR record and its checks: no fetch and no Herdr read.
-        return commands.pr_checks(forge, args.pr, args.wait)
+        return commands.pr_checks(
+            forge, args.pr, args.wait, merge_commit=args.merge_commit
+        )
     # Only the status report reads CI, in the same read where it can.
     report_ci = key not in (("pr", "head"), ("pr", "reviews"))
     snapshot = forge.snapshot(args.pr, with_checks=report_ci)
@@ -482,9 +485,10 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         elif (args.group, getattr(args, "command", None)) == (
             "pr", "checks",
         ):
+            place = "merge commit " if args.merge_commit else ""
             print(
                 f'CI {result["summary"]}: {len(result["checks"])} checks at'
-                f' {result["head"]}'
+                f' {place}{result["head"]}'
             )
             if result.get("head_changed"):
                 print("The PR head changed; stopped waiting.")

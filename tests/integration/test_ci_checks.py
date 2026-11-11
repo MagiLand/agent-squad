@@ -1,11 +1,25 @@
 """CI results read at a PR head through both fake forges (#145)."""
 
 import json
+import os
 import subprocess
 import sys
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from tests._support import FakeClock, add_src_to_path
 from tests.forge_support import ForgeFixture, ForgejoFixture
+
+add_src_to_path()
+
+from agent_squad.commands import pr_checks  # noqa: E402
+from agent_squad.forge import make_forge  # noqa: E402
+from agent_squad.initialization import (  # noqa: E402
+    load_initialized_repository,
+)
+
+MERGE_COMMIT = "d" * 40
 
 
 def check_run(
@@ -89,19 +103,50 @@ class CheckFixtureMixin:
         model.setdefault("checks", {})[sha or self.head] = checks
         self.f.save_model(model)
 
-    def sequence(self, *states: object) -> None:
+    def sequence(self, *states: object, sha: str | None = None) -> None:
         model = self.f.read_model()
-        model.setdefault("check_sequence", {})[self.head] = list(states)
+        model.setdefault("check_sequence", {})[sha or self.head] = list(states)
+        self.f.save_model(model)
+
+    def close_pr(
+        self, *, merged: bool = True, merge_commit: str | None = MERGE_COMMIT,
+    ) -> None:
+        """Record how the PR closed; no merge record, worktree kept."""
+        model = self.f.read_model()
+        model["prs"]["1"].update(
+            state="closed", merged=merged, merge_commit_sha=merge_commit,
+        )
         self.f.save_model(model)
 
     def ci(self) -> dict:
         return self.f.status()["ci"]
 
-    def checks(self, *args: str, expected: int = 0) -> dict:
+    def checks(
+        self, *args: str, expected: int = 0, cwd: Path | None = None,
+    ) -> dict:
         return self.f.cli("pr", "checks", "--pr", "1", *args,
-                          expected=expected)
+                          expected=expected, cwd=cwd)
+
+    def at_merge_commit(self, *args: str, expected: int = 0) -> dict:
+        return self.checks("--merge-commit", *args, expected=expected,
+                           cwd=self.f.repo)
+
+    def wait_on_clock(self, limit: int) -> tuple[dict, list[float]]:
+        """Run the merge-commit wait in process on a virtual clock."""
+        clock = FakeClock()
+        with patch.dict(os.environ, self.f.env, clear=True):
+            repository = load_initialized_repository(self.f.repo)
+            with patch("agent_squad.commands.time", clock):
+                result = pr_checks(
+                    make_forge(repository, "implementer"), 1, limit,
+                    merge_commit=True,
+                )
+        return result, clock.sleeps
 
     def check_reads(self) -> list:
+        raise NotImplementedError
+
+    def pull_reads(self) -> list:
         raise NotImplementedError
 
     def test_head_without_checks_reports_none(self) -> None:
@@ -211,6 +256,120 @@ class CheckFixtureMixin:
         # The merge reads no CI.
         self.assertEqual(self.check_reads()[start:], [])
 
+    def test_merge_commit_checks_are_read_apart_from_the_head(self) -> None:
+        f = self.f
+        self.seed(self.passing())
+        f.review("approved")
+        f.decision(merge_instruction="record", body="")
+        f.cli("pr", "merge", "--as", "implementer", "--pr", "1", cwd=f.repo)
+        merge = f.cli("pr", "head", "--pr", "1", cwd=f.repo)["merge_commit"]
+        self.assertNotEqual(merge, self.head)
+        self.seed(self.failing(), merge)
+        result = self.at_merge_commit()
+        self.assertEqual((result["head"], result["summary"]),
+                         (merge, "failed"))
+        self.assertEqual([c["result"] for c in result["checks"]], ["failed"])
+        plain = self.checks(cwd=f.repo)
+        self.assertEqual((plain["head"], plain["summary"]),
+                         (self.head, "passed"))
+        self.assertEqual([c["result"] for c in plain["checks"]], ["passed"])
+        self.assertEqual(f.cli("status", "--pr", "1", cwd=f.repo)["ci"], plain)
+
+    def test_merge_commit_wait_moves_through_none_and_pending_to_final(
+        self,
+    ) -> None:
+        self.close_pr()
+        self.sequence(self.empty(), self.pending(), self.failing(),
+                      sha=MERGE_COMMIT)
+        before = len(self.pull_reads())
+        result, sleeps = self.wait_on_clock(60)
+        self.assertEqual((result["head"], result["summary"]),
+                         (MERGE_COMMIT, "failed"))
+        self.assertFalse(result["timed_out"])
+        self.assertFalse(result["head_changed"])
+        self.assertEqual(result["waited_seconds"], 20)
+        self.assertEqual(sleeps, [10, 10])
+        self.assertEqual(len(self.pull_reads()) - before, 1)
+
+    def test_merge_commit_wait_times_out_with_the_last_summary(self) -> None:
+        self.close_pr()
+        self.seed(self.pending(), MERGE_COMMIT)
+        before = len(self.pull_reads())
+        result, sleeps = self.wait_on_clock(15)
+        self.assertEqual(result["summary"], "pending")
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["head_changed"])
+        self.assertEqual(sleeps, [10, 5])
+        self.assertEqual(len(self.pull_reads()) - before, 1)
+
+    def test_merge_commit_wait_exits_zero_at_the_limit(self) -> None:
+        self.close_pr()
+        self.seed(self.pending(), MERGE_COMMIT)
+        result = self.at_merge_commit("--wait", "1")
+        self.assertEqual(result["summary"], "pending")
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["head_changed"])
+
+    def test_merge_commit_refused_read_is_unavailable_and_exits_zero(
+        self,
+    ) -> None:
+        self.close_pr()
+        self.f.settings(checks_denied=["reviewer"])
+        before = len(self.pull_reads())
+        result = self.at_merge_commit("--as", "reviewer", "--wait", "60")
+        self.assertEqual((result["head"], result["summary"]),
+                         (MERGE_COMMIT, "unavailable"))
+        self.assertIn("403", result["reason"])
+        self.assertFalse(result["timed_out"])
+        self.assertFalse(result["head_changed"])
+        self.assertEqual(result["waited_seconds"], 0)
+        self.assertEqual(len(self.pull_reads()) - before, 1)
+
+    def test_merge_commit_refuses_before_any_checks_read(self) -> None:
+        for name, closed, message in (
+            ("open", None, "not merged"),
+            ("closed with a merge commit",
+             {"merged": False, "merge_commit": MERGE_COMMIT}, "not merged"),
+            ("merged without a merge commit",
+             {"merged": True, "merge_commit": None}, "no merge commit"),
+        ):
+            with self.subTest(name):
+                if closed is not None:
+                    self.close_pr(**closed)
+                start = len(self.check_reads())
+                result = self.at_merge_commit(expected=4)
+                self.assertIn(message, result["error"])
+                self.assertEqual(self.check_reads()[start:], [])
+
+    def test_merge_commit_reads_with_the_selected_identity(self) -> None:
+        self.close_pr()
+        self.seed(self.failing(), MERGE_COMMIT)
+        for role, account in (("implementer", "developer"),
+                              ("reviewer", "reviewer")):
+            with self.subTest(role=role):
+                start = len(self.check_reads())
+                result = self.at_merge_commit("--as", role)
+                self.assertEqual((result["head"], result["summary"]),
+                                 (MERGE_COMMIT, "failed"))
+                reads = self.check_reads()[start:]
+                self.assertTrue(reads)
+                self.assertEqual({self.account_of(c) for c in reads},
+                                 {account})
+
+    def test_plain_text_names_the_commit_it_read(self) -> None:
+        self.close_pr()
+        self.seed(self.failing(), MERGE_COMMIT)
+        command = [sys.executable, "-m", "agent_squad", "pr", "checks",
+                   "--pr", "1"]
+        at_merge = self.f.run([*command, "--merge-commit"], cwd=self.f.repo)
+        self.assertEqual(at_merge.returncode, 0, at_merge.stderr)
+        self.assertEqual(at_merge.stdout.splitlines()[0],
+                         f"CI failed: 1 checks at merge commit {MERGE_COMMIT}")
+        at_head = self.f.run(command, cwd=self.f.repo)
+        self.assertEqual(at_head.returncode, 0, at_head.stderr)
+        self.assertEqual(at_head.stdout.splitlines()[0],
+                         f"CI none: 0 checks at {self.head}")
+
 
 class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
     fixture = ForgeFixture
@@ -239,9 +398,25 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
                      or "/actions/runs" in c["arguments"][1]
                      or graphql_check_read(c["body"]))]
 
+    def pull_reads(self) -> list:
+        return [c for c in self.f.read_model()["calls"]
+                if c["arguments"][:1] == ["api"]
+                and c["arguments"][1].endswith("/pulls/1")]
+
     @staticmethod
     def account_of(call: dict) -> str:
         return call["account"]
+
+    def test_merge_commit_of_an_unmerged_record_is_refused(self) -> None:
+        # GitHub reports a merge commit for a PR closed without merging.
+        self.close_pr(merged=False)
+        with patch.dict(os.environ, self.f.env, clear=True):
+            repository = load_initialized_repository(self.f.repo)
+            pr = make_forge(repository, "implementer").pr(1)
+        self.assertEqual((pr.merged, pr.merge_commit), (False, MERGE_COMMIT))
+        start = len(self.check_reads())
+        self.assertIn("not merged", self.at_merge_commit(expected=4)["error"])
+        self.assertEqual(self.check_reads()[start:], [])
 
     def test_each_wait_poll_reads_the_checks_then_the_head(self) -> None:
         # One checks query, then the PR record; never a snapshot (#149).
@@ -383,9 +558,32 @@ class ForgejoCheckTests(CheckFixtureMixin, unittest.TestCase):
         return [c for c in self.f.read_model()["calls"]
                 if "/commits/" in c["path"]]
 
+    def pull_reads(self) -> list:
+        return [c for c in self.f.read_model()["calls"]
+                if c["path"].split("?")[0].endswith("/pulls/1")]
+
     @staticmethod
     def account_of(call: dict) -> str:
         return call["Authorization"].removeprefix("token fake-token-")
+
+    def test_merge_commit_rows_are_reported_as_the_forge_gives_them(
+        self,
+    ) -> None:
+        # Forgejo names the event inside the check, so nothing filters by it.
+        self.close_pr()
+        self.seed([
+            forgejo_status("Tests / unit (push)", "success"),
+            forgejo_status("Deploy / deploy (push)", "failure"),
+            forgejo_status("Tests / unit (schedule)", "pending"),
+        ], MERGE_COMMIT)
+        result = self.at_merge_commit()
+        self.assertEqual(result["summary"], "failed")
+        self.assertEqual(
+            sorted(c["name"] for c in result["checks"]),
+            ["Deploy / deploy (push)", "Tests / unit (push)",
+             "Tests / unit (schedule)"],
+        )
+        self.assertEqual({c["event"] for c in result["checks"]}, {None})
 
     def test_statuses_are_reported_with_their_creator(self) -> None:
         self.seed([
