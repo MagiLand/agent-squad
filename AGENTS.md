@@ -11,11 +11,11 @@ Implementation should follow the specification's focused increments. Production 
 Preserve these repository-level commands:
 
 - `make venv` — create `.venv` with Python 3.11, setuptools, and the pinned pycodestyle using `uv`; the other targets then use its interpreter.
-- `make test` — run the deterministic automated suite.
+- `make test` — run the deterministic automated suite, each test file in its own process and several at a time; `make test JOBS=<n>` sets how many (default: the CPU count).
 - `make lint` — check PEP 8 with pycodestyle.
 - `make smoke` — exercise the self-contained disposable-repository workflow.
 - `make doctor` — check local Git, filesystem, and Herdr prerequisites.
-- `python -m unittest discover -s tests` — run the standard-library test suite directly.
+- `python -m unittest discover -s tests` — run the standard-library test suite directly, serially in one process.
 
 Never report a command as passing until its target exists and the command has run successfully.
 

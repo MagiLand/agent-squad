@@ -450,6 +450,14 @@ pycodestyle version that CI pins for `make lint`, which checks PEP 8. When
 `.venv` exists, the other targets use its interpreter; set `PYTHON` to choose
 another one.
 
+`make test` runs each `test_*.py` file under `tests/` in its own
+`python -m unittest` process, as many at a time as the machine has CPUs;
+`make test JOBS=<n>` sets that number, and `JOBS=1` runs one file at a time.
+It prints a line for each file as it finishes, the complete output of every
+failed file, and a summary in unittest's `Ran <n> tests in <s>s` form.
+`python -m unittest discover -s tests` runs the same tests serially in one
+process.
+
 The automated suite runs the twelve-step smoke scenario twice, on fake GitHub
 and on a loopback fake Forgejo server, each with two accounts. Both use
 temporary repositories and fake Herdr; they never call models or a real forge.

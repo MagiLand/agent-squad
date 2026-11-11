@@ -15,6 +15,10 @@ python3 scripts/run-smoke-tests --json
 
 `make test` runs the standard-library unittest suite, including the smoke
 scenario and a second invocation from a source export without `.git`.
+It runs each test file in its own process through `scripts/run-test-files`,
+at most `JOBS` at a time (`make test JOBS=<n>`; the default is the CPU count),
+and ends with a summary in unittest's form.
+`python -m unittest discover -s tests` is the serial run of the same tests.
 It covers convention parsing, Git identity, gates, publication recovery,
 Reviewer ownership and cleanup, skills, packaging, and doctor diagnostics.
 The release checks compare the CLI command surface with the specification
