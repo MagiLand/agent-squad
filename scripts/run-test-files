@@ -15,6 +15,8 @@ import tempfile
 import time
 
 # The end of a unittest report: the count line, a blank line and the result.
+# unittest writes its report to standard error, so a test's own output on
+# standard output, even a whole unittest report it prints, cannot replace it.
 REPORT = re.compile(
     r"^Ran (\d+) tests? in (\d+\.\d+)s\n\n"
     r"((?:OK|FAILED|NO TESTS RAN)(?: \(([^\n]*)\))?)$",
@@ -33,7 +35,8 @@ class FileResult:
 
     path: str
     returncode: int
-    output: bytes
+    stdout: bytes
+    stderr: bytes
     tests: int = 0
     seconds: str | None = None
     result: str | None = None
@@ -75,13 +78,15 @@ def exit_text(returncode: int) -> str:
         return f"killed by signal {-returncode}"
 
 
-def file_result(path: str, returncode: int, output: bytes) -> FileResult:
-    reports = list(REPORT.finditer(output.decode("utf-8", "replace")))
+def file_result(path: str, returncode: int, stdout: bytes,
+                stderr: bytes) -> FileResult:
+    # unittest's own report comes last; a test may write a report earlier.
+    reports = list(REPORT.finditer(stderr.decode("utf-8", "replace")))
     if not reports:
-        return FileResult(path, returncode, output)
+        return FileResult(path, returncode, stdout, stderr)
     report = reports[-1]
-    return FileResult(path, returncode, output, int(report[1]), report[2],
-                      report[3], report[4])
+    return FileResult(path, returncode, stdout, stderr, int(report[1]),
+                      report[2], report[3], report[4])
 
 
 def added_counts(results: list[FileResult]) -> str:
@@ -155,19 +160,22 @@ def main() -> int:
             while (pending or running) and not stop:
                 while pending and len(running) < args.jobs and not stop:
                     path = pending.pop(0)
-                    log = Path(capture) / f"{len(files) - len(pending)}.log"
-                    with log.open("wb") as output:
+                    log = Path(capture) / str(len(files) - len(pending))
+                    with log.with_suffix(".out").open("wb") as stdout, \
+                            log.with_suffix(".err").open("wb") as stderr:
                         process = subprocess.Popen(
                             [sys.executable, "-m", "unittest", path],
                             cwd=root, env=env, stdin=subprocess.DEVNULL,
-                            stdout=output, stderr=subprocess.STDOUT,
+                            stdout=stdout, stderr=stderr,
                             start_new_session=True, shell=False)
                     running[process] = (path, log)
                 for process in [process for process in running
                                 if process.poll() is not None]:
                     path, log = running.pop(process)
-                    result = file_result(path, process.returncode,
-                                         log.read_bytes())
+                    result = file_result(
+                        path, process.returncode,
+                        log.with_suffix(".out").read_bytes(),
+                        log.with_suffix(".err").read_bytes())
                     results.append(result)
                     print(result.line(), flush=True)
                 if running:
@@ -189,11 +197,16 @@ def main() -> int:
     failed = sorted((result for result in results if not result.passed),
                     key=lambda result: result.path)
     for result in failed:
-        print(f"{'#' * 20} Output of {result.path} {'#' * 20}", flush=True)
-        sys.stdout.buffer.write(result.output or b"(no output)\n")
-        if not result.output.endswith(b"\n"):
-            sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
+        for stream, output in (("Standard output", result.stdout),
+                               ("Standard error", result.stderr)):
+            print(f"{'#' * 20} {stream} of {result.path} {'#' * 20}",
+                  flush=True)
+            if not output:
+                output = b"(empty)\n"
+            elif not output.endswith(b"\n"):
+                output += b"\n"
+            sys.stdout.buffer.write(output)
+            sys.stdout.buffer.flush()
     print(RULE)
     print(ran(sum(result.tests for result in results), seconds))
     print()

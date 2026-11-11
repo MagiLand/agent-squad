@@ -27,6 +27,9 @@ RUNNER = "scripts/run-test-files"
 DEADLINE = 120.0
 FILE_LINE = re.compile(r"^(tests/\S+\.py: .*)$", re.MULTILINE)
 SECONDS = re.compile(r" in \d+\.\d{3}s")
+# The line above each captured stream of a failed file.
+STREAM_HEADER = re.compile(
+    r"^#{20} Standard (output|error) of (\S+) #{20}$", re.MULTILINE)
 STATE_DIRECTORIES = ("ran", "running", "started", "most", "finished")
 
 # Every fixture module records that it ran. hold() keeps a test running until
@@ -64,8 +67,48 @@ def hold(peers, files):
 '''
 
 
+# A whole unittest report of five tests, one skipped, that a fixture test
+# can print. The test case is local, so the fixture's loader never finds it.
+NESTED_REPORT = '''
+import atexit
+import io
+import sys
+
+
+def nested_report():
+    class Nested(unittest.TestCase):
+        def test_a(self):
+            pass
+
+        def test_b(self):
+            pass
+
+        def test_c(self):
+            pass
+
+        def test_d(self):
+            pass
+
+        @unittest.skip("nested")
+        def test_e(self):
+            pass
+
+    stream = io.StringIO()
+    unittest.TextTestRunner(stream=stream).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(Nested))
+    return stream.getvalue()
+'''
+
+
 def normalized(text: str) -> str:
     return SECONDS.sub(" in Xs", text)
+
+
+def printed_streams(output: str) -> dict[tuple[str, str], str]:
+    """The streams printed for failed files, by path and stream name."""
+    parts = STREAM_HEADER.split(output.rsplit(f"{'-' * 70}\nRan ", 1)[0])
+    return {(parts[index + 1], parts[index]): parts[index + 2][1:]
+            for index in range(1, len(parts), 3)}
 
 
 def file_lines(output: str) -> list[str]:
@@ -163,9 +206,38 @@ class FileRunnerTests(unittest.TestCase):
         self.assert_summary(result.stdout, "Ran 6 tests in Xs", "OK")
         self.assertEqual(self.ran(), {
             "tests.test_one", "tests.test_two", "tests.sub.test_three"})
-        self.assertNotIn("Output of", result.stdout)
+        self.assertIsNone(STREAM_HEADER.search(result.stdout))
         self.assertEqual(self.checkout_files(), before)
         self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_reads_each_files_result_from_its_own_unittest_report(
+        self,
+    ) -> None:
+        # The fixture prints a nested report to standard output, where it
+        # follows unittest's own report, and writes one to standard error
+        # before unittest's own report.
+        self.write_module(
+            "tests/test_nested.py",
+            "print(nested_report(), end='')",
+            "sys.stderr.write(nested_report())",
+            "atexit.register(sys.stdout.write, nested_report())",
+            top=NESTED_REPORT)
+        self.write_module("tests/test_plain.py", "pass")
+
+        result = self.run_files()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(file_lines(result.stdout), [
+            "tests/test_nested.py: Ran 3 tests in Xs, OK",
+            "tests/test_plain.py: Ran 1 test in Xs, OK",
+        ])
+        self.assert_summary(result.stdout, "Ran 4 tests in Xs", "OK")
+        alone = subprocess.run(
+            [sys.executable, "-m", "unittest", "tests/test_nested.py"],
+            cwd=self.root, env=self.environment(), text=True,
+            capture_output=True, timeout=DEADLINE, shell=False)
+        self.assertEqual(alone.stdout.count("Ran 5 tests in "), 2)
+        self.assertEqual(alone.stderr.count("Ran 5 tests in "), 1)
 
     def test_runs_files_of_the_same_name_in_different_folders(self) -> None:
         self.write_module("tests/unit/test_same.py", "pass")
@@ -202,20 +274,22 @@ class FileRunnerTests(unittest.TestCase):
             "tests/test_failing.py: Ran 1 test in Xs, FAILED (failures=1)",
             "tests/test_passing.py: Ran 1 test in Xs, OK",
         ])
-        header = f"{'#' * 20} Output of tests/test_failing.py {'#' * 20}\n"
-        self.assertEqual(result.stdout.count(header), 1, result.stdout)
-        printed = result.stdout.split(header, 1)[1].rsplit(
-            f"{'-' * 70}\nRan 3 tests in ", 1)[0]
+        self.assertEqual(STREAM_HEADER.findall(result.stdout), [
+            ("output", "tests/test_failing.py"),
+            ("error", "tests/test_failing.py"),
+        ])
         alone = subprocess.run(
             [sys.executable, "-m", "unittest", "tests/test_failing.py"],
             cwd=self.root, env=self.environment(), text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=DEADLINE, shell=False)
-        self.assertEqual(normalized(printed), normalized(alone.stdout))
-        self.assertIn("failing file output", printed)
-        self.assertIn("AssertionError: fixture failure", printed)
+            capture_output=True, timeout=DEADLINE, shell=False)
+        self.assertEqual(alone.stdout, "failing file output\n")
+        self.assertIn("AssertionError: fixture failure", alone.stderr)
+        self.assertEqual(
+            {key: normalized(text)
+             for key, text in printed_streams(result.stdout).items()},
+            {("tests/test_failing.py", "output"): alone.stdout,
+             ("tests/test_failing.py", "error"): normalized(alone.stderr)})
         self.assertNotIn("passing file output", result.stdout)
-        self.assertEqual(result.stdout.count("Output of"), 1)
         self.assert_summary(
             result.stdout, "Ran 3 tests in Xs",
             "FAILED (1 of 3 files): tests/test_failing.py")
@@ -226,7 +300,7 @@ class FileRunnerTests(unittest.TestCase):
         self.write_module("tests/test_exits.py", "pass", top="os._exit(0)")
         self.write_module(
             "tests/test_crashes.py", "pass",
-            top="print('partial output', flush=True)\nos._exit(3)")
+            top="print('partial output', end='', flush=True)\nos._exit(3)")
         self.write_module("tests/test_passing.py", "pass")
 
         result = self.run_files()
@@ -237,12 +311,13 @@ class FileRunnerTests(unittest.TestCase):
             "tests/test_exits.py: exit status 0 without a unittest result",
             "tests/test_passing.py: Ran 1 test in Xs, OK",
         ])
-        self.assertIn(
-            f"{'#' * 20} Output of tests/test_crashes.py {'#' * 20}\n"
-            "partial output\n", result.stdout)
-        self.assertIn(
-            f"{'#' * 20} Output of tests/test_exits.py {'#' * 20}\n"
-            "(no output)\n", result.stdout)
+        # The runner ends an unterminated stream with a newline.
+        self.assertEqual(printed_streams(result.stdout), {
+            ("tests/test_crashes.py", "output"): "partial output\n",
+            ("tests/test_crashes.py", "error"): "(empty)\n",
+            ("tests/test_exits.py", "output"): "(empty)\n",
+            ("tests/test_exits.py", "error"): "(empty)\n",
+        })
         self.assert_summary(
             result.stdout, "Ran 1 test in Xs",
             "FAILED (2 of 3 files): tests/test_crashes.py, "
@@ -438,7 +513,7 @@ class FileRunnerTests(unittest.TestCase):
 
             class Process:
                 def __init__(self, arguments: list[str], **options) -> None:
-                    options["stdout"].write(b"Ran 1 test in 0.001s\n\nOK\n")
+                    options["stderr"].write(b"Ran 1 test in 0.001s\n\nOK\n")
                     live.append(self)
                     most.append(len(live))
                     self.polls, self.returncode, self.pid = 3, None, 0
