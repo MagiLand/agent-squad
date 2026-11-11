@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Run every test file under tests/ in its own unittest process,
+several at a time, and report one line per file and a summary."""
+
+import argparse
+from collections import Counter
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+# The end of a unittest report: the count line, a blank line and the result.
+# unittest writes its report to standard error, so a test's own output on
+# standard output, even a whole unittest report it prints, cannot replace it.
+REPORT = re.compile(
+    r"^Ran (\d+) tests? in (\d+\.\d+)s\n\n"
+    r"((?:OK|FAILED|NO TESTS RAN)(?: \(([^\n]*)\))?)$",
+    re.MULTILINE)
+# The order in which unittest lists the counts on its result line.
+COUNT_ORDER = ("failures", "errors", "skipped", "expected failures",
+               "unexpected successes")
+POLL_SECONDS = 0.05
+STOP_GRACE_SECONDS = 5.0
+RULE = "-" * 70
+
+
+@dataclass(frozen=True)
+class FileResult:
+    """What one test file's process reported when it ended."""
+
+    path: str
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+    tests: int = 0
+    seconds: str | None = None
+    result: str | None = None
+    counts: str | None = None
+
+    @property
+    def passed(self) -> bool:
+        return (self.returncode == 0 and self.result is not None
+                and self.result.startswith("OK"))
+
+    def line(self) -> str:
+        if self.result is None:
+            return (f"{self.path}: {exit_text(self.returncode)} "
+                    "without a unittest result")
+        line = f"{self.path}: {ran(self.tests, self.seconds)}, {self.result}"
+        expected = 0 if self.result.startswith("OK") else 1
+        if self.returncode != expected:
+            line += f" ({exit_text(self.returncode)})"
+        return line
+
+
+def job_limit(text: str) -> int:
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, not {text!r}")
+    return int(text)
+
+
+def ran(tests: int, seconds: str | None) -> str:
+    return f"Ran {tests} test{'' if tests == 1 else 's'} in {seconds}s"
+
+
+def exit_text(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exit status {returncode}"
+    try:
+        return f"killed by {signal.Signals(-returncode).name}"
+    except ValueError:
+        return f"killed by signal {-returncode}"
+
+
+def file_result(path: str, returncode: int, stdout: bytes,
+                stderr: bytes) -> FileResult:
+    # unittest's own report comes last; a test may write a report earlier.
+    reports = list(REPORT.finditer(stderr.decode("utf-8", "replace")))
+    if not reports:
+        return FileResult(path, returncode, stdout, stderr)
+    report = reports[-1]
+    return FileResult(path, returncode, stdout, stderr, int(report[1]),
+                      report[2], report[3], report[4])
+
+
+def added_counts(results: list[FileResult]) -> str:
+    """Add up the counts of the result lines, such as skipped=1."""
+    totals = Counter()
+    for result in results:
+        for item in (result.counts or "").split(", "):
+            name, _, value = item.rpartition("=")
+            if name and value.isdigit():
+                totals[name] += int(value)
+    names = sorted(totals, key=lambda name: (
+        COUNT_ORDER.index(name) if name in COUNT_ORDER else len(COUNT_ORDER),
+        name))
+    return ", ".join(f"{name}={totals[name]}" for name in names)
+
+
+def stop_processes(running: dict[subprocess.Popen, tuple[str, Path]]) -> None:
+    """Stop each test process together with the processes it started."""
+    for process in running:
+        signal_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE_SECONDS
+    for process in running:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            signal_group(process, signal.SIGKILL)
+            process.wait()
+
+
+def signal_group(process: subprocess.Popen, signum: int) -> None:
+    # Each test process leads its own session, so its group id is its pid.
+    # The process is not reaped yet, so that id cannot have been reused.
+    # When only the exited, unreaped leader is left, macOS answers EPERM.
+    try:
+        os.killpg(process.pid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--jobs", type=job_limit, default=os.cpu_count() or 1,
+        help="the most test files that run at the same time "
+             "(default: the number of CPUs)")
+    args = parser.parse_args()
+    files = sorted(
+        path.relative_to(root).as_posix()
+        for path in (root / "tests").rglob("test_*.py") if path.is_file())
+    if not files:
+        print(f"No test_*.py file under {root / 'tests'}", file=sys.stderr)
+        return 1
+    src = str(root / "src")
+    existing = os.environ.get("PYTHONPATH")
+    env = {**os.environ, "PYTHONPATH": (
+        src if not existing else src + os.pathsep + existing)}
+
+    # The handlers only record the signal; the loop below acts on it, so a
+    # signal can never come between starting a process and recording it.
+    stop: list[int] = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, lambda signum, frame: stop.append(signum))
+
+    pending = list(files)
+    running: dict[subprocess.Popen, tuple[str, Path]] = {}
+    results: list[FileResult] = []
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="run-test-files-") as capture:
+        try:
+            while (pending or running) and not stop:
+                while pending and len(running) < args.jobs and not stop:
+                    path = pending.pop(0)
+                    log = Path(capture) / str(len(files) - len(pending))
+                    with log.with_suffix(".out").open("wb") as stdout, \
+                            log.with_suffix(".err").open("wb") as stderr:
+                        process = subprocess.Popen(
+                            [sys.executable, "-m", "unittest", path],
+                            cwd=root, env=env, stdin=subprocess.DEVNULL,
+                            stdout=stdout, stderr=stderr,
+                            start_new_session=True, shell=False)
+                    running[process] = (path, log)
+                for process in [process for process in running
+                                if process.poll() is not None]:
+                    path, log = running.pop(process)
+                    result = file_result(
+                        path, process.returncode,
+                        log.with_suffix(".out").read_bytes(),
+                        log.with_suffix(".err").read_bytes())
+                    results.append(result)
+                    print(result.line(), flush=True)
+                if running:
+                    time.sleep(POLL_SECONDS)
+        finally:
+            stopped = len(running)
+            stop_processes(running)
+    seconds = f"{time.monotonic() - started:.3f}"
+
+    if stop:
+        print(f"Stopped by {signal.Signals(stop[0]).name}; test files "
+              f"stopped: {stopped}, not started: {len(pending)}",
+              file=sys.stderr, flush=True)
+        # Die by the same signal, so a calling shell or make sees it.
+        signal.signal(stop[0], signal.SIG_DFL)
+        os.kill(os.getpid(), stop[0])
+        return 128 + stop[0]
+
+    failed = sorted((result for result in results if not result.passed),
+                    key=lambda result: result.path)
+    for result in failed:
+        for stream, output in (("Standard output", result.stdout),
+                               ("Standard error", result.stderr)):
+            print(f"{'#' * 20} {stream} of {result.path} {'#' * 20}",
+                  flush=True)
+            if not output:
+                output = b"(empty)\n"
+            elif not output.endswith(b"\n"):
+                output += b"\n"
+            sys.stdout.buffer.write(output)
+            sys.stdout.buffer.flush()
+    print(RULE)
+    print(ran(sum(result.tests for result in results), seconds))
+    print()
+    if failed:
+        print(f"FAILED ({len(failed)} of {len(results)} files): "
+              + ", ".join(result.path for result in failed))
+        return 1
+    counts = added_counts(results)
+    print(f"OK ({counts})" if counts else "OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

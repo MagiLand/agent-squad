@@ -4,10 +4,12 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 # "#!/usr/bin/env python3" resolves to that interpreter, not a shim.
 TEST_PATH = $(if $(findstring /,$(PYTHON)),PATH="$(abspath $(dir $(PYTHON))):$$PATH" )
 
-# test stays the first target, so a plain make still runs the suite.
+# test stays the first target, so a plain make still runs the suite. It runs
+# each test file in its own process, at most JOBS at a time (default: the CPU
+# count); python -m unittest discover -s tests is the serial run.
 .PHONY: test smoke doctor lint venv
 test:
-	$(TEST_PATH)PYTHONPATH="$(CURDIR)/src" $(PYTHON) -m unittest discover -s tests
+	$(TEST_PATH)$(PYTHON) scripts/run-test-files$(if $(JOBS), --jobs $(JOBS))
 
 smoke:
 	$(TEST_PATH)$(PYTHON) scripts/run-smoke-tests
@@ -19,7 +21,8 @@ doctor:
 # without an extension are named explicitly.
 lint:
 	$(PYTHON) -m pycodestyle src tests scripts scripts/measure-cli-processes \
-		scripts/run-smoke-tests scripts/run-test-group tests/fixtures/gh
+		scripts/run-smoke-tests scripts/run-test-files scripts/run-test-group \
+		tests/fixtures/gh
 
 venv:
 	@command -v uv >/dev/null 2>&1 || { echo "make venv needs uv, which is not on PATH" >&2; exit 1; }
