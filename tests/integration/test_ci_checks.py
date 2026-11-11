@@ -407,6 +407,17 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
     def account_of(call: dict) -> str:
         return call["account"]
 
+    def test_merge_commit_of_an_unmerged_record_is_refused(self) -> None:
+        # GitHub reports a merge commit for a PR closed without merging.
+        self.close_pr(merged=False)
+        with patch.dict(os.environ, self.f.env, clear=True):
+            repository = load_initialized_repository(self.f.repo)
+            pr = make_forge(repository, "implementer").pr(1)
+        self.assertEqual((pr.merged, pr.merge_commit), (False, MERGE_COMMIT))
+        start = len(self.check_reads())
+        self.assertIn("not merged", self.at_merge_commit(expected=4)["error"])
+        self.assertEqual(self.check_reads()[start:], [])
+
     def test_each_wait_poll_reads_the_checks_then_the_head(self) -> None:
         # One checks query, then the PR record; never a snapshot (#149).
         self.sequence(self.pending(), self.passing())
