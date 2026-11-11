@@ -39,7 +39,7 @@ Those 11 findings carry the forge categories (§7.4) `spec` 6, `docs` 4, and `co
 
 All five blocking findings asked whether a statement was true, supported, recorded, or present. None was a preference about the design.
 
-#67, #70, and #75 added and revised the `v0.6.0` plan. #139 calls them earlier than the tagged protocol, but #62, opened before them, carries a tagged review; what can be stated is that these three carry none. `pr reviews` and `status` return no inline comment for them. The `## Triage` comment on #139 records 2, 1, and 10 inline comments on them; this document neither recounted nor classified those comments. #41's review replies do not parse under the current grammar (`pr reviews --pr 41` reports five malformed lines), and #1 has no review.
+#67, #70, and #75 added and revised the `v0.6.0` plan. #139 calls them earlier than the tagged protocol, but #62, opened before them, carries a tagged review; what can be stated is that these three carry none. `pr reviews` and `status` return no inline comment for them. The `## Triage` comment on #139 records 2, 1, and 10 inline comments on them. Those comments are unclassified: the Developer excluded them from this analysis by the Task amendment on #160. #41's review replies do not parse under the current grammar (`pr reviews --pr 41` reports five malformed lines), and #1 has no review.
 
 The evidence has a limit: #135, #140, and #141 were approved with no findings, and nothing records whether those documents had no defects or whether defects went unseen.
 
@@ -159,7 +159,6 @@ Chaining and second perspectives are not designed here. Designing them would be 
 2. Should a `stale` or absent brief check stop the Implementer, or only be reported? This document recommends reporting only until the trial shows the check's value, because stopping would change §7.2's readiness conditions.
 3. Does the label move need a verified author? `issue view` reports labels without actor or time (§10.2), so the CLI cannot show who moved one. The writer uses the Developer's account, so only its instructions keep it from moving the label by other means.
 4. Should every agent-written brief get a check, or only those above some size? Each check costs one agent session, and section 2 shows no defect traced to a brief so far.
-5. Should the 13 inline comments on #67, #70, and #75 be classified? That needs a forge read the loop's roles do not have.
 
 ## 9. Implementation issues for the next release
 
