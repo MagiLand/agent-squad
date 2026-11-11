@@ -58,7 +58,8 @@ gh issue create --repo MagiLand/agent-squad --milestone "v$version" \
   --title "Release v$version" --body-file "$scratch/release-issue.md"
 ```
 
-The issue can be filed at any time during the milestone.
+File the issue once every other issue in the milestone is closed, and triage
+it straight away.
 
 ### Triage: recording the lists
 
