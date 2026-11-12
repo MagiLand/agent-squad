@@ -684,7 +684,8 @@ class Forgejo:
     def milestones(self) -> tuple[Milestone, ...]:
         return tuple(
             parse_milestone(row, "id")
-            for row in self._all_pages(f"{self.prefix}/milestones?state=all")
+            # Without ``state`` F16 lists open and closed milestones.
+            for row in self._all_pages(f"{self.prefix}/milestones")
         )
 
     def issues(self, query: IssueQuery) -> list[ListedIssue]:

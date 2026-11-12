@@ -1272,9 +1272,9 @@ class IssueListingTests(unittest.TestCase):
             Milestone(3, "v1", "open"), Milestone(4, "v1", "closed"),
         ))
         self.assertEqual(self.paths(), [
-            "/repos/owner/repo/milestones?state=all&limit=50&page=1",
-            "/repos/owner/repo/milestones?state=all&limit=50&page=2",
-            "/repos/owner/repo/milestones?state=all&limit=50&page=3",
+            "/repos/owner/repo/milestones?limit=50&page=1",
+            "/repos/owner/repo/milestones?limit=50&page=2",
+            "/repos/owner/repo/milestones?limit=50&page=3",
         ])
         self.forge.api.side_effect = [None]
         with self.assertRaisesRegex(ForgeError, "must be an array"):

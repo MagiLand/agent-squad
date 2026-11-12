@@ -113,6 +113,12 @@ class IssueListContract:
         self.assertEqual(rows[5]["closed_by"], [])
         self.assertIsNone(rows[5]["state_reason"])
 
+    def test_a_reopened_issue_lists_both_closing_prs(self) -> None:
+        result = self.listed("--milestone", "v1.1", "--state", "closed")
+        self.assertEqual(self.numbers(result), [6])
+        self.assertEqual(result["issues"][0]["closed_by"],
+                         [closer(7), closer(8)])
+
     def test_labels_and_state_narrow_on_each_record(self) -> None:
         for options, numbers in (
             (("--milestone", "v1", "--state", "closed", "--label", "bug"),
@@ -272,9 +278,8 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
         self,
     ) -> None:
         self.f.settings(max_response_items=2)
-        result = self.listed("--milestone", "v1", "--label", "bug",
-                             "--state", "closed")
-        self.assertEqual(self.numbers(result), [2, 3])
+        result = self.listed("--milestone", "v1", "--state", "closed")
+        self.assertEqual(self.numbers(result), [2, 3, 4])
         listing = [urlsplit(r) for r in self.sent
                    if urlsplit(r).path == f"{REPO}/issues"]
         self.assertTrue(listing)
@@ -290,8 +295,17 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
         timelines = [r for r in self.sent if "/timeline" in r]
         self.assertEqual(
             sorted({urlsplit(r).path for r in timelines}),
-            [f"{REPO}/issues/2/timeline", f"{REPO}/issues/3/timeline"],
+            [f"{REPO}/issues/{n}/timeline" for n in (2, 3, 4)],
         )
+
+    def test_a_label_lost_to_a_short_label_page_is_refused(self) -> None:
+        # The label read predates #164 and stops at a short page, as the
+        # triage observed on F16; the result is an error, never a list.
+        self.f.settings(max_response_items=2)
+        result = self.listed("--label", "bug", expected=1)
+        self.assertTrue(result["error"].startswith(
+            "error: repository has no label named bug"))
+        self.assertFalse([r for r in self.sent if "/issues" in r])
 
     def test_open_issues_get_no_timeline_read(self) -> None:
         result = self.listed("--milestone", "v1", "--state", "open")

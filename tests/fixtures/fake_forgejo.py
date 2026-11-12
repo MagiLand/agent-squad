@@ -361,7 +361,7 @@ class Handler(BaseHTTPRequestHandler):
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "labels":
-            return 200, self.paged(model.get("labels", []), query)
+            return 200, self.paged(model.get("labels", []), query, settings)
         if parts[3] == "milestones" and number is None:
             # F16 lists every milestone when no state is given.
             state = query.get("state", ["all"])[0]
@@ -426,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = [pr_wire(p, self.branch(model, p["base"]["ref"]))
                     for p in prs.values()
                     if query.get("state", ["all"])[0] in ("all", p["state"])]
-            return 200, self.paged(rows, query)
+            return 200, self.paged(rows, query, settings)
         if number not in prs:
             return 404, {"message": "pull request not found"}
         pr = prs[number]
@@ -506,7 +506,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows.insert(
                     0, recording("015-setup-requested-reviews.json")[0],
                 )
-            return 200, self.paged(rows, query)
+            return 200, self.paged(rows, query, settings)
         review_id = int(parts[6])
         review = next((r for r in reviews if r["id"] == review_id), None)
         if review is None:
@@ -786,8 +786,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def paged(rows: list, query: dict, settings: dict | None = None) -> list:
-        # A route given the settings caps limit at max_response_items, as
-        # F16 does (default 50); the cap is set only to test short pages.
+        # Every list caps limit at max_response_items, as F16 does
+        # (default 50); the cap is set only to test short pages.
         size = int(query.get("limit", ["50"])[0])
         cap = (settings or {}).get("max_response_items")
         if cap is not None:
