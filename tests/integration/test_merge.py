@@ -182,6 +182,7 @@ class MergeTests(unittest.TestCase):
                           refused["error"])
             self.assertTrue(f.worktree.exists())
             self.assertFalse(f.read_model()["prs"]["1"]["merged"])
+        f.decision(kind="hold-release", body="> Hold released.")
         merged = self.merge("--accept-merge-hold")
         self.assertTrue(merged["merged"])
         self.assertEqual(merged["integration"], "verified by ancestry")

@@ -221,6 +221,56 @@ class DeveloperDecisionSkillTests(unittest.TestCase):
                 self.assertIn(rule, implementer)
 
 
+class DecisionRecordSkillTests(unittest.TestCase):
+    """#147: kinds, recommendations, and the recorded hold release."""
+
+    def test_implementer_names_kind_recommendation_and_records(self) -> None:
+        implementer = " ".join(
+            packaged_skill("squad-implementer").decode().split())
+        for rule in (
+            "When you ask the Developer for a decision, name exactly one "
+            "recommended option.",
+            "Every `decision post` except a standing instruction or "
+            "withdrawal records whether the Developer followed it, with "
+            "`--recommendation`:",
+            "A decision on a finding (`--finding REV-<n>`) takes no "
+            "`--kind`. A general decision (`--finding none`) names its kind "
+            "with `--kind`:",
+            "Right after `pr create --task` with a drafted Task the Developer "
+            "approved, record that approval with `agent-squad decision post "
+            "--as implementer --pr <PR> --finding none --kind task-approval "
+            "--recommendation <value> --body <file>`, whose body file quotes "
+            "the Developer's approval;",
+            "Before that `pr merge`, record the release with `agent-squad "
+            "decision post --as implementer --pr <PR> --finding none --kind "
+            "hold-release --recommendation <value> --body <file>`, whose body "
+            "file quotes the Developer's release.",
+            "Record any continuation with `decision post --finding none "
+            "--kind continuation` before launching again.",
+            "`task-approval` and `hold-release` are records: like a standing "
+            "instruction, neither lifts a stop nor settles `needs_decision`.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, implementer)
+        for kind in ("task-approval", "task-amendment", "continuation",
+                     "budget", "hold-release", "answer"):
+            with self.subTest(kind=kind):
+                self.assertIn(f"- `{kind}`: ", implementer)
+        for value in ("followed", "changed", "none"):
+            with self.subTest(recommendation=value):
+                self.assertIn(f"- `{value}`: ", implementer)
+
+    def test_reviewer_sets_records_apart_from_design_decisions(self) -> None:
+        reviewer = " ".join(
+            packaged_skill("squad-reviewer").decode().split())
+        self.assertIn(
+            "Decisions whose `merge_directive` is `record` or `withdraw` are "
+            "merge instructions, and decisions whose `kind` is "
+            "`task-approval` or `hold-release` are records; none of them is "
+            "a design decision, lifts a stop, or settles `needs_decision`.",
+            reviewer)
+
+
 class ForgeWordingSkillTests(unittest.TestCase):
     def test_forge_neutral_wording_is_packaged(self) -> None:
         implementer = packaged_skill("squad-implementer").decode()

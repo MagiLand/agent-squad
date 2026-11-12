@@ -34,6 +34,7 @@
     "tests/unit/test_skills.py",
     "tests/unit/test_validation.py",
     "tests/integration/test_merge.py",
+    "tests/integration/test_decision_records.py",
     "tests/integration/test_init_doctor.py",
     "tests/unit/test_forgejo.py"
   ],
