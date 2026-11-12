@@ -54,8 +54,20 @@ def milestone_wire(row: dict | None) -> dict | None:
             "open_issues": 0, "closed_issues": 0}
 
 
+# When a closed issue of the model names no ``closed_at`` (#164).
+CLOSED_AT = "2026-01-02T00:00:00Z"
+
+
+def closed_at(row: dict) -> str | None:
+    """F16 serves ``closed_at`` for a closed issue, null when the close
+    time was never recorded, and null for an open issue."""
+    if row.get("state") != "closed":
+        return None
+    return row.get("closed_at", CLOSED_AT)
+
+
 def issue_wire(model: dict, row: dict) -> dict:
-    return {**row, "milestone": milestone_wire(
+    return {**row, "closed_at": closed_at(row), "milestone": milestone_wire(
         find_milestone(model, row.get("milestone")))}
 
 
@@ -677,10 +689,14 @@ class Handler(BaseHTTPRequestHandler):
         opens: ``ref_action`` is ``closes`` for a closing keyword and
         ``none`` for a plain reference. The issue's ``linked_prs`` and
         ``referring_prs`` name those pull requests as on the fake gh, and
-        ``timeline_extra`` adds rows of other types. As in F16, the rows are
-        paged before rows marked ``hidden`` are dropped, and a page with no
-        row left is JSON null. ``timeline_refusals`` maps an issue number to
-        the status that refuses the read.
+        ``timeline_extra`` adds rows of other types first. A closed issue's
+        last close follows its ``linked_prs`` as a ``close`` row at its
+        ``closed_at``, which closing writes after it sets ``closed_at``
+        (decision 5 of #164); there is none when ``closed_at`` is null. As
+        in F16, the rows are paged before rows marked ``hidden`` are
+        dropped, and a page with no row left is JSON null.
+        ``timeline_refusals`` maps an issue number to the status that
+        refuses the read.
         """
         settings = model["settings"]
         refused = settings.get("timeline_refusals", {}).get(number)
@@ -689,10 +705,12 @@ class Handler(BaseHTTPRequestHandler):
         if issue is None:
             return 404, {"message": "issue not found"}
         rows = [*issue.get("timeline_extra", [])]
-        for action, key in (("closes", "linked_prs"),
-                            ("none", "referring_prs")):
-            rows += [self.pull_ref(model, ref, action)
-                     for ref in issue.get(key, [])]
+        rows += [self.pull_ref(model, ref, "closes")
+                 for ref in issue.get("linked_prs", [])]
+        if closed_at(issue) is not None:
+            rows.append({"type": "close", "created_at": closed_at(issue)})
+        rows += [self.pull_ref(model, ref, "none")
+                 for ref in issue.get("referring_prs", [])]
         served = [{k: v for k, v in row.items() if k != "hidden"}
                   for row in self.paged(rows, query, settings)
                   if not row.get("hidden")]

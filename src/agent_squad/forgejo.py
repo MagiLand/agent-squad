@@ -185,6 +185,25 @@ def parse_listed_issue(value: object) -> ListedIssue:
     }
 
 
+def instant(value: object, label: str) -> datetime:
+    """An ISO 8601 time with an offset, as an instant."""
+    text = text_value(value, label)
+    try:
+        if not TIMESTAMP.fullmatch(text):
+            raise ValueError
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ForgeError(f"{label} must be ISO 8601 with an offset") from None
+
+
+def close_time(value: object) -> datetime | None:
+    """The time of a timeline row that records a close; null for others."""
+    data = object_value(value, "timeline row")
+    if text_value(data.get("type"), "timeline.type") != "close":
+        return None
+    return instant(data.get("created_at"), "timeline.created_at")
+
+
 def closing_reference(value: object) -> ClosingPullRequest | None:
     """A timeline row's merged closing pull request; null for any other.
 
@@ -703,13 +722,31 @@ class Forgejo:
             if not query.matches(row):
                 continue
             if row["state"] == "closed":
-                row["closed_by"] = self._closed_by(row["number"])
+                # F16 and 17.0.1 serve a null ``closed_at`` for a closed
+                # issue whose close time was never recorded; its links are
+                # then unknown, and no timeline read can show otherwise.
+                closed_at = object_value(value, "issue").get("closed_at")
+                row["closed_by"] = None if closed_at is None else (
+                    self._closed_by(
+                        row["number"], instant(closed_at, "issue.closed_at")
+                    )
+                )
             result.append(row)
         return result
 
-    def _closed_by(self, number: int) -> list[ClosingPullRequest] | None:
-        """Merged pull requests the timeline links as closing the issue;
-        null when the read is refused after the listing was read."""
+    def _closed_by(
+        self, number: int, closed_at: datetime,
+    ) -> list[ClosingPullRequest] | None:
+        """Merged pull requests the timeline links as closing the issue.
+
+        Null, meaning unknown, when the read is refused after the listing
+        was read, or when it ended before the issue's last close (decision
+        5 of #164): F16 and 17.0.1 page the timeline before they drop the
+        rows the reader may not see and serve a page with no row left as
+        JSON null, exactly as they serve the end. The close row is never
+        dropped, and it is written after ``closed_at`` is set, so a read
+        that reached the last close holds one at or after ``closed_at``.
+        """
         try:
             rows = self._all_pages(
                 f"{self.prefix}/issues/{number}/timeline", null_ends=True
@@ -718,9 +755,11 @@ class Forgejo:
             if error.status in DEPENDENCY_REFUSALS:
                 return None
             raise
-        return closing_order(
-            [pr for pr in map(closing_reference, rows) if pr is not None]
-        )
+        found = [pr for pr in map(closing_reference, rows) if pr is not None]
+        closes = [when for when in map(close_time, rows) if when is not None]
+        if not any(when >= closed_at for when in closes):
+            return None
+        return closing_order(found)
 
     def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
         # Creation takes label IDs and silently drops unknown ones (F16).

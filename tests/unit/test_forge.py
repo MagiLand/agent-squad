@@ -1027,14 +1027,42 @@ class IssueListingTests(unittest.TestCase):
         )):
             with self.assertRaisesRegex(ForgeError, 'repeated a cursor'):
                 self.forge.issues(query)
+
+    def test_only_the_closed_listing_asks_for_closing_prs(self) -> None:
+        # PR #167 REV-3: an open issue's closing pull requests are never
+        # asked for, and --state all reads one listing per state.
         with patch.object(self.forge, 'graphql', side_effect=self.listing(
-            page([]),
+            page([listed_node(1, state='OPEN', stateReason=None)], 'o1'),
+            page([]), page([listed_node(2)]),
         )) as gql:
-            self.forge.issues(self.query('all', None, ()))
-        self.assertEqual(gql.call_args.args[1], {
-            'owner': 'org', 'repo': 'repo', 'states': ['OPEN', 'CLOSED'],
-            'cursor': None,
-        })
+            found = self.forge.issues(self.query('all', None, ()))
+        self.assertEqual([row['number'] for row in found], [1, 2])
+        self.assertEqual([call.args[1] for call in gql.call_args_list], [
+            {'owner': 'org', 'repo': 'repo', 'states': [state],
+             'cursor': cursor}
+            for state, cursor in (('OPEN', None), ('OPEN', 'o1'),
+                                  ('CLOSED', None))
+        ])
+        open_text, _, closed_text = (
+            call.args[0] for call in gql.call_args_list)
+        from agent_squad.github import CLOSING_PRS, selection
+
+        self.assertNotIn('closedByPullRequestsReferences', open_text)
+        # The texts differ only by the closing pull requests' selection.
+        self.assertEqual(
+            closed_text.replace('\n        ' + selection(CLOSING_PRS), ''),
+            open_text)
+        self.assertNotEqual(closed_text, open_text)
+        for state in ('open', 'closed'):
+            with self.subTest(state=state), patch.object(
+                self.forge, 'graphql', side_effect=self.listing(page([])),
+            ) as gql:
+                self.forge.issues(self.query(state, None, ()))
+            self.assertEqual(gql.call_args.args[1]['states'],
+                             [state.upper()])
+            self.assertEqual(
+                'closedByPullRequestsReferences' in gql.call_args.args[0],
+                state == 'closed')
 
     def test_rows_hold_merged_closing_prs_in_order(self) -> None:
         node = listed_node(
@@ -1065,24 +1093,60 @@ class IssueListingTests(unittest.TestCase):
         self.assertEqual(gql.call_args.args[1], {'id': 'I-3', 'cursor': 'p1'})
 
     def test_closing_prs_are_not_read_for_a_row_that_fails(self) -> None:
-        open_issue = listed_node(
-            4, state='OPEN', stateReason=None,
-            closedByPullRequestsReferences=page([closing(8)], 'p1'),
-        )
+        open_issue = listed_node(4, state='OPEN', stateReason=None)
+        # The open listing does not select the closing pull requests.
+        del open_issue['closedByPullRequestsReferences']
         other = listed_node(
             5, milestone=None,
             closedByPullRequestsReferences=page([closing(8)], 'p1'),
         )
         with patch.object(self.forge, 'graphql', side_effect=self.listing(
-            page([open_issue, other]),
+            page([open_issue]), page([other]),
         )) as gql:
             found = self.forge.issues(self.query('all', self.v1, ()))
-        self.assertEqual(gql.call_count, 1)
+        # One listing per state and no further page.
+        self.assertEqual(gql.call_count, 2)
         self.assertEqual(found, [{
             'number': 4, 'title': 'T4', 'state': 'open',
             'state_reason': None, 'labels': ['bug'], 'milestone': 'v1',
             'is_pull_request': False, 'closed_by': [],
         }])
+
+    def test_a_refused_further_closing_page_leaves_that_issue_unknown(
+        self,
+    ) -> None:
+        # PR #167 REV-2: the first page came with the listing, so a refused
+        # further page leaves only that issue's closing pull requests unknown.
+        from agent_squad.github import CommandFailed
+
+        def nodes() -> list[dict]:
+            return self.listing(page([
+                listed_node(7, closedByPullRequestsReferences=page(
+                    [closing(8)], 'p1')),
+                listed_node(6, closedByPullRequestsReferences=page(
+                    [closing(5)])),
+            ]))
+
+        for status in (401, 403, 404):
+            with self.subTest(status=status), patch.object(
+                self.forge, 'graphql', side_effect=[
+                    *nodes(), CommandFailed('refused', status, ''),
+                ],
+            ):
+                found = self.forge.issues(self.query('closed', None, ()))
+                self.assertEqual(
+                    [(row['number'], row['closed_by']) for row in found],
+                    [(7, None),
+                     (6, [{'number': 5, 'repository': 'org/repo'}])])
+        # A service error, and a typed GraphQL error, which GitHub answers
+        # with HTTP 200 and so carries no status, still fail the read.
+        for error in (CommandFailed('server', 502, ''),
+                      ForgeError('FORBIDDEN: no access')):
+            with self.subTest(error=str(error)), patch.object(
+                self.forge, 'graphql', side_effect=[*nodes(), error],
+            ):
+                with self.assertRaisesRegex(ForgeError, str(error)):
+                    self.forge.issues(self.query('closed', None, ()))
 
     def test_malformed_listing_rows_fail_the_read(self) -> None:
         missing = listed_node(6)
@@ -1103,4 +1167,4 @@ class IssueListingTests(unittest.TestCase):
                 side_effect=self.listing(page([node])),
             ):
                 with self.assertRaisesRegex(ForgeError, message):
-                    self.forge.issues(self.query('all', None, ()))
+                    self.forge.issues(self.query('closed', None, ()))

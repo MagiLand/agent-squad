@@ -549,6 +549,12 @@ if endpoint == "graphql":
         owner, field = re.search(
             r"\.\.\. on (\w+) \{ (\w+)\(", payload["query"]
         ).groups()
+        # settings["closing_page_refusals"] maps an issue number to the
+        # HTTP status refusing its further closing-link pages (#164).
+        issue = variables["id"].partition("-")[2].partition("@")[0]
+        refused = settings.get("closing_page_refusals", {}).get(issue)
+        if field == "closedByPullRequestsReferences" and refused:
+            fail("Resource not accessible by integration", refused)
         lists = owner_lists(variables["id"])
         output({"data": {"node": {field: gql_page(
             lists[field], f"{owner}.{field}", variables["cursor"]
@@ -559,7 +565,11 @@ if endpoint == "graphql":
         page = gql_page(nodes, "Repository.issues", variables.get("cursor"))
         for node in page["nodes"]:
             for field in ("labels", "closedByPullRequestsReferences"):
-                node[field] = gql_page(node[field], f"Issue.{field}")
+                # A field comes back only when the query selects it.
+                if f" {field}(" in payload["query"]:
+                    node[field] = gql_page(node[field], f"Issue.{field}")
+                else:
+                    del node[field]
         output({"data": {"repository": {"issues": page}}})
     if operation != "SquadThreads":
         fail("unknown GraphQL operation " + operation, 400)

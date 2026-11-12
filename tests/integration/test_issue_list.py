@@ -205,15 +205,56 @@ class GitHubIssueListTests(IssueListContract, unittest.TestCase):
         result = self.listed("--milestone", "a,b", "--label", "bug",
                              "--state", "all")
         self.assertEqual(self.numbers(result), [11])
-        [body] = self.queries(start)
-        self.assertTrue(body["query"].startswith("query SquadIssues("))
-        self.assertNotIn("a,b", body["query"])
-        self.assertNotIn('"bug"', body["query"])
-        self.assertEqual(body["variables"], {
-            "owner": "MagiLand", "repo": "trial",
-            "states": ["OPEN", "CLOSED"], "labels": ["bug"],
-            "filter": {"milestoneNumber": "6"}, "cursor": None,
-        })
+        # One listing per state (PR #167 REV-3).
+        bodies = self.queries(start)
+        self.assertEqual(len(bodies), 2)
+        for body, state in zip(bodies, ("OPEN", "CLOSED")):
+            self.assertTrue(body["query"].startswith("query SquadIssues("))
+            self.assertNotIn("a,b", body["query"])
+            self.assertNotIn('"bug"', body["query"])
+            self.assertEqual(body["variables"], {
+                "owner": "MagiLand", "repo": "trial",
+                "states": [state], "labels": ["bug"],
+                "filter": {"milestoneNumber": "6"}, "cursor": None,
+            })
+
+    def test_open_issues_are_listed_without_asking_for_closing_prs(
+        self,
+    ) -> None:
+        # PR #167 REV-3: the fake returns the closing pull requests only
+        # when the query selects them, so asking for them here would show.
+        for options, numbers in (
+            (("--milestone", "v1",), [5]),
+            (("--milestone", "v1", "--state", "all"), [2, 3, 4, 5]),
+        ):
+            with self.subTest(options=options):
+                start = len(self.f.read_model()["calls"])
+                result = self.listed(*options)
+                self.assertEqual(self.numbers(result), numbers)
+                rows = {row["number"]: row for row in result["issues"]}
+                self.assertEqual(rows[5]["closed_by"], [])
+                for body in self.queries(start):
+                    self.assertEqual(
+                        "closedByPullRequestsReferences" in body["query"],
+                        body["variables"]["states"] == ["CLOSED"])
+
+    def test_a_refused_closing_page_leaves_that_issue_unknown(self) -> None:
+        # PR #167 REV-2: issue 6's second page of closing pull requests is
+        # read after the listing; refusing it makes only that issue null.
+        self.f.settings(page_sizes={
+            "Issue.closedByPullRequestsReferences": 1})
+        for status, expected in ((401, 0), (403, 0), (404, 0), (502, 1)):
+            with self.subTest(status=status):
+                self.f.settings(closing_page_refusals={"6": status})
+                result = self.listed("--label", "bug", "--state", "closed",
+                                     expected=expected)
+                if expected:
+                    self.assertIn("Resource not accessible", result["error"])
+                    continue
+                rows = {row["number"]: row for row in result["issues"]}
+                self.assertEqual(sorted(rows), [2, 3, 6, 11])
+                self.assertIsNone(rows[6]["closed_by"])
+                self.assertEqual(rows[2]["closed_by"], [closer(7)])
 
     def test_every_page_is_read_and_only_matching_issues_complete(
         self,
@@ -332,11 +373,13 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
             pr(5, True), hidden=True)
         model["issues"]["2"]["linked_prs"] = [
             "MagiLand/hidden#5", "9", "7", "MagiLand/other#4"]
-        # Close and reopen rows and a commit's reference name no PR.
+        # An earlier close and its reopen, and a commit's reference, name
+        # no PR; the fake adds the last close after the linked PRs.
         model["issues"]["2"]["timeline_extra"] = [
             {"type": "comment", "body": "Closes #2"},
             {"type": "code", "hidden": True},
-            {"type": "close"}, {"type": "reopen"},
+            {"type": "close", "created_at": "2026-01-01T00:00:01Z"},
+            {"type": "reopen", "created_at": "2026-01-01T00:00:02Z"},
             {"type": "commit_ref", "ref_commit_sha": "a" * 40},
         ]
         self.f.save_model(model)
@@ -348,9 +391,41 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
         ])
         timeline = [r for r in self.sent
                     if urlsplit(r).path == f"{REPO}/issues/2/timeline"]
-        # Ten rows in pages of two, two of them holding one row once the
-        # hidden one is dropped, then the null page beyond the end.
-        self.assertEqual(len(timeline), 6)
+        # Eleven rows in pages of two, two of them holding one row once
+        # the hidden one is dropped, then the null page beyond the end.
+        self.assertEqual(len(timeline), 7)
+
+    def test_a_hidden_page_before_the_last_close_leaves_it_unknown(
+        self,
+    ) -> None:
+        # Decision 5 of #164: rows the reader may not see fill issue 2's
+        # first page, which F16 serves as null, as it serves the end.
+        model = self.f.read_model()
+        model["issues"]["2"]["timeline_extra"] = [
+            {"type": "issue_ref", "hidden": True},
+            {"type": "issue_ref", "hidden": True},
+        ]
+        # Issue 3 hides one row of a page and is read to its close.
+        model["issues"]["3"]["timeline_extra"] = [
+            {"type": "issue_ref", "hidden": True},
+        ]
+        # Issue 4's close time was never recorded: unknown, with no read.
+        model["issues"]["4"]["closed_at"] = None
+        self.f.save_model(model)
+        self.f.settings(max_response_items=2)
+        result = self.listed("--milestone", "v1", "--state", "closed")
+        rows = {row["number"]: row for row in result["issues"]}
+        self.assertEqual(sorted(rows), [2, 3, 4])
+        self.assertIsNone(rows[2]["closed_by"])
+        self.assertEqual(rows[3]["closed_by"],
+                         [closer(4, "MagiLand/other")])
+        self.assertIsNone(rows[4]["closed_by"])
+        # The listing comes newest first. Issue 3 is read to the null page
+        # after its close; issue 2's read ends at its first page.
+        self.assertEqual(
+            [urlsplit(r).path for r in self.sent if "/timeline" in r],
+            [*[f"{REPO}/issues/3/timeline"] * 3,
+             f"{REPO}/issues/2/timeline"])
 
     def fake(self, account: str = "developer", **query: str) -> list[int]:
         """Ask the fake's issue listing directly; no CLI path sends this."""

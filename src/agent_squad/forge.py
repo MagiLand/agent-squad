@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import (
-    Callable, Literal, NotRequired, Protocol, TypedDict, runtime_checkable,
+    Callable, Literal, NotRequired, Protocol, TypedDict, TypeVar,
+    runtime_checkable,
 )
 import re
 
@@ -272,8 +273,10 @@ class ListedIssue(TypedDict):
     labels: list[str]
     milestone: str | None
     is_pull_request: bool
-    # Empty for an open issue, for which the forge is not asked; null when
-    # the forge refuses the read after the listing was read.
+    # Empty for an open issue, for which the forge is not asked; null,
+    # meaning unknown, when the forge refuses the read after the listing
+    # was read or, on Forgejo, when the timeline read did not reach the
+    # issue's last close (decision 5 of #164).
     closed_by: list[ClosingPullRequest] | None
 
 
@@ -348,10 +351,13 @@ def related_issue(
     }
 
 
-def exposed(
-    read: Callable[[], list[RelatedIssue] | None],
-) -> list[RelatedIssue] | None:
-    """Return one dependency list, or null when the forge refuses it."""
+Exposed = TypeVar("Exposed")
+
+
+def exposed(read: Callable[[], Exposed | None]) -> Exposed | None:
+    """Return one list read after the main read, or null when the forge
+    refuses it: a dependency list (#144) or an issue's closing pull
+    requests (#164)."""
     try:
         return read()
     except ForgeError as error:

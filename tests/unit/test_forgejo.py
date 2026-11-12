@@ -1221,6 +1221,9 @@ class FixtureBranchTests(unittest.TestCase):
                 self.assertEqual(self.lookups(), 2)
 
 
+CLOSED_AT = "2026-01-02T00:00:00Z"
+
+
 def forgejo_issue(number, state="closed", milestone="v1", labels=("bug",),
                   pull=False):
     """One F16 issue listing row (#164)."""
@@ -1228,6 +1231,7 @@ def forgejo_issue(number, state="closed", milestone="v1", labels=("bug",),
         "id": 100 + number, "number": number, "title": f"T{number}",
         "state": state, "body": "", "user": {"login": "dev"},
         "created_at": "2026-01-01T00:00:00Z",
+        "closed_at": CLOSED_AT if state == "closed" else None,
         "labels": [{"id": i, "name": name} for i, name in enumerate(labels)],
         "milestone": None if milestone is None else {
             "id": 3, "title": milestone, "state": "open"},
@@ -1235,6 +1239,11 @@ def forgejo_issue(number, state="closed", milestone="v1", labels=("bug",),
     if pull:
         row["pull_request"] = {"merged": True}
     return row
+
+
+def closed(when=None):
+    """The close row F16 writes when the issue closes (#164)."""
+    return {"type": "close", "created_at": when or CLOSED_AT}
 
 
 def pull_ref(number, action="closes", merged=True, full_name="owner/repo"):
@@ -1290,8 +1299,8 @@ class IssueListingTests(unittest.TestCase):
              forgejo_issue(5, labels=("bug", "a,b"), pull=True)],
             [forgejo_issue(4, labels=("a,b", "bug"))],
             [],
-            [pull_ref(12)], None,
-            [pull_ref(11)], None,
+            [pull_ref(12), closed()], None,
+            [pull_ref(11), closed()], None,
         ]
         found = self.forge.issues(query)
         self.assertEqual([row["number"] for row in found], [9, 4])
@@ -1325,12 +1334,13 @@ class IssueListingTests(unittest.TestCase):
     def test_timeline_keeps_merged_closing_prs_in_order(self):
         self.forge.api.side_effect = [
             [forgejo_issue(9)], [],
-            [{"type": "comment", "body": "closes #9"}, {"type": "close"},
+            [{"type": "comment", "body": "closes #9"},
+             closed("2026-01-01T12:00:00Z"), {"type": "reopen"},
              {"type": "commit_ref", "ref_commit_sha": "a" * 40},
              pull_ref(30), pull_ref(31, action="none"),
              pull_ref(32, merged=False), pull_ref(5, full_name="x/y")],
             # Rows are dropped after paging, so a page may be short.
-            [pull_ref(4), pull_ref(30)],
+            [pull_ref(4), pull_ref(30), closed()],
             [],
         ]
         found = self.forge.issues(self.query("all", None, ()))
@@ -1339,6 +1349,57 @@ class IssueListingTests(unittest.TestCase):
             {"number": 30, "repository": "owner/repo"},
             {"number": 5, "repository": "x/y"},
         ])
+
+    def test_closed_by_is_unknown_unless_the_read_reaches_the_last_close(
+        self,
+    ):
+        # Decision 5 of #164: the close row is written after closed_at is
+        # set, so the read must hold a close row at or after closed_at.
+        known = [{"number": 7, "repository": "owner/repo"}]
+        for name, issue, timeline, expected in (
+            ("at closed_at", forgejo_issue(9), [[pull_ref(7), closed()]],
+             known),
+            ("a second later", forgejo_issue(9),
+             [[pull_ref(7), closed("2026-01-02T00:00:01Z")]], known),
+            ("same instant, other offset", forgejo_issue(9),
+             [[pull_ref(7), closed("2026-01-02T08:00:00+08:00")]], known),
+            # Reopened and closed again: only the earlier close was read.
+            ("only an earlier close", forgejo_issue(9),
+             [[pull_ref(7), closed("2026-01-01T23:59:59Z")]], None),
+            ("no close row", forgejo_issue(9), [[pull_ref(7)]], None),
+            # A first page of hidden rows only is null, as is the end.
+            ("first page null", forgejo_issue(9), [], None),
+            # Linked after the last close: still listed once it is read.
+            ("linked later", forgejo_issue(9),
+             [[closed(), pull_ref(7)]], known),
+        ):
+            with self.subTest(name=name):
+                self.forge.api.reset_mock()
+                self.forge.api.side_effect = [[issue], [], *timeline, None]
+                found = self.forge.issues(self.query("closed", None, ()))
+                self.assertEqual(found[0]["closed_by"], expected)
+        # A close time never recorded is null: unknown, with no read.
+        self.forge.api.reset_mock()
+        self.forge.api.side_effect = [
+            [{**forgejo_issue(9), "closed_at": None}], []]
+        found = self.forge.issues(self.query("closed", None, ()))
+        self.assertIsNone(found[0]["closed_by"])
+        self.assertEqual(len(self.paths()), 2)
+        for side_effect, message in (
+            ([[{**forgejo_issue(9), "closed_at": "2026-01-02"}], []],
+             "issue.closed_at must be ISO 8601"),
+            ([[{**forgejo_issue(9), "closed_at": 0}], []],
+             "issue.closed_at"),
+            ([[forgejo_issue(9)], [], [{"type": "close"}], None],
+             "timeline.created_at"),
+            ([[forgejo_issue(9)], [], [closed("2026-13-02T00:00:00Z")],
+              None], "timeline.created_at must be ISO 8601"),
+        ):
+            with self.subTest(message=message):
+                self.forge.api.reset_mock()
+                self.forge.api.side_effect = side_effect
+                with self.assertRaisesRegex(ForgeError, message):
+                    self.forge.issues(self.query("closed", None, ()))
 
     def test_refused_timeline_reads_are_null_and_other_failures_fail(self):
         for status in (401, 403, 404):

@@ -361,14 +361,21 @@ PR_STATES = {"OPEN": "open", "CLOSED": "closed", "MERGED": "closed"}
 # The issue listing of `issue list` (#164). Every request value is a
 # variable. `labels:` returns the issues carrying any of the labels and
 # `filterBy.milestoneNumber` takes the milestone's number; `issues` holds no
-# pull request. The linked pull requests leave out those closed unmerged.
+# pull request. The linked pull requests leave out those closed unmerged,
+# and only the query for closed issues asks for them: an open issue's
+# closing pull requests are never asked for (PR #167 REV-3).
 ISSUE_LABELS = Connection("labels", "Issue", "name")
 CLOSING_PRS = Connection(
     "closedByPullRequestsReferences", "Issue",
     "number merged repository { nameWithOwner }",
     arguments="includeClosedPrs:false",
 )
-ISSUES_QUERY = f"""query SquadIssues(
+
+
+def issues_query(links: str) -> str:
+    """The listing query; ``links`` is the linked pull requests' selection
+    or empty."""
+    return f"""query SquadIssues(
   $owner:String!, $repo:String!, $states:[IssueState!], $labels:[String!],
   $filter:IssueFilters, $cursor:String
 ) {{
@@ -379,16 +386,22 @@ ISSUES_QUERY = f"""query SquadIssues(
     ) {{
       nodes {{
         id number title state stateReason milestone {{ title }}
-        {selection(ISSUE_LABELS)}
-        {selection(CLOSING_PRS)}
+        {selection(ISSUE_LABELS)}{links}
       }}
       pageInfo {{ hasNextPage endCursor }}
     }}
   }}
 }}"""
+
+
+# One query per state, so `--state all` reads two listings, each by page.
+ISSUES_QUERIES = {
+    "OPEN": issues_query(""),
+    "CLOSED": issues_query(f"\n        {selection(CLOSING_PRS)}"),
+}
 ISSUE_STATES = {"OPEN": "open", "CLOSED": "closed"}
 QUERY_STATES = {
-    "open": ["OPEN"], "closed": ["CLOSED"], "all": ["OPEN", "CLOSED"],
+    "open": ("OPEN",), "closed": ("CLOSED",), "all": ("OPEN", "CLOSED"),
 }
 
 
@@ -878,7 +891,7 @@ class GitHub:
         )
 
     def issues(self, query: IssueQuery) -> list[ListedIssue]:
-        """Read the issue listing for ``query`` in one query per page.
+        """Read the issue listing for ``query``, one query per page and state.
 
         The forge's filters only narrow the read; ``query.matches`` decides
         on each issue's record before its linked pull requests are read.
@@ -886,7 +899,6 @@ class GitHub:
         config = self.repository.configuration
         variables: dict[str, object] = {
             "owner": config.forge.owner, "repo": config.forge.repo,
-            "states": QUERY_STATES[query.state],
         }
         if query.labels:
             variables["labels"] = list(query.labels)
@@ -895,10 +907,22 @@ class GitHub:
                 "milestoneNumber": str(query.milestone.number)
             }
         result: list[ListedIssue] = []
+        for state in QUERY_STATES[query.state]:
+            result.extend(self.listing_pages(
+                ISSUES_QUERIES[state], {**variables, "states": [state]},
+                query,
+            ))
+        return result
+
+    def listing_pages(
+        self, text: str, variables: dict[str, object], query: IssueQuery,
+    ) -> list[ListedIssue]:
+        """Every page of one state's listing, following the cursor."""
+        result: list[ListedIssue] = []
         seen: set[str] = set()
         cursor = None
         while True:
-            data = self.graphql(ISSUES_QUERY, {**variables, "cursor": cursor})
+            data = self.graphql(text, {**variables, "cursor": cursor})
             page = object_value(
                 object_value(data.get("repository"), "repository").get(
                     "issues"
@@ -949,11 +973,13 @@ class GitHub:
         if not query.matches(row):
             return None
         if state == "closed":
-            row["closed_by"] = closing_order([
+            # The first page came with the listing; a refused further page
+            # leaves only this issue's links unknown (PR #167 REV-2).
+            row["closed_by"] = exposed(lambda: closing_order([
                 pr for pr in map(closing_pull_request, self.complete(
                     node.get(CLOSING_PRS.field), CLOSING_PRS, node.get("id")
                 )) if pr is not None
-            ])
+            ]))
         return row
 
     def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
