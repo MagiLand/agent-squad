@@ -961,12 +961,19 @@ def derive(
     effective_task = amendment["task"] if amendment else task
     task_stale = task != effective_task
     if task_stale:
+        # The repair re-runs the amendment's own command, so it repeats the
+        # amendment's recommendation; one posted before #147 has none.
+        recommendation = amendment["recommendation"]
+        if recommendation not in RECOMMENDATIONS:
+            recommendation = "<" + "|".join(RECOMMENDATIONS) + ">"
         diagnostic(
             "task_body_stale",
             pr.evidence,
             "PR Task differs from the latest amendment",
             f"agent-squad decision post --as implementer --pr {pr.number}"
-            " --finding none --task <same-task-file> --body <decision-file>",
+            " --finding none --kind task-amendment"
+            f" --recommendation {recommendation}"
+            " --task <same-task-file> --body <decision-file>",
         )
     used = len(reviews)
     effective = next(

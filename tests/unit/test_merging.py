@@ -68,7 +68,10 @@ class MergeRulesTests(unittest.TestCase):
                     check_merge_gate(self.state, accept_moved_base=False,
                                      accept_merge_hold=accept)
                 self.assertEqual(
-                    "hold-release decision newer than that review"
+                    "hold-release decision newer than that review: record"
+                    " the Developer's release with decision post --finding"
+                    " none --kind hold-release --recommendation"
+                    " <followed|changed|none>"
                     in str(raised.exception), accept)
 
     def test_moved_base_is_the_approving_base_not_the_recomputed_merge_base(

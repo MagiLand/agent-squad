@@ -727,6 +727,25 @@ class DecisionRecordTests(unittest.TestCase):
             conversation=(decision(12, body=record("answer") + "\n\nA."),)))
         self.assertFalse(state["gates"]["needs_decision"])
 
+    def test_stale_task_repair_repeats_the_amendment_options(self) -> None:
+        for body, recommendation in (
+            (record("task-amendment", "changed") + "\n\n> Amend.",
+             "changed"),
+            ("Written by hand: amend.", "<followed|changed|none>"),
+        ):
+            with self.subTest(recommendation=recommendation):
+                state = derive_state(snapshot(conversation=(decision(
+                    12, body=body + "\n\n## Task\n\nAmended objective."),)))
+                self.assertTrue(state["task_body_stale"])
+                [stale] = [d for d in state["diagnostics"]
+                           if d["kind"] == "task_body_stale"]
+                self.assertEqual(
+                    stale["repair"],
+                    "agent-squad decision post --as implementer --pr 1"
+                    " --finding none --kind task-amendment"
+                    f" --recommendation {recommendation}"
+                    " --task <same-task-file> --body <decision-file>")
+
     def test_hold_is_released_only_by_a_newer_release(self) -> None:
         release = decision(12, body=record("hold-release") + "\n\n> Merge.")
         state = derive_state(snapshot(

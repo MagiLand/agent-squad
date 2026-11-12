@@ -298,6 +298,34 @@ class DecisionRecordTests(unittest.TestCase):
         self.assertTrue(merged["merged"])
         self.assertEqual(merged["integration"], "verified by ancestry")
 
+    def test_stale_task_repair_runs_as_status_prints_it(self) -> None:
+        self.each_fake(self.check_stale_task_repair)
+
+    def check_stale_task_repair(self, f: ForgeFixture) -> None:
+        task = f.write("amended-task.md", TASK.replace("Exercise", "Amend"))
+        f.settings(fail_mirror=True)
+        posted = self.post(
+            f, *GENERAL, "--kind", "task-amendment",
+            "--recommendation", "changed", "--task", task, expected=3)
+        self.assertIn("Task mirror failed", posted["error"])
+        f.settings(fail_mirror=False)
+        [stale] = [d for d in f.status()["diagnostics"]
+                   if d["kind"] == "task_body_stale"]
+        program, *words = stale["repair"].split()
+        self.assertEqual(program, "agent-squad")
+        files = {"<same-task-file>": task,
+                 "<decision-file>": f.write("repair.md", QUOTE)}
+        repaired = f.cli(*(files.get(word, word) for word in words))
+        self.assertTrue(repaired["reused"])
+        state = f.status()
+        self.assertFalse(state["task_body_stale"])
+        self.assertIn("Amend", state["task"])
+        [decision] = state["decisions"]
+        self.assertEqual(decision["id"], repaired["decision"]["id"])
+        self.assertEqual(
+            (decision["kind"], decision["recommendation"]),
+            ("task-amendment", "changed"))
+
 
 if __name__ == "__main__":
     unittest.main()
