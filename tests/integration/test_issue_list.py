@@ -427,6 +427,32 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
             [*[f"{REPO}/issues/3/timeline"] * 3,
              f"{REPO}/issues/2/timeline"])
 
+    def test_a_reopening_before_a_hidden_page_leaves_it_unknown(
+        self,
+    ) -> None:
+        # PR #167 REV-1: issue 2 was closed and reopened in the second of
+        # its last close; the read sees the reopening, then a page of rows
+        # the reader may not see ends it before the last close and PR 7.
+        model = self.f.read_model()
+        model["issues"]["2"]["closed_at"] = "2026-01-01T00:00:10Z"
+        model["issues"]["2"]["timeline_extra"] = [
+            {"type": "close", "created_at": "2026-01-01T00:00:10Z"},
+            {"type": "reopen", "created_at": "2026-01-01T00:00:10Z"},
+            {"type": "issue_ref", "hidden": True},
+            {"type": "issue_ref", "hidden": True},
+        ]
+        self.f.save_model(model)
+        self.f.settings(max_response_items=2)
+        result = self.listed("--milestone", "v1", "--state", "closed")
+        rows = {row["number"]: row for row in result["issues"]}
+        self.assertIsNone(rows[2]["closed_by"])
+        self.assertEqual(rows[3]["closed_by"],
+                         [closer(4, "MagiLand/other")])
+        self.assertEqual(rows[4]["closed_by"], [])
+        self.assertEqual(
+            len([r for r in self.sent
+                 if urlsplit(r).path == f"{REPO}/issues/2/timeline"]), 2)
+
     def fake(self, account: str = "developer", **query: str) -> list[int]:
         """Ask the fake's issue listing directly; no CLI path sends this."""
         url = (f"{self.f.server.base_url}/api/v1{REPO}/issues?"

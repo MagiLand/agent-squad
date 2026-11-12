@@ -196,12 +196,23 @@ def instant(value: object, label: str) -> datetime:
         raise ForgeError(f"{label} must be ISO 8601 with an offset") from None
 
 
-def close_time(value: object) -> datetime | None:
-    """The time of a timeline row that records a close; null for others."""
-    data = object_value(value, "timeline row")
-    if text_value(data.get("type"), "timeline.type") != "close":
-        return None
-    return instant(data.get("created_at"), "timeline.created_at")
+def last_close(rows: list[object]) -> datetime | None:
+    """The time of the last close in timeline rows; null when they hold
+    no close, or when a reopening follows their last close.
+
+    F16 and 17.0.1 serve the timeline by time and then ID, so a reopening
+    after a close shows that close was not the issue's last, even when
+    both carry the same whole second (PR #167 REV-1).
+    """
+    last = None
+    for value in rows:
+        data = object_value(value, "timeline row")
+        kind = text_value(data.get("type"), "timeline.type")
+        if kind == "close":
+            last = instant(data.get("created_at"), "timeline.created_at")
+        elif kind == "reopen":
+            last = None
+    return last
 
 
 def closing_reference(value: object) -> ClosingPullRequest | None:
@@ -745,7 +756,8 @@ class Forgejo:
         rows the reader may not see and serve a page with no row left as
         JSON null, exactly as they serve the end. The close row is never
         dropped, and it is written after ``closed_at`` is set, so a read
-        that reached the last close holds one at or after ``closed_at``.
+        that reached the last close ends its closes and reopenings with a
+        close at or after ``closed_at``.
         """
         try:
             rows = self._all_pages(
@@ -756,8 +768,8 @@ class Forgejo:
                 return None
             raise
         found = [pr for pr in map(closing_reference, rows) if pr is not None]
-        closes = [when for when in map(close_time, rows) if when is not None]
-        if not any(when >= closed_at for when in closes):
+        last = last_close(rows)
+        if last is None or last < closed_at:
             return None
         return closing_order(found)
 

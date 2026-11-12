@@ -1372,6 +1372,15 @@ class IssueListingTests(unittest.TestCase):
             # Linked after the last close: still listed once it is read.
             ("linked later", forgejo_issue(9),
              [[closed(), pull_ref(7)]], known),
+            # PR #167 REV-1: a reopening read after a close at closed_at
+            # shows that close was not the last, in the same second too.
+            ("a reopening after the close", forgejo_issue(9),
+             [[pull_ref(7), closed(), {"type": "reopen"}]], None),
+            ("reopened and closed in one second", forgejo_issue(9),
+             [[closed(), {"type": "reopen"}, pull_ref(7), closed()]], known),
+            ("reopened, then closed later", forgejo_issue(9),
+             [[closed("2026-01-01T12:00:00Z"), {"type": "reopen"}],
+              [pull_ref(7), closed()]], known),
         ):
             with self.subTest(name=name):
                 self.forge.api.reset_mock()
