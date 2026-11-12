@@ -20,6 +20,20 @@ checks at a head passed, failed, or are still pending from `ci` in
 `agent-squad pr checks --pr <N> [--wait <seconds>] --json`, and read the result
 of the run at a merged PR's merge commit from
 `agent-squad pr checks --pr <N> --merge-commit [--wait <seconds>] --json`.
+List a milestone's issues, issues carrying given labels, or issues in a
+state with `agent-squad issue list [--milestone <title>] [--label <name>]...
+[--state open|closed|all] --json`. Its `closed_by` for each closed issue is the
+forge's link to the merged pull requests that close the issue, not a record of
+the event that closed it: an issue closed by one pull request, reopened, and
+closed by another lists both; a merged, linked pull request is listed even when
+the issue was last closed by hand; a pull request closed without merging, or one
+that only refers to the issue (`Ref #<N>`), is not listed; and an issue closed by
+hand, or by a commit that no pull request links, lists none. A `closed_by` of
+`null` means the links are unknown, never that there are none: the forge
+refused the read, or on Forgejo the read could not be shown to reach the
+issue's last close. Its output is evidence only: a listed issue is not thereby
+a Task, and the list replaces neither `issue view` for a Task nor `status` for
+a pull request.
 
 Filter `--json` output to read what is needed instead of saving whole responses
 to disk. A saved response is never authority.

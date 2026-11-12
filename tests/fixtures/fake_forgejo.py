@@ -40,6 +40,71 @@ def review_wire(row: dict) -> dict:
     return template
 
 
+def find_milestone(model: dict, ident: object) -> dict | None:
+    return next((row for row in model.get("milestones", [])
+                 if row["id"] == ident), None)
+
+
+def milestone_wire(row: dict | None) -> dict | None:
+    # Milestones live in model["milestones"] as on the fake gh; an issue's
+    # "milestone" names one by "id", which is the Forgejo milestone ID.
+    if row is None:
+        return None
+    return {"id": row["id"], "title": row["title"], "state": row["state"],
+            "open_issues": 0, "closed_issues": 0}
+
+
+# When a closed issue of the model names no ``closed_at`` (#164).
+CLOSED_AT = "2026-01-02T00:00:00Z"
+
+
+def closed_at(row: dict) -> str | None:
+    """F16 serves ``closed_at`` for a closed issue, null when the close
+    time was never recorded, and null for an open issue."""
+    if row.get("state") != "closed":
+        return None
+    return row.get("closed_at", CLOSED_AT)
+
+
+def issue_wire(model: dict, row: dict) -> dict:
+    return {**row, "closed_at": closed_at(row), "milestone": milestone_wire(
+        find_milestone(model, row.get("milestone")))}
+
+
+def milestone_filter(model: dict, rows: list, query: dict) -> list:
+    """F16 ListIssues' ``milestones`` filter as probed for #164.
+
+    The value is split at commas. Each part names a milestone by its exact
+    title first (the first one when titles repeat), else by ID; a part
+    naming none is dropped, and with none left the filter is ignored.
+    """
+    value = query.get("milestones", [""])[0]
+    wanted = set()
+    for part in filter(None, value.split(",")):
+        found = [m for m in model.get("milestones", []) if m["title"] == part]
+        if not found and part.isdigit():
+            found = [m for m in model.get("milestones", [])
+                     if m["id"] == int(part)]
+        if found:
+            wanted.add(found[0]["id"])
+    if not wanted:
+        return rows
+    return [r for r in rows if (r["milestone"] or {}).get("id") in wanted]
+
+
+def label_filter(model: dict, rows: list, query: dict) -> list:
+    """F16 ListIssues' ``labels`` filter as probed for #164: each issue
+    carries every named label that exists (names compared exactly); an
+    unknown name is dropped, and with none left the filter is ignored."""
+    value = query.get("labels", [""])[0]
+    known = {label["name"] for label in model.get("labels", [])}
+    wanted = [name for name in value.split(",") if name in known]
+    if not wanted:
+        return rows
+    return [r for r in rows
+            if set(wanted) <= {label["name"] for label in r["labels"]}]
+
+
 def pr_wire(row: dict, base_sha: str | None) -> dict:
     template = recording("017-setup-pr-after-base-push.json")
     template.update(deepcopy(row))
@@ -308,7 +373,13 @@ class Handler(BaseHTTPRequestHandler):
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "labels":
-            return 200, self.paged(model.get("labels", []), query)
+            return 200, self.paged(model.get("labels", []), query, settings)
+        if parts[3] == "milestones" and number is None:
+            # F16 lists every milestone when no state is given.
+            state = query.get("state", ["all"])[0]
+            rows = [milestone_wire(row) for row in model.get("milestones", [])
+                    if state in ("all", row["state"])]
+            return 200, self.paged(rows, query, settings)
         if parts[3] == "issues" and number is None:
             return self.issues(model, account, body, query)
         if parts[3] == "issues":
@@ -341,9 +412,11 @@ class Handler(BaseHTTPRequestHandler):
                     model, account, issue, number, parts[5], query)
             if parts[5:6] == ["labels"]:
                 return self.issue_labels(model, issue, parts[6:], body)
+            if parts[5:] == ["timeline"] and self.command == "GET":
+                return self.timeline(model, account, number, issue, query)
             if issue is None and pr is not None:
-                return 200, self.pr_issue(pr)
-            return ((200, issue) if issue
+                return 200, self.pr_issue(model, pr)
+            return ((200, issue_wire(model, issue)) if issue
                     else (404, {"message": "issue not found"}))
         if parts[3] != "pulls":
             return 404, {"message": "unknown endpoint"}
@@ -365,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = [pr_wire(p, self.branch(model, p["base"]["ref"]))
                     for p in prs.values()
                     if query.get("state", ["all"])[0] in ("all", p["state"])]
-            return 200, self.paged(rows, query)
+            return 200, self.paged(rows, query, settings)
         if number not in prs:
             return 404, {"message": "pull request not found"}
         pr = prs[number]
@@ -445,7 +518,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows.insert(
                     0, recording("015-setup-requested-reviews.json")[0],
                 )
-            return 200, self.paged(rows, query)
+            return 200, self.paged(rows, query, settings)
         review_id = int(parts[6])
         review = next((r for r in reviews if r["id"] == review_id), None)
         if review is None:
@@ -596,13 +669,68 @@ class Handler(BaseHTTPRequestHandler):
         return 200, issue["labels"]
 
     @staticmethod
-    def pr_issue(pr: dict) -> dict:
+    def pr_issue(model: dict, pr: dict) -> dict:
         # The issues API serves a PR number as an issue marked as a PR
         # (synthetic, source-backed like issue GET).
         fields = ("id", "number", "title", "state", "body", "user",
                   "created_at")
         return {**{k: pr[k] for k in fields}, "labels": [],
+                "milestone": milestone_wire(
+                    find_milestone(model, pr.get("milestone"))),
                 "pull_request": {"merged": pr["merged"]}}
+
+    def timeline(
+        self, model: dict, account: str, number: str, issue: dict | None,
+        query: dict,
+    ) -> tuple[int, object]:
+        """Serve F16's issue timeline as probed for #164.
+
+        A pull request naming the issue adds a ``pull_ref`` row when it
+        opens: ``ref_action`` is ``closes`` for a closing keyword and
+        ``none`` for a plain reference. The issue's ``linked_prs`` and
+        ``referring_prs`` name those pull requests as on the fake gh, and
+        ``timeline_extra`` adds rows of other types first. A closed issue's
+        last close follows its ``linked_prs`` as a ``close`` row at its
+        ``closed_at``, which closing writes after it sets ``closed_at``
+        (decision 5 of #164); there is none when ``closed_at`` is null. As
+        in F16, the rows are paged before rows marked ``hidden`` are
+        dropped, and a page with no row left is JSON null.
+        ``timeline_refusals`` maps an issue number to the status that
+        refuses the read.
+        """
+        settings = model["settings"]
+        refused = settings.get("timeline_refusals", {}).get(number)
+        if refused is not None:
+            return refused, {"message": "timeline unreadable"}
+        if issue is None:
+            return 404, {"message": "issue not found"}
+        rows = [*issue.get("timeline_extra", [])]
+        rows += [self.pull_ref(model, ref, "closes")
+                 for ref in issue.get("linked_prs", [])]
+        if closed_at(issue) is not None:
+            rows.append({"type": "close", "created_at": closed_at(issue)})
+        rows += [self.pull_ref(model, ref, "none")
+                 for ref in issue.get("referring_prs", [])]
+        served = [{k: v for k, v in row.items() if k != "hidden"}
+                  for row in self.paged(rows, query, settings)
+                  if not row.get("hidden")]
+        return 200, served or None
+
+    @staticmethod
+    def pull_ref(model: dict, ref: str, action: str) -> dict:
+        source, _, key = ref.rpartition("#")
+        pr = (model["foreign_prs"][ref] if source
+              else model["prs"][ref])
+        return {
+            "type": "pull_ref", "ref_action": action,
+            "hidden": pr.get("hidden", False),
+            "ref_issue": {
+                "number": int(key), "title": pr["title"],
+                "state": pr["state"],
+                "pull_request": {"merged": pr["merged"]},
+                "repository": {"full_name": source or "MagiLand/trial"},
+            },
+        }
 
     def issues(
         self, model: dict, account: str, body: object, query: dict,
@@ -623,15 +751,19 @@ class Handler(BaseHTTPRequestHandler):
             row.update(number=int(number), title=body["title"],
                        state="open", labels=labels, conversation=[])
             issues[number] = row
-            return 201, row
+            return 201, issue_wire(model, row)
         state = query.get("state", ["open"])[0]
         kind = query.get("type", [None])[0]
-        rows = [] if kind == "pulls" else list(issues.values())
+        rows = [] if kind == "pulls" else [
+            issue_wire(model, row) for row in issues.values()]
         if kind != "issues":
-            rows += [self.pr_issue(pr) for pr in prs.values()]
+            rows += [self.pr_issue(model, pr) for pr in prs.values()]
         rows = [r for r in rows if state in ("all", r["state"])]
+        rows = milestone_filter(model, rows, query)
+        rows = label_filter(model, rows, query)
         return 200, self.paged(
-            sorted(rows, key=lambda r: r["number"], reverse=True), query)
+            sorted(rows, key=lambda r: r["number"], reverse=True), query,
+            model["settings"])
 
     @staticmethod
     def combined_status(
@@ -671,8 +803,13 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     @staticmethod
-    def paged(rows: list, query: dict) -> list:
+    def paged(rows: list, query: dict, settings: dict | None = None) -> list:
+        # Every list caps limit at max_response_items, as F16 does
+        # (default 50); the cap is set only to test short pages.
         size = int(query.get("limit", ["50"])[0])
+        cap = (settings or {}).get("max_response_items")
+        if cap is not None:
+            size = min(size, cap)
         page = int(query.get("page", ["1"])[0])
         return rows[(page - 1) * size:page * size]
 

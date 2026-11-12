@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import (
-    Callable, Literal, NotRequired, Protocol, TypedDict, runtime_checkable,
+    Callable, Literal, NotRequired, Protocol, TypedDict, TypeVar,
+    runtime_checkable,
 )
 import re
 
@@ -209,7 +210,110 @@ class IssueRecord(TypedDict):
     is_pull_request: bool
     body: str
     labels: list[str]
+    # The title of the issue's milestone, or null (#164).
+    milestone: str | None
     comments: tuple[Evidence, ...]
+
+
+def milestone_title(value: object, label: str) -> str | None:
+    """Read a milestone object's title; null when the issue has none."""
+    if value is None:
+        return None
+    return text_value(
+        object_value(value, label).get("title"), f"{label}.title"
+    )
+
+
+@dataclass(frozen=True)
+class Milestone:
+    """One milestone of the repository, open or closed (#164).
+
+    ``number`` is the forge's own reference: GitHub's milestone number,
+    Forgejo's milestone ID.
+    """
+
+    number: int
+    title: str
+    state: str
+
+
+def parse_milestone(value: object, key: str) -> Milestone:
+    """Read one milestone; ``key`` names the forge's reference field."""
+    data = object_value(value, "milestone")
+    state = data.get("state")
+    if state not in ("open", "closed"):
+        raise ForgeError("milestone.state must be open or closed")
+    return Milestone(
+        positive(data.get(key), f"milestone.{key}"),
+        text_value(data.get("title"), "milestone.title"),
+        state,
+    )
+
+
+class ClosingPullRequest(TypedDict):
+    """A merged pull request the forge links to an issue as closing it."""
+
+    number: int
+    # The pull request's repository as ``owner/name``.
+    repository: str
+
+
+class ListedIssue(TypedDict):
+    """One issue an adapter read for ``issue list`` (#164).
+
+    The command prints every field but ``is_pull_request``; there is no
+    body and no comment.
+    """
+
+    number: int
+    title: str
+    state: str
+    # The forge's reason in lower case; null where the forge gives none.
+    state_reason: str | None
+    labels: list[str]
+    milestone: str | None
+    is_pull_request: bool
+    # Empty for an open issue, for which the forge is not asked; null,
+    # meaning unknown, when the forge refuses the read after the listing
+    # was read or, on Forgejo, when the timeline read did not reach the
+    # issue's last close (decision 5 of #164).
+    closed_by: list[ClosingPullRequest] | None
+
+
+IssueState = Literal["open", "closed", "all"]
+
+
+@dataclass(frozen=True)
+class IssueQuery:
+    """What ``issue list`` asks for; ``matches`` decides on each record."""
+
+    state: IssueState
+    milestone: Milestone | None
+    labels: tuple[str, ...]
+
+    def matches(self, issue: ListedIssue) -> bool:
+        """Whether an issue's own record fits the query.
+
+        A forge's filter may be ignored or may select another milestone, so
+        no row is trusted to match because the forge returned it.
+        """
+        return (
+            not issue["is_pull_request"]
+            and self.state in ("all", issue["state"])
+            and (
+                self.milestone is None
+                or issue["milestone"] == self.milestone.title
+            )
+            and all(name in issue["labels"] for name in self.labels)
+        )
+
+
+def closing_order(
+    found: list[ClosingPullRequest],
+) -> list[ClosingPullRequest]:
+    """Each pull request once, ordered by repository and number."""
+    unique = {(pr["repository"], pr["number"]): pr for pr in found}
+    return [unique[key] for key in sorted(unique)]
 
 
 class RelatedIssue(TypedDict):
@@ -247,10 +351,13 @@ def related_issue(
     }
 
 
-def exposed(
-    read: Callable[[], list[RelatedIssue] | None],
-) -> list[RelatedIssue] | None:
-    """Return one dependency list, or null when the forge refuses it."""
+Exposed = TypeVar("Exposed")
+
+
+def exposed(read: Callable[[], Exposed | None]) -> Exposed | None:
+    """Return one list read after the main read, or null when the forge
+    refuses it: a dependency list (#144) or an issue's closing pull
+    requests (#164)."""
     try:
         return read()
     except ForgeError as error:
@@ -310,6 +417,8 @@ class Forge(Protocol):
     def issue(self, number: int) -> IssueRecord: ...
     def open_issues(self) -> dict[int, str]: ...
     def labels(self) -> tuple[str, ...]: ...
+    def milestones(self) -> tuple[Milestone, ...]: ...
+    def issues(self, query: IssueQuery) -> list[ListedIssue]: ...
 
     def create_issue(
         self, title: str, body: str, label: str,

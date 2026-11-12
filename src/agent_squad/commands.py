@@ -45,6 +45,8 @@ from .forge import (
     ChecksUnavailable,
     ForgeError,
     Forge,
+    IssueQuery,
+    IssueState,
     PullRequest,
     ReviewComment,
     ReviewPublication,
@@ -289,6 +291,49 @@ def view_issue(repository: Repository, forge: Forge, number: int) -> dict:
         # Only this read asks for dependencies (#144).
         **forge.issue_dependencies(number),
         "paths": workflow_paths(repository, issue=number),
+    }
+
+
+def list_issues(
+    forge: Forge, milestone: str | None, labels: list[str], state: IssueState,
+) -> dict:
+    """List the issues that match on their own records (#164).
+
+    An unknown or ambiguous milestone title and an unknown label are errors,
+    never an empty list, which would read as "nothing is missing".
+    """
+    names = tuple(dict.fromkeys(labels))
+    target = None
+    if milestone is not None:
+        found = [m for m in forge.milestones() if m.title == milestone]
+        if not found:
+            raise AgentSquadError(f"no milestone has the title {milestone}")
+        if len(found) > 1:
+            raise AgentSquadError(
+                f"{len(found)} milestones have the title {milestone};"
+                " issue list cannot tell them apart"
+            )
+        target = found[0]
+    if names:
+        existing = set(forge.labels())
+        for name in names:
+            if name not in existing:
+                raise AgentSquadError(f"repository has no label named {name}")
+    query = IssueQuery(state, target, names)
+    rows: dict[int, dict] = {}
+    for row in forge.issues(query):
+        # The adapter checks the same before its expensive reads; this
+        # check is the command's guarantee whatever the adapter returned.
+        if query.matches(row):
+            rows.setdefault(row["number"], {
+                key: value for key, value in row.items()
+                if key != "is_pull_request"
+            })
+    return {
+        "milestone": milestone,
+        "labels": list(names),
+        "state": state,
+        "issues": [rows[number] for number in sorted(rows)],
     }
 
 

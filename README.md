@@ -246,6 +246,7 @@ The following reads help you inspect a PR; issue and PR numbers can differ:
 
 ```bash
 agent-squad issue view --issue 42 --json
+agent-squad issue list --milestone v1.2.0 --state closed --json
 agent-squad pr head --pr 43 --json
 agent-squad pr reviews --pr 43 --json
 agent-squad pr checks --pr 43 --json
@@ -345,7 +346,7 @@ shipped command path.
 | Commands | Purpose |
 | --- | --- |
 | `init`, `doctor`, `skill install` | Configure the consuming repository, diagnose prerequisites, install role skills. |
-| `issue view`, `issue comment`, `issue create`, `issue label` | Read the governing issue, comments, labels, dependencies, and configured paths; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`; add or remove existing labels on an issue to apply a closing rule the repository documents, never removing `needs-triage`, `needs-info`, `ready-for-human`, or `wontfix`. |
+| `issue view`, `issue list`, `issue comment`, `issue create`, `issue label` | Read the governing issue, comments, labels, milestone, dependencies, and configured paths; list a milestone's issues, issues with given labels, or issues in a state, each closed issue with the merged pull requests the forge links to it as closing it; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`; add or remove existing labels on an issue to apply a closing rule the repository documents, never removing `needs-triage`, `needs-info`, `ready-for-human`, or `wontfix`. |
 | `pr create`, `pr report` | Publish the Task and implementation report, ending with `Closes #<issue>`, or with `Ref #<issue>` under `pr create --partial --task <file>` for a PR that delivers part of an issue and leaves it open; update the report on an open PR, keeping that footer. |
 | `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head or a merged PR's merge commit, and derived workflow state. |
 | `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
