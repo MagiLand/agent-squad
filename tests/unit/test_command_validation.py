@@ -16,10 +16,12 @@ add_src_to_path()
 from agent_squad.cli import main, positive_argument  # noqa: E402
 from agent_squad.commands import (  # noqa: E402
     comment_issue, compose_reply, compose_review, create_issue, create_pr,
-    label_issue, load_threads, view_issue, workflow_paths,
+    label_issue, list_issues, load_threads, view_issue, workflow_paths,
 )
 from agent_squad.conventions import validate_review_body  # noqa: E402
-from agent_squad.forge import Evidence, ForgeError  # noqa: E402
+from agent_squad.forge import (  # noqa: E402
+    Evidence, ForgeError, IssueQuery, Milestone,
+)
 from agent_squad.initialization import (  # noqa: E402
     AgentSquadError, Repository, RetainedError,
 )
@@ -816,3 +818,134 @@ class IssueCreateOptionTests(unittest.TestCase):
         )
         self.assertTrue(
             stdout.getvalue().startswith("Created issue #12 for triage.\n"))
+
+
+def listed(number: int, **fields: object) -> dict:
+    return {
+        "number": number, "title": f"T{number}", "state": "closed",
+        "state_reason": "completed", "labels": ["bug", "area"],
+        "milestone": "v1", "is_pull_request": False,
+        "closed_by": [{"number": 40 + number, "repository": "o/r"}],
+    } | fields
+
+
+class StubListForge:
+    """Serve milestones, labels and listed rows; record each read."""
+
+    def __init__(self, rows: list[dict], milestones=(
+        Milestone(3, "v1", "closed"), Milestone(4, "V1", "open"),
+        Milestone(5, "v1.1", "open"),
+    )) -> None:
+        self.rows = rows
+        self.repository_milestones = tuple(milestones)
+        self.calls: list[tuple] = []
+
+    def milestones(self) -> tuple[Milestone, ...]:
+        self.calls.append(("milestones",))
+        return self.repository_milestones
+
+    def labels(self) -> tuple[str, ...]:
+        self.calls.append(("labels",))
+        return ("bug", "area", "a,b")
+
+    def issues(self, query: IssueQuery) -> list[dict]:
+        self.calls.append(("issues", query))
+        return self.rows
+
+
+class IssueListTests(unittest.TestCase):
+    def test_unknown_or_shared_milestones_and_labels_list_nothing(
+        self,
+    ) -> None:
+        shared = (Milestone(3, "v1", "closed"), Milestone(8, "v1", "open"))
+        for milestone, labels, milestones, error in (
+            ("v9", [], None, "no milestone has the title v9$"),
+            ("v1 ", [], None, "no milestone has the title v1 $"),
+            ("v1", [], shared,
+             "2 milestones have the title v1; issue list cannot tell"),
+            (None, ["bug", "BUG"], None,
+             "repository has no label named BUG$"),
+            ("v1", ["a"], None, "repository has no label named a$"),
+        ):
+            forge = StubListForge([listed(1)], *(
+                () if milestones is None else (milestones,)))
+            with self.subTest(milestone=milestone, labels=labels):
+                with self.assertRaisesRegex(AgentSquadError, error):
+                    list_issues(forge, milestone, labels, "open")
+                self.assertNotIn("issues", [c[0] for c in forge.calls])
+
+    def test_each_record_is_checked_and_rows_are_sorted_once(self) -> None:
+        forge = StubListForge([
+            listed(9), listed(2, milestone="V1"), listed(4),
+            listed(3, state="open", closed_by=[]),
+            listed(5, labels=["bug"]),
+            listed(6, is_pull_request=True),
+            listed(4, title="again"), listed(1, labels=["area", "bug", "x"]),
+        ])
+        result = list_issues(
+            forge, "v1", ["bug", "area", "bug"], "closed")
+        self.assertEqual(forge.calls[-1], ("issues", IssueQuery(
+            "closed", Milestone(3, "v1", "closed"), ("bug", "area"))))
+        self.assertEqual(
+            {key: value for key, value in result.items() if key != "issues"},
+            {"milestone": "v1", "labels": ["bug", "area"], "state": "closed"},
+        )
+        self.assertEqual([row["number"] for row in result["issues"]],
+                         [1, 4, 9])
+        self.assertEqual(result["issues"][1], {
+            key: value for key, value in listed(4).items()
+            if key != "is_pull_request"
+        })
+
+    def test_no_filter_reads_neither_milestones_nor_labels(self) -> None:
+        forge = StubListForge([])
+        self.assertEqual(list_issues(forge, None, [], "all"), {
+            "milestone": None, "labels": [], "state": "all", "issues": [],
+        })
+        self.assertEqual(forge.calls, [
+            ("issues", IssueQuery("all", None, ())),
+        ])
+
+
+class IssueListOptionTests(unittest.TestCase):
+    def test_options_reach_execution_and_output_counts_rows(self) -> None:
+        for options, error in (
+            (("--state", "merged"), "invalid choice"),
+            (("--issue", "5"), "unrecognized arguments"),
+            (("--as", "developer"), "invalid choice"),
+        ):
+            stderr = io.StringIO()
+            with (
+                self.subTest(options=options),
+                patch("agent_squad.cli.execute") as execute,
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(["issue", "list", *options])
+            self.assertEqual(raised.exception.code, 2)
+            execute.assert_not_called()
+            self.assertIn(error, stderr.getvalue())
+        for rows, line in (([], "0 issues"), ([{}], "1 issue"),
+                           ([{}, {}], "2 issues")):
+            stdout = io.StringIO()
+            with (
+                patch("agent_squad.cli.execute", return_value={
+                    "milestone": None, "labels": [], "state": "open",
+                    "issues": rows,
+                }) as execute,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(main(["issue", "list"]), 0)
+            self.assertTrue(
+                stdout.getvalue().startswith(f"{line} listed.\n{{"))
+        args = execute.call_args.args[0]
+        self.assertEqual((args.role, args.milestone, args.label, args.state),
+                         (None, None, [], "open"))
+        with patch("agent_squad.cli.execute", return_value={}) as execute, \
+                contextlib.redirect_stdout(io.StringIO()):
+            main(["issue", "list", "--as", "reviewer", "--milestone", "v1",
+                  "--label", "a", "--label", "b", "--state", "all",
+                  "--json"])
+        args = execute.call_args.args[0]
+        self.assertEqual((args.role, args.milestone, args.label, args.state),
+                         ("reviewer", "v1", ["a", "b"], "all"))

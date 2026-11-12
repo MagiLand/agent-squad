@@ -86,8 +86,14 @@ def parser() -> argparse.ArgumentParser:
             )
         p.add_argument("--json", action="store_true")
 
-    issue = command("issue", ("view", "comment", "create", "label"))
+    issue = command("issue", ("view", "list", "comment", "create", "label"))
     common(issue["view"], number="issue")
+    common(issue["list"], number=None)
+    issue["list"].add_argument("--milestone")
+    issue["list"].add_argument("--label", action="append", default=[])
+    issue["list"].add_argument(
+        "--state", choices=("open", "closed", "all"), default="open",
+    )
     common(
         issue["comment"], role="implementer", number="issue", mutation=True
     )
@@ -247,6 +253,10 @@ def execute(args: argparse.Namespace) -> dict:
         )
     if key == ("issue", "view"):
         return commands.view_issue(repository, forge, args.issue)
+    if key == ("issue", "list"):
+        return commands.list_issues(
+            forge, args.milestone, args.label, args.state
+        )
     if key == ("issue", "comment"):
         return commands.comment_issue(
             forge, args.issue, commands.read_file(args.body)
@@ -503,6 +513,12 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                     f'Stopped waiting after {result["waited_seconds"]}'
                     " seconds; checks are not final."
                 )
+            print(json.dumps(result, indent=2, default=json_default))
+        elif (args.group, getattr(args, "command", None)) == (
+            "issue", "list",
+        ):
+            count = len(result["issues"])
+            print(f'{count} {"issue" if count == 1 else "issues"} listed.')
             print(json.dumps(result, indent=2, default=json_default))
         elif (args.group, getattr(args, "command", None)) == (
             "issue", "create",

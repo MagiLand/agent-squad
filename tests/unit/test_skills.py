@@ -676,3 +676,66 @@ class IssueClosingRuleSkillTests(unittest.TestCase):
         # The Reviewer never changes a label.
         self.assertNotIn(
             "issue label", packaged_skill("squad-reviewer").decode())
+
+
+class IssueListSkillTests(unittest.TestCase):
+    """Both skills name `issue list` as evidence only (#164)."""
+
+    CLOSED_BY = (
+        "Its `closed_by` for each closed issue is the forge's link to the "
+        "merged pull requests that close the issue, not a record of the "
+        "event that closed it: an issue closed by one pull request, "
+        "reopened, and closed by another lists both; a merged, linked pull "
+        "request is listed even when the issue was last closed by hand; a "
+        "pull request closed without merging, or one that only refers to "
+        "the issue (`Ref #<N>`), is not listed; and an issue closed by hand, "
+        "or by a commit that no pull request links, lists none."
+    )
+    EVIDENCE = (
+        "Its output is evidence only: a listed issue is not thereby a Task, "
+        "and the list replaces neither `issue view` for a Task nor `status` "
+        "for a pull request."
+    )
+
+    def test_both_preambles_name_the_read_and_what_it_proves(self) -> None:
+        for name in ("squad-implementer", "squad-reviewer"):
+            preamble = flat(packaged_skill(name).decode()).split("## 1.")[0]
+            with self.subTest(skill=name):
+                self.assertIn(
+                    "`agent-squad issue list [--milestone <title>] "
+                    "[--label <name>]... [--state open|closed|all] --json`",
+                    preamble)
+                self.assertIn(self.CLOSED_BY, preamble)
+                self.assertIn(self.EVIDENCE, preamble)
+
+    def test_gh_rules_are_unchanged(self) -> None:
+        reviewer = flat(packaged_skill("squad-reviewer").decode())
+        self.assertIn("Never call `gh`, retrieve or read a token, or switch "
+                      "forge identities.", reviewer)
+        self.assertNotIn("GitHub", reviewer)
+        implementer = flat(packaged_skill("squad-implementer").decode())
+        allowance = implementer.split("For a GitHub repository", 1)[1].split(
+            "On another forge", 1)[0]
+        self.assertEqual(
+            allowance,
+            ", for CI evidence and required-check metadata these commands do "
+            "not expose (logs, durations, and required-check configuration), "
+            "use read-only `gh run list`, `gh run view` (including logs), "
+            "`gh run watch <run-id> --exit-status`, `gh pr checks`, or "
+            "`gh api --method GET` against Actions, check, "
+            "branch-protection, or branch-rule endpoints. Scope queries to "
+            "the configured "
+            "repository. Match CI evidence to the full current PR head SHA "
+            "and event; match post-merge push evidence to the integration "
+            "commit. Record run IDs, results, and per-job durations when "
+            "relevant. Distinguish checks that ran from checks configured as "
+            "required. Report missing access or required-check configuration "
+            "instead of inferring it from green CI. This allowance does not "
+            "permit `gh` mutations, other `gh` reads, or using `gh` for Task, "
+            "PR, review, decision, stop, or budget authority. Never retrieve "
+            "credentials, read a token, switch forge identities, or "
+            "reconstruct authority from local files. Use existing "
+            "authenticated access; if it is insufficient, report the "
+            "limitation. ",
+        )
+        self.assertNotIn("issue list", allowance)

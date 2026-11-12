@@ -369,6 +369,12 @@ def owner_lists(node_id):
     kind, _, key = node_id.partition("-")
     if kind == "PR":
         return pr_lists(refresh(prs_model()[key]))
+    if kind == "I":
+        # An issue's node ID carries its repository, which the closing
+        # links name when a pull request is in the same repository.
+        key, _, here = key.partition("@")
+        return gql_issue(
+            key, here, "includeClosedPrs:true" in payload["query"])
     for pr in prs_model().values():
         for review in pr.get("reviews", []):
             if f"PRR-{review['id']}" == node_id:
@@ -389,6 +395,70 @@ def owner_lists(node_id):
 
 def prs_model():
     return model.setdefault("prs", {})
+
+
+# Milestones and closing links (#164). model["milestones"] holds objects with
+# "id" (GitHub's milestone number here), "title" and "state"; an issue's or
+# PR's "milestone" names an id. An issue's "linked_prs" lists the PRs linked
+# to it as closing it and "referring_prs" those that only refer to it, each
+# a key of model["prs"] or "owner/repo#N" naming model["foreign_prs"].
+def milestone_wire(ident):
+    for row in model.get("milestones", []):
+        if row["id"] == ident:
+            return {"number": row["id"], "title": row["title"],
+                    "state": row["state"]}
+    return None
+
+
+def linked_pr(ref, here):
+    source, _, key = ref.rpartition("#")
+    pr = model["foreign_prs"][ref] if source else prs_model()[ref]
+    return {"number": int(key), "state": pr["state"], "merged": pr["merged"],
+            "repository": source or here}
+
+
+def gql_issue(key, here, include_closed):
+    issue = model["issues"][key]
+    links = [linked_pr(ref, here) for ref in issue.get("linked_prs", [])]
+    milestone = milestone_wire(issue.get("milestone"))
+    return {
+        "id": f"I-{key}@{here}",
+        "number": issue["number"],
+        "title": issue["title"],
+        "state": issue["state"].upper(),
+        "stateReason": (issue.get("state_reason") or "").upper() or None,
+        "milestone": None if milestone is None else {
+            "title": milestone["title"]},
+        "labels": [{"name": label["name"]} for label in issue["labels"]],
+        # GraphQL leaves out a PR closed unmerged unless includeClosedPrs.
+        "closedByPullRequestsReferences": [
+            {"number": link["number"], "merged": link["merged"],
+             "repository": {"nameWithOwner": link["repository"]}}
+            for link in links
+            if include_closed or link["merged"] or link["state"] == "open"
+        ],
+    }
+
+
+def issue_listing(variables, include_closed):
+    """GitHub's GraphQL issue listing as probed for #164: issues only,
+    any of the labels (letter case ignored), and the milestone by number."""
+    here = f"{variables['owner']}/{variables['repo']}"
+    states = variables.get("states") or ["OPEN", "CLOSED"]
+    wanted = {name.casefold() for name in variables.get("labels") or []}
+    number = (variables.get("filter") or {}).get("milestoneNumber")
+    nodes = []
+    for key in sorted(model["issues"], key=int, reverse=True):
+        issue = model["issues"][key]
+        names = {label["name"].casefold() for label in issue["labels"]}
+        if issue["state"].upper() not in states:
+            continue
+        if wanted and not wanted & names:
+            continue
+        if number is not None and str(issue.get("milestone")) != number:
+            continue
+        nodes.append(gql_issue(key, here, include_closed))
+    return nodes
 
 
 def checks_refused(alias):
@@ -483,6 +553,14 @@ if endpoint == "graphql":
         output({"data": {"node": {field: gql_page(
             lists[field], f"{owner}.{field}", variables["cursor"]
         )}}})
+    if operation == "SquadIssues":
+        nodes = issue_listing(
+            variables, "includeClosedPrs:true" in payload["query"])
+        page = gql_page(nodes, "Repository.issues", variables.get("cursor"))
+        for node in page["nodes"]:
+            for field in ("labels", "closedByPullRequestsReferences"):
+                node[field] = gql_page(node[field], f"Issue.{field}")
+        output({"data": {"repository": {"issues": page}}})
     if operation != "SquadThreads":
         fail("unknown GraphQL operation " + operation, 400)
     # The thread read before #149, kept for older source trees.
@@ -618,12 +696,22 @@ if (kind == "commits" and parts[5:] in (["check-runs"], ["status"])) or (
     })
 if kind == "labels":
     output(paged(model.get("labels", []), query))
+if kind == "milestones":
+    # Without state=all GitHub lists only open milestones.
+    state = query.get("state", ["open"])[0]
+    output(paged(
+        [milestone_wire(row["id"]) for row in model.get("milestones", [])
+         if state in ("all", row["state"])],
+        query,
+    ))
 if kind == "issues":
     # GitHub numbers issues and PRs together; this model numbers them apart,
     # so the fixtures' issue 1 and PR 1 share a number.
     def as_issue(key):
         if key in model["issues"]:
-            return model["issues"][key]
+            issue = model["issues"][key]
+            return {**issue,
+                    "milestone": milestone_wire(issue.get("milestone"))}
         # The issues API serves a PR number as an issue marked as a PR.
         pull = prs[key]
         return {
@@ -632,6 +720,7 @@ if kind == "issues":
                 "created_at",
             )},
             "labels": [],
+            "milestone": milestone_wire(pull.get("milestone")),
             "pull_request": {
                 "url": "https://api.github.com/repos/"
                 + "/".join(parts[1:3]) + f"/pulls/{key}",
@@ -654,7 +743,7 @@ if kind == "issues":
                 labels=[{"name": name} for name in names], conversation=[],
             )
             model["issues"][number] = issue
-            output(issue)
+            output(as_issue(number))
         state = query.get("state", ["open"])[0]
         keys = sorted({*model["issues"], *prs}, key=int, reverse=True)
         output(paged(

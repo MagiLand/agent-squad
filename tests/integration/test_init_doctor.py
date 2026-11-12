@@ -333,6 +333,6 @@ class IdentityConfigurationTests(unittest.TestCase):
                     )
                     self.assertIn(self.REMOVED, text)
                     commands += 1
-            self.assertEqual(commands, 27)
+            self.assertEqual(commands, 28)
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(len(f.read_model()["calls"]), calls)

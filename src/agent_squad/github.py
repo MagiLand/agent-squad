@@ -12,12 +12,13 @@ import time
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from .forge import (
-    CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable, Comment,
-    Evidence, ForgeError, IssueDependencies, IssueRecord, MergeResult,
+    CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable,
+    ClosingPullRequest, Comment, Evidence, ForgeError, IssueDependencies,
+    IssueQuery, IssueRecord, ListedIssue, MergeResult, Milestone,
     PullRequest, RelatedIssue, Review, ReviewPublication, ReviewState, Role,
-    Snapshot, ThreadState, V, array, boolean, branch_present,
-    delete_and_confirm, exposed, object_value, oid, positive, related_issue,
-    text_value,
+    Snapshot, ThreadState, V, array, boolean, branch_present, closing_order,
+    delete_and_confirm, exposed, milestone_title, object_value, oid,
+    parse_milestone, positive, related_issue, text_value,
 )
 from .initialization import Repository, decode_json
 
@@ -137,6 +138,7 @@ def parse_issue(value: object) -> IssueRecord:
             )
             for label in array(data.get("labels"), "labels")
         ],
+        "milestone": milestone_title(data.get("milestone"), "issue.milestone"),
         "comments": (),
     }
 
@@ -356,6 +358,57 @@ CHECKS_QUERY = f"""query SquadChecks(
   }}
 }}"""
 PR_STATES = {"OPEN": "open", "CLOSED": "closed", "MERGED": "closed"}
+# The issue listing of `issue list` (#164). Every request value is a
+# variable. `labels:` returns the issues carrying any of the labels and
+# `filterBy.milestoneNumber` takes the milestone's number; `issues` holds no
+# pull request. The linked pull requests leave out those closed unmerged.
+ISSUE_LABELS = Connection("labels", "Issue", "name")
+CLOSING_PRS = Connection(
+    "closedByPullRequestsReferences", "Issue",
+    "number merged repository { nameWithOwner }",
+    arguments="includeClosedPrs:false",
+)
+ISSUES_QUERY = f"""query SquadIssues(
+  $owner:String!, $repo:String!, $states:[IssueState!], $labels:[String!],
+  $filter:IssueFilters, $cursor:String
+) {{
+  repository(owner:$owner, name:$repo) {{
+    issues(
+      first:{PAGE_SIZE}, after:$cursor, states:$states, labels:$labels,
+      filterBy:$filter
+    ) {{
+      nodes {{
+        id number title state stateReason milestone {{ title }}
+        {selection(ISSUE_LABELS)}
+        {selection(CLOSING_PRS)}
+      }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }}
+}}"""
+ISSUE_STATES = {"OPEN": "open", "CLOSED": "closed"}
+QUERY_STATES = {
+    "open": ["OPEN"], "closed": ["CLOSED"], "all": ["OPEN", "CLOSED"],
+}
+
+
+def closing_pull_request(value: object) -> ClosingPullRequest | None:
+    """A linked pull request when it is merged; null otherwise."""
+    data = object_value(value, "closing pull request")
+    if not boolean(data.get("merged"), "closing pull request.merged"):
+        return None
+    repository = V.require_string(
+        object_value(
+            data.get("repository"), "closing pull request.repository"
+        ).get("nameWithOwner"),
+        "closing pull request.repository.nameWithOwner",
+    )
+    if re.fullmatch(r"[^/]+/[^/]+", repository) is None:
+        raise ForgeError("closing pull request repository must be owner/name")
+    return {
+        "number": positive(data.get("number"), "closing pull request.number"),
+        "repository": repository,
+    }
 
 
 def actor(value: object, label: str) -> dict[str, object]:
@@ -816,6 +869,92 @@ class GitHub:
             )
             for label in self.listing(f"{self.prefix}/labels")
         )
+
+    def milestones(self) -> tuple[Milestone, ...]:
+        # Without state=all GitHub lists only open milestones.
+        return tuple(
+            parse_milestone(row, "number")
+            for row in self.listing(f"{self.prefix}/milestones?state=all")
+        )
+
+    def issues(self, query: IssueQuery) -> list[ListedIssue]:
+        """Read the issue listing for ``query`` in one query per page.
+
+        The forge's filters only narrow the read; ``query.matches`` decides
+        on each issue's record before its linked pull requests are read.
+        """
+        config = self.repository.configuration
+        variables: dict[str, object] = {
+            "owner": config.forge.owner, "repo": config.forge.repo,
+            "states": QUERY_STATES[query.state],
+        }
+        if query.labels:
+            variables["labels"] = list(query.labels)
+        if query.milestone is not None:
+            variables["filter"] = {
+                "milestoneNumber": str(query.milestone.number)
+            }
+        result: list[ListedIssue] = []
+        seen: set[str] = set()
+        cursor = None
+        while True:
+            data = self.graphql(ISSUES_QUERY, {**variables, "cursor": cursor})
+            page = object_value(
+                object_value(data.get("repository"), "repository").get(
+                    "issues"
+                ),
+                "issues",
+            )
+            for node in array(page.get("nodes"), "issues"):
+                row = self.listed_issue(object_value(node, "issue"), query)
+                if row is not None:
+                    result.append(row)
+            info = object_value(page.get("pageInfo"), "pageInfo")
+            if not boolean(info.get("hasNextPage"), "hasNextPage"):
+                return result
+            cursor = V.require_string(info.get("endCursor"), "endCursor")
+            if cursor in seen:
+                raise ForgeError("GraphQL pagination repeated a cursor")
+            seen.add(cursor)
+
+    def listed_issue(
+        self, node: dict, query: IssueQuery,
+    ) -> ListedIssue | None:
+        """One issue node, or null when its record does not match."""
+        state = ISSUE_STATES.get(node.get("state"))
+        if state is None:
+            raise ForgeError("issue.state must be OPEN or CLOSED")
+        if "milestone" not in node:
+            raise ForgeError("issue.milestone is missing")
+        reason = optional_text(node.get("stateReason"), "issue.stateReason")
+        row: ListedIssue = {
+            "number": positive(node.get("number"), "issue.number"),
+            "title": text_value(node.get("title"), "issue.title"),
+            "state": state,
+            "state_reason": None if reason is None else reason.lower(),
+            "labels": [
+                V.require_string(
+                    object_value(label, "label").get("name"), "label.name"
+                )
+                for label in self.complete(
+                    node.get(ISSUE_LABELS.field), ISSUE_LABELS, node.get("id")
+                )
+            ],
+            "milestone": milestone_title(
+                node["milestone"], "issue.milestone"
+            ),
+            "is_pull_request": False,
+            "closed_by": [],
+        }
+        if not query.matches(row):
+            return None
+        if state == "closed":
+            row["closed_by"] = closing_order([
+                pr for pr in map(closing_pull_request, self.complete(
+                    node.get(CLOSING_PRS.field), CLOSING_PRS, node.get("id")
+                )) if pr is not None
+            ])
+        return row
 
     def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
         return parse_issue(self.api(

@@ -26,13 +26,18 @@ from .forge import (
     Check,
     CheckResult,
     ChecksUnavailable,
+    ClosingPullRequest,
     Comment,
+    DEPENDENCY_REFUSALS,
     Evidence,
     ForgeError,
     IssueDependencies,
+    IssueQuery,
     IssueRecord,
+    ListedIssue,
     MergeRefused,
     MergeResult,
+    Milestone,
     PullRequest,
     RelatedIssue,
     Review,
@@ -45,10 +50,13 @@ from .forge import (
     array,
     boolean,
     branch_present,
+    closing_order,
     delete_and_confirm,
     exposed,
+    milestone_title,
     object_value,
     oid,
+    parse_milestone,
     positive,
     related_issue,
     text_value,
@@ -154,7 +162,57 @@ def parse_issue(value: object) -> IssueRecord:
             )
             for label in array(data.get("labels"), "labels")
         ],
+        "milestone": milestone_title(data.get("milestone"), "issue.milestone"),
         "comments": (),
+    }
+
+
+def parse_listed_issue(value: object) -> ListedIssue:
+    """One row of the issue listing (#164); F16 gives no state reason."""
+    data = object_value(value, "issue")
+    if "milestone" not in data:
+        raise ForgeError("issue.milestone is missing")
+    record = parse_issue(data)
+    return {
+        "number": record["number"],
+        "title": record["title"],
+        "state": record["state"],
+        "state_reason": None,
+        "labels": record["labels"],
+        "milestone": record["milestone"],
+        "is_pull_request": record["is_pull_request"],
+        "closed_by": [],
+    }
+
+
+def closing_reference(value: object) -> ClosingPullRequest | None:
+    """A timeline row's merged closing pull request; null for any other.
+
+    F16 writes a ``pull_ref`` row when a pull request names the issue:
+    ``ref_action`` is ``closes`` for a closing keyword and ``none`` for a
+    plain reference, and ``ref_issue`` is the pull request in issue form.
+    """
+    data = object_value(value, "timeline row")
+    if text_value(data.get("type"), "timeline.type") != "pull_ref":
+        return None
+    action = text_value(data.get("ref_action"), "timeline.ref_action")
+    if action != "closes":
+        return None
+    issue = object_value(data.get("ref_issue"), "timeline.ref_issue")
+    pull = object_value(
+        issue.get("pull_request"), "timeline.ref_issue.pull_request"
+    )
+    if not boolean(pull.get("merged"), "timeline.ref_issue.merged"):
+        return None
+    repository = object_value(
+        issue.get("repository"), "timeline.ref_issue.repository"
+    )
+    return {
+        "number": positive(issue.get("number"), "timeline.ref_issue.number"),
+        "repository": V.require_string(
+            repository.get("full_name"),
+            "timeline.ref_issue.repository.full_name",
+        ),
     }
 
 
@@ -623,6 +681,46 @@ class Forgejo:
     def labels(self) -> tuple[str, ...]:
         return tuple(self._label_ids())
 
+    def milestones(self) -> tuple[Milestone, ...]:
+        return tuple(
+            parse_milestone(row, "id")
+            for row in self._all_pages(f"{self.prefix}/milestones?state=all")
+        )
+
+    def issues(self, query: IssueQuery) -> list[ListedIssue]:
+        """Read every issue in the state and check each record (#164).
+
+        No milestone or label filter is sent: F16 ignores one it does not
+        recognise, matches a milestone title before an ID, and splits both
+        at commas, so a filter could return another milestone's issues.
+        """
+        result = []
+        for value in self._all_pages(
+            f"{self.prefix}/issues?state={query.state}&type=issues"
+        ):
+            row = parse_listed_issue(value)
+            if not query.matches(row):
+                continue
+            if row["state"] == "closed":
+                row["closed_by"] = self._closed_by(row["number"])
+            result.append(row)
+        return result
+
+    def _closed_by(self, number: int) -> list[ClosingPullRequest] | None:
+        """Merged pull requests the timeline links as closing the issue;
+        null when the read is refused after the listing was read."""
+        try:
+            rows = self._all_pages(
+                f"{self.prefix}/issues/{number}/timeline", null_ends=True
+            )
+        except ForgeError as error:
+            if error.status in DEPENDENCY_REFUSALS:
+                return None
+            raise
+        return closing_order(
+            [pr for pr in map(closing_reference, rows) if pr is not None]
+        )
+
     def create_issue(self, title: str, body: str, label: str) -> IssueRecord:
         # Creation takes label IDs and silently drops unknown ones (F16).
         ids = self._label_ids()
@@ -643,15 +741,22 @@ class Forgejo:
             )
         return record
 
-    def _all_pages(self, endpoint: str) -> list:
-        """Read pages until an empty one; fail a page that repeats."""
+    def _all_pages(self, endpoint: str, *, null_ends: bool = False) -> list:
+        """Read pages until an empty one; fail a page that repeats.
+
+        A short page does not end the read: the server caps ``limit`` at its
+        ``max_response_items``, which may be below 50, and some lists drop
+        rows after paging (#164). ``null_ends`` accepts JSON null as the
+        empty page, which F16's issue timeline serves beyond its end.
+        """
+        separator = "&" if "?" in endpoint else "?"
         result: list = []
         previous = None
         page = 1
         while True:
-            entries = array(
-                self.api(f"{endpoint}?limit=50&page={page}"), "list"
-            )
+            value = self.api(f"{endpoint}{separator}limit=50&page={page}")
+            entries = [] if value is None and null_ends else array(
+                value, "list")
             if not entries:
                 return result
             if entries == previous:
