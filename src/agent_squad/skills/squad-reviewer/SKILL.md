@@ -20,9 +20,12 @@ the event that closed it: an issue closed by one pull request, reopened, and
 closed by another lists both; a merged, linked pull request is listed even when
 the issue was last closed by hand; a pull request closed without merging, or one
 that only refers to the issue (`Ref #<N>`), is not listed; and an issue closed by
-hand, or by a commit that no pull request links, lists none. Its output is
-evidence only: a listed issue is not thereby a Task, and the list replaces
-neither `issue view` for a Task nor `status` for a pull request.
+hand, or by a commit that no pull request links, lists none. A `closed_by` of
+`null` means the links are unknown, never that there are none: the forge
+refused the read, or on Forgejo the read could not be shown to reach the
+issue's last close. Its output is evidence only: a listed issue is not thereby
+a Task, and the list replaces neither `issue view` for a Task nor `status` for
+a pull request.
 Never call `gh`, retrieve or read a token, or switch forge identities. All
 forge mutations below use `--as reviewer`; the CLI selects the identity.
 Local Git reads, code inspection, and executable probes are still required.

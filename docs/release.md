@@ -173,8 +173,9 @@ each read with these commands at the time of their own work:
   `agent-squad issue list --label bug --state open --json`.
 
 `closed_by` is the forge's link, not a record of the event that closed the
-issue; the skills say what follows from that. The lists are evidence, and
-this issue stays the Task.
+issue; the skills say what follows from that. A `closed_by` of `null` means
+the issue's closing pull requests are unknown, not that there are none. The
+lists are evidence, and this issue stays the Task.
 
 ## What the notes file contains
 
@@ -185,8 +186,10 @@ the file has no top-level heading. It has these sections, in this order:
    `- #<issue> <title> (#<pull request>)`, naming the pull requests in its
    `closed_by`, separated by commas when there are several. An issue whose
    `closed_by` is empty gives the reason it was closed instead, from its
-   `state_reason`, for example "not planned". This issue is not listed; it
-   closes when the pull request merges.
+   `state_reason`, for example "not planned". An issue whose `closed_by` is
+   null names no pull request and reads
+   `- #<issue> <title> (closing pull request unknown)`. This issue is not
+   listed; it closes when the pull request merges.
 2. `## Changes to act on`: every change an existing user must act on,
    including each changed command or option and each changed skill, and
    whether the protocol tag changed, stating the tag either way. To find
@@ -206,8 +209,9 @@ the file has no top-level heading. It has these sections, in this order:
   and compares the notes with its own output: no closed issue of the
   milestone is missing from the notes, each issue the notes name is in the
   first list, each pull request they name is one that `closed_by` gives for
-  its issue, and the known limitations are exactly the open issues labelled
-  `bug`.
+  its issue, an issue whose `closed_by` is null has its closing pull request
+  marked unknown, and the known limitations are exactly the open issues
+  labelled `bug`.
 - The checks at the head passed (`ci` in `agent-squad status --pr <N>
   --json`).
 

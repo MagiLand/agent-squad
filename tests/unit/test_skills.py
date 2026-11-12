@@ -691,6 +691,12 @@ class IssueListSkillTests(unittest.TestCase):
         "the issue (`Ref #<N>`), is not listed; and an issue closed by hand, "
         "or by a commit that no pull request links, lists none."
     )
+    # Decision 5 of #164 gives null a second cause on Forgejo.
+    UNKNOWN = (
+        "A `closed_by` of `null` means the links are unknown, never that "
+        "there are none: the forge refused the read, or on Forgejo the read "
+        "could not be shown to reach the issue's last close."
+    )
     EVIDENCE = (
         "Its output is evidence only: a listed issue is not thereby a Task, "
         "and the list replaces neither `issue view` for a Task nor `status` "
@@ -706,6 +712,7 @@ class IssueListSkillTests(unittest.TestCase):
                     "[--label <name>]... [--state open|closed|all] --json`",
                     preamble)
                 self.assertIn(self.CLOSED_BY, preamble)
+                self.assertIn(self.UNKNOWN, preamble)
                 self.assertIn(self.EVIDENCE, preamble)
 
     def test_gh_rules_are_unchanged(self) -> None:
