@@ -16,7 +16,9 @@ from .anchors import Anchor
 from . import commands
 from . import reviewer
 from . import skills
-from .conventions import DISPOSITIONS, SHA, VERIFICATIONS
+from .conventions import (
+    DISPOSITIONS, GENERAL_KINDS, RECOMMENDATIONS, SHA, VERIFICATIONS,
+)
 from .doctor import diagnose
 from .forge import make_forge
 from .herdr import HerdrClient
@@ -158,6 +160,8 @@ def parser() -> argparse.ArgumentParser:
     decision.add_argument(
         "--merge-instruction", choices=("record", "withdraw")
     )
+    decision.add_argument("--kind", choices=GENERAL_KINDS)
+    decision.add_argument("--recommendation", choices=RECOMMENDATIONS)
     decision.add_argument("--body", required=True)
     stop = command("stop", ("post",))["post"]
     common(stop, mutation=True)
@@ -343,6 +347,8 @@ def execute(args: argparse.Namespace) -> dict:
             args.budget,
             commands.read_file(args.task) if args.task else None,
             args.merge_instruction,
+            args.kind,
+            args.recommendation,
         )
     if key == ("stop", "post"):
         return commands.post_stop(

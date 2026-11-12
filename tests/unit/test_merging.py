@@ -40,7 +40,10 @@ class MergeRulesTests(unittest.TestCase):
     def test_hold_acceptance_preserves_approval_and_moved_base_gates(
         self,
     ) -> None:
-        self.state["merge_hold"] = {"review_id": 42, "text": "Item 3: rules"}
+        self.state["merge_hold"] = {
+            "review_id": 42, "text": "Item 3: rules", "released": True,
+            "release": {"id": 43, "author": "dev", "created_at": "t"},
+        }
         with self.assertRaisesRegex(GateError, "review 42"):
             check_merge_gate(self.state, accept_moved_base=False)
         self.assertFalse(check_merge_gate(
@@ -53,6 +56,20 @@ class MergeRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "approval is stale"):
             check_merge_gate(self.state, accept_moved_base=True,
                              accept_merge_hold=True)
+
+    def test_accepting_a_hold_requires_its_recorded_release(self) -> None:
+        self.state["merge_hold"] = {
+            "review_id": 42, "text": "Item 3: rules", "released": False,
+            "release": None,
+        }
+        for accept in (False, True):
+            with self.subTest(accept_merge_hold=accept):
+                with self.assertRaisesRegex(GateError, "review 42") as raised:
+                    check_merge_gate(self.state, accept_moved_base=False,
+                                     accept_merge_hold=accept)
+                self.assertEqual(
+                    "hold-release decision newer than that review"
+                    in str(raised.exception), accept)
 
     def test_moved_base_is_the_approving_base_not_the_recomputed_merge_base(
         self,

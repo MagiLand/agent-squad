@@ -222,7 +222,7 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
         f.cli("reviewer", "close", "--pr", "1")
         assert f.status()["budget"]["used"] == 3
         steps.append({"step": 7, "result": "budget stop and refused launch"})
-        f.decision(budget=4)
+        f.decision(budget=4, kind="continuation")
         f.reply("REV-4", "Scripted reconsideration evidence.",
                 disposition="rejected")
         assert f.status()["next_action"] == "launch_review"
@@ -300,6 +300,16 @@ def run_scenario(fixture: type[ForgeFixture]) -> dict:
                         cwd=f.repo, expected=4)
         review_id = held["merge_hold"]["review_id"]
         assert f"merge hold in review {review_id}" in refused["error"]
+        refused = f.cli("pr", "merge", "--as", "implementer", "--pr", "2",
+                        "--accept-merge-hold", cwd=f.repo, expected=4)
+        assert "hold-release decision" in refused["error"]
+        f.cli(
+            "decision", "post", "--as", "implementer", "--pr", "2",
+            "--finding", "none", "--kind", "hold-release",
+            "--recommendation", "followed",
+            "--body", f.write("release.md", "> Hold released, merge it."),
+        )
+        assert f.cli("status", "--pr", "2")["merge_hold"]["released"]
         squashed = f.cli(
             "pr", "merge", "--as", "implementer", "--pr", "2",
             "--accept-merge-hold", cwd=f.repo,

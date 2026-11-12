@@ -19,6 +19,31 @@ MERGE_WITHDRAWAL = "Standing merge instruction withdrawn."
 SHA = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 NUMBER = r"[1-9][0-9]*"
 FINDING_ID = rf"REV-{NUMBER}"
+# The decision record line of §7.6: body text the CLI composes, not a
+# tagged line, so the DECISION header and the protocol tag stay unchanged.
+DECISION_RECORD = "Decision record"
+# The --kind values of a general decision.
+GENERAL_KINDS = (
+    "task-approval", "task-amendment", "continuation", "budget",
+    "hold-release", "answer",
+)
+# Records, like standing instructions: they lift no gate (§7.6).
+RECORD_KINDS = ("task-approval", "hold-release")
+RECOMMENDATIONS = ("followed", "changed", "none")
+RECORD_LINE = re.compile(
+    rf"{DECISION_RECORD}: kind=(?P<kind>finding|"
+    + "|".join(GENERAL_KINDS)
+    + r") recommendation=(?P<recommendation>"
+    + "|".join(RECOMMENDATIONS)
+    + r")"
+)
+# pr create's first Task line for an issue copied without rewording.
+COPY_SENTENCE = (
+    'This Task is issue #{number}, "{title}", copied without rewording.'
+)
+COPY_PATTERN = re.compile(
+    rf'This Task is issue #{NUMBER}, "(?s:.*)", copied without rewording\.'
+)
 VERDICTS = ("approved", "changes_requested", "needs_human")
 DISPOSITIONS = ("fixed", "rejected", "needs-human")
 VERIFICATIONS = {
@@ -312,12 +337,16 @@ def task_from_issue(issue: dict) -> str:
         # The issue ends the code block implicitly; the appended report cannot.
         lines.append(("" if lines[-1].endswith("\n") else "\n") + fence + "\n")
     title = issue["title"].replace("\r\n", "\n").replace("\r", "\n")
-    task = (
-        f'## Task\n\nThis Task is issue #{issue["number"]}, "{title}", '
-        'copied without rewording.\n\n' + "".join(lines)
-    )
+    sentence = COPY_SENTENCE.format(number=issue["number"], title=title)
+    task = f"## Task\n\n{sentence}\n\n" + "".join(lines)
     validate_section(task, "Task")
     return task
+
+
+def copied_task(task: str) -> bool:
+    """Report whether a Task section is pr create's copy of its issue."""
+    paragraph = section_content(task, "Task").split("\n\n", 1)[0]
+    return COPY_PATTERN.fullmatch(paragraph) is not None
 
 
 def merge_directive(body: str) -> str | None:
@@ -326,6 +355,70 @@ def merge_directive(body: str) -> str | None:
         MERGE_INSTRUCTION: "record",
         MERGE_WITHDRAWAL: "withdraw",
     }.get(first_line(body))
+
+
+def opens_with(body: str, text: str) -> bool:
+    """Match an opening line, ignoring leading emphasis or code markers."""
+    return first_line(body).lstrip(" \t*_`").startswith(text)
+
+
+def render_record(kind: str, recommendation: str) -> str:
+    line = f"{DECISION_RECORD}: kind={kind} recommendation={recommendation}"
+    if RECORD_LINE.fullmatch(line) is None:
+        raise AgentSquadError("invalid decision record line")
+    return line
+
+
+def record_conflict(
+    kind: str, finding: str, budget: int | None, task: str | None,
+) -> str | None:
+    """Name what contradicts a kind in the decision itself.
+
+    ``decision post`` refuses these combinations of its options, and
+    ``status`` reports a hand-written record line naming one as ``unknown``.
+    """
+    if (kind == "finding") != (finding != "none"):
+        return (
+            f"a decision on {finding} is kind finding, not {kind}"
+            if finding != "none"
+            else "kind finding requires a specific finding"
+        )
+    if (kind == "task-amendment") != (task is not None):
+        return (
+            f"a Task amendment is kind task-amendment, not {kind}"
+            if task is not None
+            else "kind task-amendment requires the amended Task (--task)"
+        )
+    if kind == "budget" and budget is None:
+        return "kind budget requires budget= (--budget)"
+    if kind in RECORD_KINDS and budget is not None:
+        return f"kind {kind} is a record and carries no budget= (--budget)"
+    return None
+
+
+def decision_record(
+    prose: str, finding: str, budget: int | None, task: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Read kind and recommendation from the prose after the header.
+
+    Returns the kind, the recommendation, and the reason a line that opens
+    with ``Decision record`` was not accepted. A standing instruction or
+    withdrawal is kind ``merge-instruction`` without a recommendation; any
+    other decision without an accepted line is ``unknown`` (§7.9).
+    """
+    if merge_directive(prose):
+        return "merge-instruction", None, None
+    if not opens_with(prose, DECISION_RECORD):
+        return "unknown", "unknown", None
+    line = first_line(prose)
+    match = RECORD_LINE.fullmatch(line)
+    problem = (
+        record_conflict(match["kind"], finding, budget, task) if match
+        else f"malformed decision record line: {line}"
+    )
+    if problem:
+        return "unknown", "unknown", problem
+    return match["kind"], match["recommendation"], None
 
 
 def validate_merge_directive(
@@ -535,13 +628,22 @@ def derive(
                             )
                         validate_section(task + "\n", "Task")
                     entry["task"] = task
+                    prose = comment.body.partition("\n")[2].lstrip("\r\n")
                     entry["merge_directive"] = validate_merge_directive(
-                        comment.body.partition("\n")[2].lstrip("\r\n"),
-                        entry["finding"], entry.get("budget"), task,
+                        prose, entry["finding"], entry.get("budget"), task,
                     )
                 except AgentSquadError as error:
                     diagnostic("malformed", comment, str(error))
                     continue
+                # A rejected record line leaves the decision in force as an
+                # ordinary one, as every decision without the line is.
+                entry["kind"], entry["recommendation"], problem = (
+                    decision_record(
+                        prose, entry["finding"], entry.get("budget"), task
+                    )
+                )
+                if problem:
+                    diagnostic("malformed_decision_record", comment, problem)
                 decisions.append(entry)
             else:
                 stops.append(entry)
@@ -813,7 +915,12 @@ def derive(
         finding.update(thread_state(finding))
 
     latest = reviews[-1] if reviews else None
-    ordinary_decisions = [d for d in decisions if not d["merge_directive"]]
+    # Standing instructions, Task approvals, and hold releases are records:
+    # they lift no stop, settle no question, and are no design decision.
+    ordinary_decisions = [
+        d for d in decisions
+        if not d["merge_directive"] and d["kind"] not in RECORD_KINDS
+    ]
     latest_decision = ordinary_decisions[-1] if ordinary_decisions else None
     latest_stop = stops[-1] if stops else None
     amendments = [d for d in decisions if d.get("task")]
@@ -829,8 +936,20 @@ def derive(
     hold_text = section_content(latest["body"], "Merge hold") if (
         latest and section(latest["body"], "Merge hold") is not None
     ) else None
+    # Only a release newer than the review that carries the hold counts, so a
+    # later held review needs its own (§7.10).
+    releases = [
+        d for d in decisions
+        if d["kind"] == "hold-release" and newer(d, latest)
+    ]
+    release = (
+        {k: releases[-1][k] for k in ("id", "author", "created_at")}
+        if releases else None
+    )
     merge_hold = (
-        {"review_id": latest["id"], "text": hold_text} if hold_text else None
+        {"review_id": latest["id"], "text": hold_text,
+         "released": release is not None, "release": release}
+        if hold_text else None
     )
     try:
         validate_pr_body(pr.evidence.body)

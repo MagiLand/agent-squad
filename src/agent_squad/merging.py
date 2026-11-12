@@ -265,6 +265,13 @@ def check_merge_gate(
             f'merge hold in review {hold["review_id"]}: {hold["text"]}; '
             "Developer review and explicit --accept-merge-hold required"
         )
+    elif hold and not hold["released"]:
+        reasons.append(
+            f'merge hold in review {hold["review_id"]}: {hold["text"]}; '
+            "--accept-merge-hold requires a hold-release decision newer than"
+            " that review: record the Developer's release with decision post"
+            " --kind hold-release"
+        )
     if reasons:
         raise GateError("pr merge refused: " + "; ".join(reasons))
     moved = state["target"]["base_tip"] != state["reviews"][-1]["base"]

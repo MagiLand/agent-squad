@@ -66,6 +66,20 @@ def finding(
     }
 
 
+def is_write(call: dict) -> bool:
+    """Whether a recorded fake-forge call could change the forge."""
+    if "method" in call:  # One HTTP request to the Forgejo fake.
+        return call["method"] != "GET"
+    arguments = call["arguments"]  # One process of the fake gh.
+    if arguments[:2] == ["api", "graphql"]:
+        # The snapshot read is a GraphQL query sent with POST.
+        return not call["body"]["query"].lstrip().startswith("query ")
+    return (
+        arguments[0] == "api" and "--method" in arguments
+        and arguments[arguments.index("--method") + 1] != "GET"
+    )
+
+
 class ForgeFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
@@ -435,15 +449,30 @@ class ForgeFixture:
         budget: int | None = None,
         task: str | None = None,
         merge_instruction: str | None = None,
+        kind: str | None = None,
+        recommendation: str | None = "followed",
         expected: int = 0,
         body: str = (
             "Scripted Developer decision: continue under the fixture policy."
         ),
     ) -> dict:
+        """Post a decision; a general one's kind follows from its options.
+
+        A standing instruction takes no kind or recommendation, a finding
+        decision no kind; pass ``kind`` for any other kind, such as a
+        continuation after a stop.
+        """
         file = self.write(
             "decision.md",
             body,
         )
+        if merge_instruction is not None:
+            recommendation = None
+        elif kind is None and fid == "none":
+            kind = (
+                "task-amendment" if task is not None
+                else "budget" if budget is not None else "answer"
+            )
         args = [
             "decision",
             "post",
@@ -462,6 +491,10 @@ class ForgeFixture:
             args += ["--task", self.write("amended-task.md", task)]
         if merge_instruction is not None:
             args += ["--merge-instruction", merge_instruction]
+        if kind is not None:
+            args += ["--kind", kind]
+        if recommendation is not None:
+            args += ["--recommendation", recommendation]
         return self.cli(*args, expected=expected)
 
 

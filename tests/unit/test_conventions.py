@@ -13,6 +13,8 @@ from agent_squad.conventions import (  # noqa: E402
     MERGE_WITHDRAWAL,
     allocate_id,
     closes_issue,
+    copied_task,
+    decision_record,
     derive,
     is_note,
     parse_line,
@@ -20,6 +22,7 @@ from agent_squad.conventions import (  # noqa: E402
     refuse_closing_reference,
     refuse_partial_closing,
     render_line,
+    render_record,
     replace_section,
     review_findings,
     section,
@@ -522,7 +525,8 @@ class StandingMergeTests(unittest.TestCase):
         self.assertEqual(state["next_action"], "approved")
         self.assertTrue(state["approval"]["approved"])
         self.assertEqual(state["merge_hold"], {
-            "review_id": 10, "text": "Item 3: changes merge authority."})
+            "review_id": 10, "text": "Item 3: changes merge authority.",
+            "released": False, "release": None})
         state = derive_state(snapshot(
             reviews=(held, review(11)), conversation=(instruction,)))
         self.assertEqual(state["next_action"], "merge")
@@ -587,6 +591,172 @@ class StandingMergeTests(unittest.TestCase):
             with self.subTest(body=body):
                 with self.assertRaises(AgentSquadError):
                     validate_review_body(body)
+
+
+def record(kind: str, recommendation: str = "followed") -> str:
+    return f"Decision record: kind={kind} recommendation={recommendation}"
+
+
+def held(ident: int) -> Review:
+    value = review(ident)
+    return replace(value, evidence=replace(
+        value.evidence, body=value.evidence.body +
+        "\n## Merge hold\n\nItem 3: changes merge authority.\n"))
+
+
+class DecisionRecordTests(unittest.TestCase):
+    """#147: the record line under the unchanged DECISION header."""
+
+    def test_each_kind_reads_back_and_other_prose_is_unknown(self) -> None:
+        for kind, finding, budget, task in (
+            ("finding", "REV-1", None, None),
+            ("task-approval", "none", None, None),
+            ("task-amendment", "none", None, "## Task\n\nNew."),
+            ("continuation", "none", 4, None),
+            ("continuation", "none", None, None),
+            ("budget", "none", 4, None),
+            ("hold-release", "none", None, None),
+            ("answer", "none", 4, None),
+            ("answer", "none", None, None),
+        ):
+            for recommendation in ("followed", "changed", "none"):
+                with self.subTest(kind=kind, budget=budget,
+                                  recommendation=recommendation):
+                    line = render_record(kind, recommendation)
+                    self.assertEqual(line, record(kind, recommendation))
+                    self.assertEqual(
+                        decision_record(line + "\n\nWhy.", finding, budget,
+                                        task),
+                        (kind, recommendation, None))
+        for prose in ("Hand-written decision.", "", "Decided: kind=answer",
+                      "> Decision record: kind=answer recommendation=none"):
+            with self.subTest(prose=prose):
+                self.assertEqual(decision_record(prose, "none", None, None),
+                                 ("unknown", "unknown", None))
+        for prose in (MERGE_INSTRUCTION, MERGE_WITHDRAWAL + "\n\n> Stop."):
+            with self.subTest(prose=prose):
+                self.assertEqual(decision_record(prose, "none", None, None),
+                                 ("merge-instruction", None, None))
+        for kind, recommendation in (("approach", "followed"),
+                                     ("answer", "unknown"), ("", "none")):
+            with self.subTest(kind=kind, recommendation=recommendation):
+                with self.assertRaises(AgentSquadError):
+                    render_record(kind, recommendation)
+
+    def test_malformed_or_contradicting_lines_are_unknown_with_a_reason(
+        self,
+    ) -> None:
+        for prose in (
+            "Decision record: kind=approach recommendation=followed",
+            "Decision record: kind=answer recommendation=agreed",
+            "Decision record: kind=answer",
+            "Decision record: kind=answer recommendation=none ",
+            "Decision record:  kind=answer recommendation=none",
+            "Decision record kind=answer recommendation=none",
+            "Decision record: recommendation=none kind=answer",
+            "**Decision record: kind=answer recommendation=none**",
+            "`Decision record: kind=answer recommendation=none`",
+        ):
+            with self.subTest(prose=prose):
+                kind, recommendation, problem = decision_record(
+                    prose + "\n\nWhy.", "none", None, None)
+                self.assertEqual((kind, recommendation),
+                                 ("unknown", "unknown"))
+                self.assertIn("malformed decision record line", problem)
+        for kind, finding, budget, task, reason in (
+            ("finding", "none", None, None, "requires a specific finding"),
+            ("answer", "REV-1", None, None, "is kind finding, not answer"),
+            ("task-amendment", "none", None, None,
+             "requires the amended Task"),
+            ("answer", "none", None, "## Task\n\nNew.",
+             "is kind task-amendment, not answer"),
+            ("hold-release", "none", None, "## Task\n\nNew.",
+             "is kind task-amendment, not hold-release"),
+            ("budget", "none", None, None, "requires budget="),
+            ("hold-release", "none", 4, None, "carries no budget="),
+            ("task-approval", "none", 4, None, "carries no budget="),
+        ):
+            with self.subTest(kind=kind, finding=finding, budget=budget):
+                self.assertEqual(
+                    decision_record(record(kind), finding, budget, task)[:2],
+                    ("unknown", "unknown"))
+                self.assertIn(reason, decision_record(
+                    record(kind), finding, budget, task)[2])
+
+    def test_only_pr_creates_issue_copy_counts_as_copied(self) -> None:
+        issue = dict(number=74, title="Keep {exact} wording", body="Build.",
+                     state="open", is_pull_request=False)
+        self.assertTrue(copied_task(task_from_issue(issue)))
+        two_lines = task_from_issue(issue | {"title": "First\r\nsecond"})
+        self.assertTrue(copied_task(two_lines))
+        self.assertFalse(copied_task(TASK))
+        self.assertFalse(copied_task(
+            "## Task\n\nThis Task is issue #74, drafted from it.\n"))
+
+    def test_records_lift_no_gate_and_are_no_design_decision(self) -> None:
+        stop = evidence(11, render_line("stop", head=H, reason="judgement"))
+        for kind in ("task-approval", "hold-release"):
+            with self.subTest(kind=kind):
+                entry = decision(12, body=record(kind) + "\n\n> Released.")
+                stopped = derive_state(snapshot(
+                    reviews=(held(10),), conversation=(stop, entry)))
+                self.assertTrue(stopped["gates"]["stopped"])
+                self.assertEqual(stopped["next_action"], "stopped")
+                self.assertEqual(stopped["general_decisions"], [])
+                self.assertEqual(stopped["decisions"][0]["kind"], kind)
+                needs = derive_state(snapshot(
+                    reviews=(review(10, "needs_human"),),
+                    conversation=(entry,)))
+                self.assertTrue(needs["gates"]["needs_decision"])
+                self.assertEqual(needs["next_action"], "needs_decision")
+        for body in (record("continuation") + "\n\nGo on.",
+                     "Written by hand: go on.",
+                     "Decision record: kind=go recommendation=none\n\nOn."):
+            with self.subTest(body=body):
+                state = derive_state(snapshot(
+                    reviews=(review(10),),
+                    conversation=(stop, decision(12, body=body))))
+                self.assertFalse(state["gates"]["stopped"])
+                self.assertEqual(
+                    [d["id"] for d in state["general_decisions"]], [12])
+                malformed = [d for d in state["diagnostics"]
+                             if d["kind"] == "malformed_decision_record"]
+                self.assertEqual(len(malformed), "kind=go" in body)
+        state = derive_state(snapshot(
+            reviews=(review(10, "needs_human"),),
+            conversation=(decision(12, body=record("answer") + "\n\nA."),)))
+        self.assertFalse(state["gates"]["needs_decision"])
+
+    def test_hold_is_released_only_by_a_newer_release(self) -> None:
+        release = decision(12, body=record("hold-release") + "\n\n> Merge.")
+        state = derive_state(snapshot(
+            reviews=(held(10),), conversation=(release,)))
+        self.assertEqual(state["merge_hold"], {
+            "review_id": 10, "text": "Item 3: changes merge authority.",
+            "released": True, "release": {
+                "id": 12, "author": "dev", "created_at": release.created_at,
+            }})
+        self.assertEqual(state["next_action"], "approved")
+        for conversation in (
+            (decision(9, body=record("hold-release") + "\n\nEarly."),),
+            (decision(12, body="Hold released, written by hand."),),
+            (decision(12, body=record("answer") + "\n\nMerge it."),),
+            (decision(12, body=MERGE_INSTRUCTION),),
+            (decision(12, budget=4, body=record("hold-release") + "\n\nM."),),
+        ):
+            with self.subTest(body=conversation[0].body):
+                hold = derive_state(snapshot(
+                    reviews=(held(10),), conversation=conversation,
+                ))["merge_hold"]
+                self.assertEqual((hold["released"], hold["release"]),
+                                 (False, None))
+        later = derive_state(snapshot(
+            reviews=(held(10), held(13)), conversation=(release,)))
+        self.assertEqual(later["merge_hold"]["review_id"], 13)
+        self.assertFalse(later["merge_hold"]["released"])
+        self.assertIsNone(derive_state(snapshot(
+            reviews=(held(10), review(13)), conversation=(release,)
+        ))["merge_hold"])
 
 
 class GrammarTests(unittest.TestCase):

@@ -51,8 +51,9 @@ it explicitly says so and links it. Budget or continuation decisions do not
 erase unrelated constraints. Do not re-litigate a decided approach; verify
 compliance and continue reporting defects within it. Use the effective Task,
 including any amendment, as the spec, not an older issue or report. Decisions
-whose `merge_directive` is `record` or `withdraw` are merge instructions, not
-design decisions; neither lifts a stop nor settles `needs_decision`.
+whose `merge_directive` is `record` or `withdraw` are merge instructions, and
+decisions whose `kind` is `task-approval` or `hold-release` are records; none
+of them is a design decision, lifts a stop, or settles `needs_decision`.
 
 Treat settled threads as closed. New evidence is a new finding citing that
 evidence; do not reopen settled work merely because you would have judged

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import (
-    ForgeFixture, ForgejoFixture, REPORT, SUMMARY, TASK, finding,
+    ForgeFixture, ForgejoFixture, REPORT, SUMMARY, TASK, finding, is_write,
 )
 from agent_squad.forge import ForgeError
 from agent_squad.github import GitHub, parse_pullrequest, parse_review
@@ -666,6 +666,10 @@ class ForgeCommandTests(unittest.TestCase):
                     "1",
                     "--finding",
                     "none",
+                    "--kind",
+                    "answer",
+                    "--recommendation",
+                    "followed",
                     "--body",
                     f.write("invalid.md", body),
                     expected=1,
@@ -1281,20 +1285,6 @@ class ForgeCommandTests(unittest.TestCase):
                 parse_review(value)
 
 
-def is_write(call: dict) -> bool:
-    """Whether a recorded fake-forge call could change the forge."""
-    if "method" in call:  # One HTTP request to the Forgejo fake.
-        return call["method"] != "GET"
-    arguments = call["arguments"]  # One process of the fake gh.
-    if arguments[:2] == ["api", "graphql"]:
-        # The snapshot read is a GraphQL query sent with POST.
-        return not call["body"]["query"].lstrip().startswith("query ")
-    return (
-        arguments[0] == "api" and "--method" in arguments
-        and arguments[arguments.index("--method") + 1] != "GET"
-    )
-
-
 class PrCreateIssueTests(unittest.TestCase):
     """#151: every pr create refuses a pull request and a closed issue."""
 
@@ -1449,6 +1439,7 @@ class PartialPrTests(unittest.TestCase):
             "decision", "post", "--as", "implementer", "--pr", "1",
             "--finding", "none", "--body", f.write("decision.md", "Amend."),
             "--task", f.write("closing-amendment.md", TASK + "\nCloses: #1\n"),
+            "--kind", "task-amendment", "--recommendation", "followed",
         ), "must not close issue #1")
         self.assertEqual(len(f.status()["decisions"]), decisions)
         amended = TASK.replace("Exercise", "Amend")

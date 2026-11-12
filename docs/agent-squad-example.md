@@ -74,10 +74,18 @@ It runs from the primary checkout:
 agent-squad pr merge --as implementer --pr 43
 ```
 
-Only a Developer-released hold permits adding `--accept-merge-hold`. If the
-base moved, the Implementer merges the fetched base into its branch, validates,
-pushes, updates the report, and requests a fresh review. It does not reuse an
-approval for the older head.
+Only a Developer-released hold permits adding `--accept-merge-hold`, and the
+Implementer first records the release; `$RELEASE` quotes the Developer:
+
+```sh
+agent-squad decision post --as implementer --pr 43 --finding none \
+  --kind hold-release --recommendation followed --body "$RELEASE"
+agent-squad pr merge --as implementer --pr 43 --accept-merge-hold
+```
+
+If the base moved, the Implementer merges the fetched base into its branch,
+validates, pushes, updates the report, and requests a fresh review. It does not
+reuse an approval for the older head.
 
 After integration is verified, the command removes owned resources and the
 unchanged tracking ref after proving the remote branch absent. The Implementer

@@ -108,6 +108,13 @@ worktree's identity for later cleanup. Read the returned PR number; issue and
 PR numbers need not match. On every later push update the report with
 `agent-squad pr report --as implementer --pr <PR> --report <report-file>`.
 
+Right after `pr create --task` with a drafted Task the Developer approved,
+record that approval with `agent-squad decision post --as implementer --pr
+<PR> --finding none --kind task-approval --recommendation <value> --body
+<file>`, whose body file quotes the Developer's approval; section 7 chooses
+the recommendation. The CLI refuses `task-approval` while the PR's Task is
+the unreworded copy of its issue.
+
 For a stage that leaves part of the issue for a later PR (section 1), add
 `--partial`, which requires `--task`: the PR body then ends with `Ref #<N>`
 instead of `Closes #<N>`, so merging it leaves the issue open with its labels.
@@ -129,7 +136,8 @@ general decision posted with `--merge-instruction withdraw` withdraws it. Post
 that withdrawal when the Developer explicitly asks, or on your own when a hold arises
 after recording the instruction. A `REVIEW_RESULT` notification cannot itself
 revoke an existing standing instruction or be quoted as evidence that the Developer
-requested withdrawal. These decisions carry no Task amendment or `budget=`;
+requested withdrawal. These decisions take neither `--kind` nor
+`--recommendation` and carry no Task amendment or `budget=`;
 neither lifts a stop nor settles `needs_decision`. The latest such decision
 controls the instruction, and a newer stop or Task amendment cancels it.
 
@@ -294,17 +302,52 @@ ask the Developer before recording any decision based on it. A separate, explici
 Developer instruction still changes authority under the existing rules; an
 Implementer withdrawal for a newly applicable hold still follows section 2.
 
+When you ask the Developer for a decision, name exactly one recommended
+option. Every `decision post` except a standing instruction or withdrawal
+records whether the Developer followed it, with `--recommendation`:
+
+- `followed`: the Developer chose the option you recommended without
+  changing it.
+- `changed`: the Developer chose another option or added a condition.
+- `none`: you offered no recommendation.
+
+A decision on a finding (`--finding REV-<n>`) takes no `--kind`. A general
+decision (`--finding none`) names its kind with `--kind`:
+
+- `task-approval`: the Developer approved a drafted Task (section 2).
+- `task-amendment`: the Developer changed the Task. Only this kind takes
+  `--task`.
+- `continuation`: the Developer continues the loop after a stop (section 9),
+  with `--budget <n>` when the Developer also extends the budget.
+- `budget`: the Developer extends the review budget and decides nothing else;
+  give `--budget <n>`.
+- `hold-release`: the Developer releases a merge hold after seeing it
+  (section 8). It takes neither `--budget` nor `--task`.
+- `answer`: any other choice or answer, such as an approach or the answer to
+  a `needs_human` question.
+
+The CLI writes both values into a `Decision record` line after the header and
+refuses a body file that begins with one. It refuses a kind that contradicts
+the PR: `continuation` unless the PR is stopped, `budget` and `answer` while
+it is stopped, `hold-release` unless the latest tagged review carries a merge
+hold. `task-approval` and `hold-release` are records: like a standing
+instruction, neither lifts a stop nor settles `needs_decision`.
+
 On `needs_human`, or before a `needs-human` disposition, relay the required
 decision to the Developer and wait for the answer. Record the actual answer,
 quoting the Developer, using `agent-squad decision post --as implementer
---pr <PR> --finding <REV-n|none> --body <decision-file>`. Only then seek another
-review. A finding-specific needs-human gate needs a newer decision naming it.
-Do not invent a decision or extend the review budget yourself. An authorized
-extension uses `--budget <n>` greater than the reviews already used.
+--pr <PR> --finding <REV-n|none> --recommendation <value> --body
+<decision-file>`, adding `--kind answer` for a general decision. Only then
+seek another review. A finding-specific needs-human gate needs a newer
+decision naming it. Do not invent a decision or extend the review budget
+yourself. An authorized extension uses `--budget <n>` greater than the
+reviews already used, with `--kind budget`, or `--kind continuation` when it
+continues a stopped PR.
 
 When the Developer changes the Task, write the complete amended `## Task`
 section and run `agent-squad decision post --as implementer --pr <PR>
---finding none --task <task-file> --body <decision-file>`. This posts the
+--finding none --kind task-amendment --recommendation <value> --task
+<task-file> --body <decision-file>`. This posts the
 amendment before mirroring it to the PR body. If status reports
 `task_body_stale`, re-run the same command. Close the finished Reviewer with
 `reviewer close --pr <PR> --head <finished-review-head>` before launching a
@@ -333,9 +376,16 @@ Reply on every unsettled thread, blocking or optional, before merging or
 reporting approval. When `next_action` is `approved`, send “approved at
 `<full-sha>`, ready to merge”, listing every optional finding with its ID,
 title, and disposition, any hold's item and reason, and every issue you filed
-with `issue create`, then wait. Only the
+with `issue create`, then wait. For a hold, the report recommends exactly one
+option: release the hold and merge, or what must change first. Only the
 Developer releases a hold by instructing the merge after seeing it; only then
 pass `--accept-merge-hold`. A standing instruction never releases a hold.
+Before that `pr merge`, record the release with `agent-squad decision post
+--as implementer --pr <PR> --finding none --kind hold-release
+--recommendation <value> --body <file>`, whose body file quotes the
+Developer's release. `pr merge --accept-merge-hold` refuses unless such a
+decision is newer than the latest tagged review, so a later review that
+carries a hold needs a new release.
 
 When `next_action` is `merge`, proceed without another confirmation. Before
 `pr merge`, confirm in `status` or `pr checks` that `ci.summary` for the
@@ -428,9 +478,10 @@ On `STOPPED`, or when status reports `stopped`, make no further review-driven
 changes and do not request another review automatically. Preserve the PR,
 branch, commits, and worktree. Report the reason and remaining problems;
 wait for the Developer to continue, change approach, or terminate. Record any
-continuation with `decision post` before launching again. Then record the
-standing instruction again unless the Developer said otherwise or a hold
-applies. A standing instruction itself never authorizes continuation. Optional
+continuation with `decision post --finding none --kind continuation` before
+launching again. Then record the standing instruction again unless the
+Developer said otherwise or a hold applies. A standing instruction, a
+`task-approval`, and a `hold-release` never authorize continuation. Optional
 findings alone do not justify stopping the loop.
 
 ## 10. Handoff identity

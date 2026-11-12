@@ -277,11 +277,16 @@ define the exact grammar. In summary:
   merge instructions as command options and prose files; the CLI composes the
   protocol text stored on the forge (`review post --summary`,
   `--verified-dispositions`, and optional section files; `decision post
-  --merge-instruction record|withdraw`).
+  --merge-instruction record|withdraw`, `--kind`, and `--recommendation`).
 - `DECISION` records human choices, Task amendments, or review-budget
-  extensions, plus standing merge instructions and withdrawals. `STOPPED`
-  halts automatic review until a later authorized continuation; standing merge
-  instructions and withdrawals cannot provide that continuation. A new commit or Task amendment invalidates the earlier approval.
+  extensions, plus standing merge instructions and withdrawals. Every other
+  decision names its kind (`task-approval`, `task-amendment`, `continuation`,
+  `budget`, `hold-release`, `answer`, or `finding` for a decision on a
+  finding) and whether you followed the agent's recommendation (`followed`,
+  `changed`, `none`); the CLI writes both into a `Decision record` line and
+  `status` reports them. `STOPPED` halts automatic review until a later
+  authorized continuation; standing merge instructions and withdrawals,
+  `task-approval`, and `hold-release` cannot provide that continuation. A new commit or Task amendment invalidates the earlier approval.
 
 Forge writes require `--as implementer` or `--as reviewer`, subject to the
 command's role. GitHub tokens are selected only for the child process; Forgejo tokens are
@@ -371,7 +376,9 @@ reviewed. It asks you when budget is exhausted or resolving a conflict needs
 a choice outside the Task. Only your explicit acceptance permits
 `--accept-moved-base`.
 A latest-review hold also refuses merge; only your instruction after seeing
-that hold permits `--accept-merge-hold`. Neither flag relaxes other checks.
+that hold permits `--accept-merge-hold`, and the Implementer first records
+your release as a `hold-release` decision: the flag is refused without one
+newer than the latest review. Neither flag relaxes other checks.
 Merge commits are checked by ancestry; a squash on an unmoved base is checked
 by tree identity. Squash after accepting a moved base cannot use that tree
 check and retains resources when integration cannot be verified.

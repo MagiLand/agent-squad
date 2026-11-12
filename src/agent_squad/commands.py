@@ -11,19 +11,26 @@ from typing import TypeVar
 
 from .anchors import Anchor, commentable_lines, validate_anchor
 from .conventions import (
+    DECISION_RECORD,
+    GENERAL_KINDS,
     MERGE_INSTRUCTION,
     MERGE_WITHDRAWAL,
     PREFIXES,
+    RECOMMENDATIONS,
     allocate_id,
+    copied_task,
     derive,
     first_line,
     headings,
     is_note,
     newer,
+    opens_with,
     parse_line,
+    record_conflict,
     refuse_closing_reference,
     refuse_partial_closing,
     render_line,
+    render_record,
     replace_section,
     require_open_issue,
     section,
@@ -922,6 +929,30 @@ def resolve_thread(
     return forge.resolve(finding["node_id"])
 
 
+def refuse_kind_for_state(kind: str | None, state: dict) -> None:
+    """Refuse a general kind that contradicts the PR's derived state."""
+    stopped = state["gates"]["stopped"]
+    task = state["effective_task"]
+    if kind == "continuation" and not stopped:
+        raise GateError("kind continuation requires a stopped PR")
+    if kind in ("budget", "answer") and stopped:
+        raise GateError(
+            "the PR is stopped: the decision that continues it is kind"
+            f" continuation, not {kind}"
+        )
+    if kind == "hold-release" and state["merge_hold"] is None:
+        raise GateError(
+            "kind hold-release requires a merge hold in the latest tagged"
+            " review"
+        )
+    if kind == "task-approval" and (task is None or copied_task(task)):
+        raise GateError(
+            "kind task-approval requires a drafted Task; "
+            + ("the PR body has no valid ## Task" if task is None else
+               "this PR's Task is the unreworded copy of its issue")
+        )
+
+
 def post_decision(
     repository: Repository,
     forge: Forge,
@@ -931,19 +962,39 @@ def post_decision(
     budget: int | None = None,
     task: str | None = None,
     merge_instruction: str | None = None,
+    kind: str | None = None,
+    recommendation: str | None = None,
 ) -> dict:
     header = render_line("decision", finding=finding, budget=budget)
     body = body.strip()
-    if first_line(body).lstrip(" \t*_`").startswith(
-        "Standing merge instruction"
-    ):
+    if opens_with(body, "Standing merge instruction"):
         raise AgentSquadError(
             "decision body must not open with a standing merge sentence; use"
             " --merge-instruction record or withdraw"
         )
+    if opens_with(body, DECISION_RECORD):
+        raise AgentSquadError(
+            "decision body must not open with a Decision record line; use"
+            " --kind and --recommendation"
+        )
     if merge_instruction is not None:
+        if kind is not None or recommendation is not None:
+            raise AgentSquadError(
+                "--kind and --recommendation do not apply to a standing"
+                " merge instruction or withdrawal"
+            )
         sentence = {"record": MERGE_INSTRUCTION, "withdraw": MERGE_WITHDRAWAL}
         body = sentence[merge_instruction] + ("\n\n" + body if body else "")
+    elif finding == "none" and kind is None:
+        raise AgentSquadError(
+            "a general decision requires --kind "
+            + "|".join(GENERAL_KINDS)
+        )
+    elif recommendation is None:
+        raise AgentSquadError(
+            "decision post requires --recommendation "
+            + "|".join(RECOMMENDATIONS)
+        )
     if not body or parse_line(first_line(body)) is not None:
         raise AgentSquadError(
             "decision body must contain decision prose without a protocol"
@@ -956,6 +1007,12 @@ def post_decision(
     if section(body, "Task") is not None:
         raise AgentSquadError("supply a Task amendment through --task")
     validate_merge_directive(body, finding, budget, task)
+    if merge_instruction is None:
+        kind = kind or "finding"
+        problem = record_conflict(kind, finding, budget, task)
+        if problem:
+            raise AgentSquadError(problem)
+        body = render_record(kind, recommendation) + "\n\n" + body
     snapshot = forge.snapshot(number)
     if task is not None:
         # Before the decision is posted, so its Task can always be mirrored.
@@ -963,6 +1020,7 @@ def post_decision(
     state = state_for(repository, snapshot)
     if finding != "none":
         find_finding(state, finding)
+    refuse_kind_for_state(kind, state)
     latest = state["decisions"][-1] if state["decisions"] else None
     # A repeated amendment repairs its mirror without a second decision or
     # budget effect.
