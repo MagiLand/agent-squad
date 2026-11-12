@@ -36,7 +36,9 @@ scratch=$(mktemp -d)
 The commands that read or change issues, runs, tags, releases, and milestones
 use Git and the GitHub CLI (`gh`) with the account `gh` is logged in as. The
 Developer runs them, or an agent session on the Developer's instruction; the
-Implementer and the Reviewer do not run them as part of the loop.
+Implementer and the Reviewer do not run them as part of the loop. The
+commands in the body to copy are `agent-squad` reads, which the Implementer
+and the Reviewer run themselves.
 
 ## 1. The release issue
 
@@ -61,14 +63,14 @@ gh issue create --repo MagiLand/agent-squad --milestone "v$version" \
 File the issue once every other issue in the milestone is closed, and triage
 it straight away.
 
-### Triage: recording the lists
+### Triage
 
-The agents in the loop cannot list a milestone's issues or the open issues
-that carry a label: the Reviewer skill forbids `gh`, the Implementer may use
-`gh` only to read CI results, and `agent-squad` has no listing command
-([#164](https://github.com/MagiLand/agent-squad/issues/164)). Whoever triages
-the release issue therefore reads the two lists that the release notes are
-written and checked against, and posts them in the issue's triage comment.
+The release notes are written and checked against two lists, the closed
+issues of the milestone with the pull requests that closed them and the open
+issues labelled `bug`. Nobody posts them: the Implementer and the Reviewer
+each read them with `agent-squad issue list`
+([#164](https://github.com/MagiLand/agent-squad/issues/164)) at the time of
+their own work, as the body to copy says.
 
 Triage the release issue only when it is the milestone's last open issue.
 This command lists the milestone's open issues; it must print the release
@@ -80,48 +82,55 @@ gh issue list --repo MagiLand/agent-squad --milestone "v$version" \
   --jq '.[] | "#\(.number) \(.title)"'
 ```
 
-Then write the triage comment. It records the commit of `main` that was read,
-each closed issue of the milestone with the pull requests that closed it, and
-each open issue labelled `bug`:
+The release Task needs an installed CLI and installed skills that include
+`issue list`. This command exits 0 when the installed CLI has it, and 2 with
+`invalid choice: 'list'` when it does not:
+
+```bash
+agent-squad issue list --help > /dev/null
+```
+
+When it exits 2, upgrade the installation first, on the Developer's
+instruction, with the commands of [Step 5](#step-5-upgrade-the-installed-cli-and-skills).
+The release's own tag does not exist yet, so install the newest commit of
+`main` in place of the tag. Take the commit first:
 
 ```bash
 git fetch origin main
+commit=$(git rev-parse origin/main)
+```
+
+Then install it into the environment that holds the current installation:
+
+```bash
+python -m pip install --force-reinstall \
+  "agent-squad @ git+https://github.com/MagiLand/agent-squad@$commit"
+```
+
+For an installation made with `uv tool`, use this command instead:
+
+```bash
+uv tool install --force \
+  "agent-squad @ git+https://github.com/MagiLand/agent-squad@$commit"
+```
+
+Then finish as Step 5 describes, from `agent-squad --version` on, comparing
+each refused skill with the copy at the commit, for example:
+
+```bash
+git show "$commit:src/agent_squad/skills/squad-implementer/SKILL.md" |
+  diff ~/.agents/skills/squad-implementer/SKILL.md -
+```
+
+Then mark the issue ready:
+
+```bash
 issue=$(gh issue list --repo MagiLand/agent-squad --milestone "v$version" \
   --state open --limit 1000 --json number,title \
   --jq ".[] | select(.title == \"Release v$version\") | .number")
-{
-  printf '%s\n%s\n\n' \
-    'The issue body holds the brief. This comment records the lists that' \
-    'the release notes are written and checked against; it changes nothing.'
-  printf '## Triage\n\nRead on `main` at `%s`.\n\n' "$(git rev-parse origin/main)"
-  printf '### Closed issues in the milestone\n\n'
-  gh issue list --repo MagiLand/agent-squad --milestone "v$version" \
-    --state closed --limit 1000 \
-    --json number,title,stateReason,closedByPullRequestsReferences \
-    --jq 'if length == 0 then "None." else sort_by(.number)[] |
-      "- #\(.number) \(.title) (\(.stateReason | ascii_downcase |
-      sub("_"; " ")); pull requests: \([.closedByPullRequestsReferences[] |
-      "#\(.number)"] | join(", ") | if . == "" then "none" else . end))" end'
-  printf '\n### Open issues labelled `bug`\n\n'
-  gh issue list --repo MagiLand/agent-squad --label bug --state open \
-    --limit 1000 --json number,title \
-    --jq 'if length == 0 then "None." else sort_by(.number)[] |
-      "- #\(.number) \(.title)" end'
-} > "$scratch/triage.md"
+gh issue edit "${issue:?no open issue titled Release v$version}" \
+  --repo MagiLand/agent-squad --add-label ready-for-agent
 ```
-
-Read `$scratch/triage.md`, then post it and mark the issue ready:
-
-```bash
-gh issue comment "${issue:?no open issue titled Release v$version}" \
-  --repo MagiLand/agent-squad --body-file "$scratch/triage.md"
-gh issue edit "$issue" --repo MagiLand/agent-squad --add-label ready-for-agent
-```
-
-If an issue joins or leaves the milestone, or an issue labelled `bug` opens
-or closes, before the release pull request merges, run the last two command
-blocks again and post a new comment. The newest comment with the heading
-`### Closed issues in the milestone` is the one that counts.
 
 ### The body to copy
 
@@ -154,24 +163,30 @@ No other file changes.
 
 ## Where the lists come from
 
-The notes are written from two lists in this issue's newest comment with the
-heading `### Closed issues in the milestone`: the closed issues of the
-milestone `v<version>`, with the pull requests that closed them, and the open
-issues labelled `bug`. Whoever triages this issue posts that comment, because
-neither agent can read these lists. Read it with
-`agent-squad issue view`. The Developer confirms during the review before
-merging that the lists are complete.
+The notes are written from two lists, which the Implementer and the Reviewer
+each read with these commands at the time of their own work:
+
+- the closed issues of the milestone `v<version>`, each with the merged pull
+  requests that the forge links to it as closing it in `closed_by`:
+  `agent-squad issue list --milestone v<version> --state closed --json`;
+- the open issues labelled `bug`:
+  `agent-squad issue list --label bug --state open --json`.
+
+`closed_by` is the forge's link, not a record of the event that closed the
+issue; the skills say what follows from that. The lists are evidence, and
+this issue stays the Task.
 
 ## What the notes file contains
 
 The notes file is the text of the release page, which shows the title, so
 the file has no top-level heading. It has these sections, in this order:
 
-1. `## Issues closed`: one line for each issue in the comment's closed-issue
-   list, `- #<issue> <title> (#<pull request>)`, naming the pull request
-   that closed it. An issue closed without a pull request gives the reason
-   it was closed instead, for example "not planned". This issue is not
-   listed; it closes when the pull request merges.
+1. `## Issues closed`: one line for each issue in the first list,
+   `- #<issue> <title> (#<pull request>)`, naming the pull requests in its
+   `closed_by`, separated by commas when there are several. An issue whose
+   `closed_by` is empty gives the reason it was closed instead, from its
+   `state_reason`, for example "not planned". This issue is not listed; it
+   closes when the pull request merges.
 2. `## Changes to act on`: every change an existing user must act on,
    including each changed command or option and each changed skill, and
    whether the protocol tag changed, stating the tag either way. To find
@@ -180,21 +195,19 @@ the file has no top-level heading. It has these sections, in this order:
 3. `## Upgrade`: how to upgrade the CLI and the skills together, with the
    commands of step 5 of "After the merge" in `docs/release.md` written out
    for `<version>`.
-4. `## Known limitations`: one line for each issue in the comment's list of
-   open issues labelled `bug`, `- #<issue> <title>`, or "None." when the list
-   is empty.
+4. `## Known limitations`: one line for each issue in the second list,
+   `- #<issue> <title>`, or "None." when the list is empty.
 
 ## What the Reviewer checks
 
 - The stated versions agree: every file listed above states `<version>`,
   and `python -m unittest tests/unit/test_cli_surface.py` passes.
-- Each issue the notes name is closed (`agent-squad issue view --issue <N>
-  --json`) and appears in the comment's closed-issue list, and each pull
-  request they name is merged (`pr.merged` in `agent-squad status --pr <N>
-  --json`) and is the one that list gives for its issue.
-- No issue in the comment's closed-issue list is missing from the notes, and
-  the known limitations are exactly the comment's list of open issues
-  labelled `bug`.
+- The Reviewer runs both commands of "Where the lists come from" itself
+  and compares the notes with its own output: no closed issue of the
+  milestone is missing from the notes, each issue the notes name is in the
+  first list, each pull request they name is one that `closed_by` gives for
+  its issue, and the known limitations are exactly the open issues labelled
+  `bug`.
 - The checks at the head passed (`ci` in `agent-squad status --pr <N>
   --json`).
 
@@ -208,7 +221,9 @@ applies: it waits for the Developer's review before it merges.
 - [ ] `__version__`, the version pin, and every sentence the
   version-consistency test checks state `<version>`.
 - [ ] `docs/releases/v<version>.md` exists with the four sections above, and
-  its lists match the newest listing comment on this issue.
+  its lists match the output of
+  `agent-squad issue list --milestone v<version> --state closed --json` and
+  `agent-squad issue list --label bug --state open --json`.
 - [ ] No other file changes.
 - [ ] `make test` and `make lint` pass.
 
@@ -232,9 +247,8 @@ Item 5 of the
 applies because the pull request releases: its notes file becomes the release
 page, and the merge commit becomes the tagged version. The pull request
 therefore waits for the Developer's review before it merges, and the
-Implementer records no standing merge instruction. During that review the
-Developer also confirms that the triage comment's lists are complete, which
-the Reviewer cannot check. After the Developer instructs the merge, the
+Implementer records no standing merge instruction. After the Developer
+instructs the merge, the
 Implementer merges with `agent-squad pr merge` and reports as for any pull
 request.
 
