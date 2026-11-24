@@ -141,7 +141,7 @@ class HoldLabelContract:
         model = f.read_model()
         author = model["prs"]["1"]["user"]
         record = self.ownership.read_text()
-        for case in ("another account", "no record", "closed"):
+        for case in ("another account", "no record", "closed", "two PRs"):
             with self.subTest(case=case):
                 model = f.read_model()
                 model["prs"]["1"]["user"] = (
@@ -149,6 +149,11 @@ class HoldLabelContract:
                     else author)
                 model["prs"]["1"]["state"] = (
                     "closed" if case == "closed" else "open")
+                model["prs"].pop("2", None)
+                if case == "two PRs":
+                    # An earlier, closed PR on the same branch.
+                    model["prs"]["2"] = dict(model["prs"]["1"], id=2,
+                                             number=2, state="closed")
                 f.save_model(model)
                 if case == "no record":
                     self.ownership.unlink()
@@ -254,6 +259,39 @@ class GitHubHoldLabelTests(HoldLabelContract, unittest.TestCase):
         path.write_text(json.dumps(config))
         refused = f.cli("issue", "view", "--issue", "1", expected=1)
         self.assertIn("pr_hold_label must be non-empty", refused["error"])
+
+    def test_a_refused_label_write_keeps_the_pr_and_its_record(
+        self,
+    ) -> None:
+        # The label write after the create fails; the PR exists anyway.
+        f = self.f
+        self.add_label()
+        self.configure()
+        f.settings(pr_label_write_status=422)
+        refused = self.create(expected=1)
+        self.assertIn(f"PR #1 created without the hold label {HOLD}",
+                      refused["error"])
+        self.assertEqual(json.loads(self.ownership.read_text())["pr"], 1)
+        # The repair reports the forge's refusal instead of hiding it.
+        refused = self.create(expected=1)
+        self.assertIn("Validation Failed (HTTP 422)", refused["error"])
+        self.assertEqual(self.pr_labels(), [])
+        f.settings(pr_label_write_status=None)
+        self.assertEqual(self.create()["hold_label"],
+                         {"name": HOLD, "applied": True})
+        self.assertEqual(self.pr_labels(), [HOLD])
+
+    def test_an_unreadable_label_read_back_keeps_the_record(self) -> None:
+        f = self.f
+        self.add_label()
+        self.configure()
+        f.settings(pr_read_status=502)
+        refused = self.create(expected=1)
+        self.assertIn("PR #1 created, but its labels could not be read back",
+                      refused["error"])
+        self.assertIn(f"it may lack the hold label {HOLD}", refused["error"])
+        self.assertEqual(json.loads(self.ownership.read_text())["pr"], 1)
+        self.assertEqual(self.pr_labels(), [HOLD])
 
 
 class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):

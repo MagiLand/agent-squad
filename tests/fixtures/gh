@@ -800,6 +800,8 @@ if kind == "issues":
         # drop_pr_labels, answer as if the change were made and change
         # nothing.
         if pull is not None:
+            if method == "POST" and settings.get("pr_label_write_status"):
+                fail("Validation Failed", settings["pr_label_write_status"])
             issue = pull
             issue.setdefault("labels", [])
         if issue is None:
@@ -859,6 +861,8 @@ if len(parts) == 5:
         if settings.get("fail_mirror"):
             fail("injected Task mirror failure", 503)
         pr["body"] = payload["body"]
+    elif settings.get("pr_read_status"):
+        fail("pull request unreadable", settings["pr_read_status"])
     # GitHub serves a PR's labels; older fixture PRs carry none.
     output({**pr, "labels": pr.get("labels", [])})
 if parts[5] == "merge":
