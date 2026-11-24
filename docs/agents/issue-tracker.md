@@ -2,15 +2,18 @@
 
 Issues and specifications for this repository live in GitHub Issues. Use the `gh` CLI from within the repository so it resolves `MagiLand/agent-squad` from the configured remote.
 
+File issues only into `MagiLand/agent-squad`, never into `mattpocock/skills`, the repository the engineering skills come from. Before the first `gh issue create` of a session, check the target with `gh repo view --json nameWithOwner`.
+
 ## Common operations
 
-- Create: `gh issue create --title "..." --body "..."`
-- Read with comments: `gh issue view <number> --comments`
-- List: `gh issue list --state open`
+- Create: `gh issue create --title "..." --body-file <file>`. Use a file or a heredoc for multi-line bodies.
+- Read: `gh issue view <number> --json number,title,body,labels,comments`. Outside a terminal, `gh issue view --comments` prints only the comments, not the body.
+- List: `gh issue list --state open --json number,title,labels`, with `--label` filters as needed.
 - Comment: `gh issue comment <number> --body "..."`
 - Add a label: `gh issue edit <number> --add-label "..."`
 - Remove a label: `gh issue edit <number> --remove-label "..."`
-- Close: `gh issue close <number> --comment "..."`
+- Close: post the explanation with `gh issue comment <number> --body "..."`, then run `gh issue close <number>`.
+- Make a sub-issue: `gh issue create --parent <parent> ...`, or `gh issue edit <parent> --add-sub-issue <child>` afterwards. Without sub-issues, put `Part of #<parent>` at the top of the child body.
 
 Use JSON output and `jq` when a skill needs structured issue data.
 
@@ -18,11 +21,11 @@ Use JSON output and `jq` when a skill needs structured issue data.
 
 **PRs as a request surface: no.**
 
-External pull requests do not enter the triage queue automatically. This setting can be changed here later.
+External pull requests do not enter the triage queue automatically. `/triage` reads this flag, and it can be changed here later.
 
 ## Skill conventions
 
-When a skill says “publish to the issue tracker,” create a GitHub issue. When it says “fetch the relevant ticket,” read the issue body, comments, and labels.
+When a skill says “publish to the issue tracker,” create a GitHub issue. When it says “fetch the relevant ticket,” read the issue body, comments, and labels as in **Read** above.
 
 Create implementation tickets in dependency order so blocking relationships can reference existing issue numbers.
 
@@ -37,7 +40,13 @@ Triage writes its result into the issue body, because the body is what the imple
 
 ## Blocking relationships
 
-Use GitHub’s native issue dependencies when available:
+Use GitHub’s native issue dependencies:
+
+- Add a blocker when creating an issue: `gh issue create --blocked-by <number>,<number> ...`
+- Add a blocker afterwards: `gh issue edit <blocked-number> --add-blocked-by <blocker-number>`
+- Count open blockers: `gh api repos/MagiLand/agent-squad/issues/<number> --jq .issue_dependencies_summary.blocked_by`. The count covers open blockers only, so 0 means the issue can start. `gh issue view <number> --json blockedBy` also lists closed blockers, so filter it with `--jq '[.blockedBy.nodes[] | select(.state == "OPEN")] | length'`.
+
+With a `gh` older than 2.94, add the dependency through the REST API:
 
 1. Resolve the blocking issue’s numeric database ID:
 
@@ -53,6 +62,9 @@ A ticket is ready when all blockers are closed and it has no assignee.
 
 ## Wayfinder conventions
 
-A Wayfinder map is one issue labelled `wayfinder:map`, with decision tickets represented as sub-issues when available. If sub-issues are unavailable, maintain a task list in the map and add `Part of #<map>` to each child.
+A Wayfinder map is one issue labelled `wayfinder:map`, holding the Notes, Decisions-so-far, and Fog sections. Its tickets are sub-issues of the map. If sub-issues are unavailable, maintain a task list in the map and add `Part of #<map>` to the top of each child.
 
-Use `wayfinder:research`, `wayfinder:prototype`, `wayfinder:grilling`, or `wayfinder:task` for child types. Claim work by assigning the issue before making changes.
+- **Child types:** label each child `wayfinder:research`, `wayfinder:prototype`, `wayfinder:grilling`, or `wayfinder:task`.
+- **Frontier:** the map’s open children with no open blocker and no assignee, in map order. The first one is next.
+- **Claim:** `gh issue edit <number> --add-assignee @me`, as the session’s first write.
+- **Resolve:** comment with the answer, close the issue, then add a one-line summary and link to the map’s Decisions-so-far.
