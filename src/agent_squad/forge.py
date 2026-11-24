@@ -366,6 +366,32 @@ def exposed(read: Callable[[], Exposed | None]) -> Exposed | None:
         raise
 
 
+def label_scope(name: str) -> str | None:
+    """The scope a label name would have if exclusive: the name before its
+    last ``/``, when that ``/`` is neither first nor last (§11.0)."""
+    cut = name.rfind("/")
+    return name[:cut] if 0 < cut < len(name) - 1 else None
+
+
+@dataclass(frozen=True)
+class Label:
+    """A label found by its exact name to put on pull requests (#174).
+
+    ``id`` is the forge's label ID; the adapter chooses whether it applies
+    the label by ID or by name. ``exclusive`` is Forgejo's flag: adding an
+    exclusive label removes the other labels of its scope (§11.4).
+    """
+
+    name: str
+    id: int
+    exclusive: bool = False
+
+    @property
+    def scope(self) -> str | None:
+        """The exclusive scope, or none for a label that is not exclusive."""
+        return label_scope(self.name) if self.exclusive else None
+
+
 class MergeAnswer(TypedDict):
     status: int
     message: str
@@ -442,11 +468,21 @@ class Forge(Protocol):
     def branch_head(self, branch: str) -> str | None: ...
     def delete_branch(self, branch: str, expected_head: str) -> None: ...
     def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None: ...
-    def branch_prs(self, branch: str) -> list[dict[str, object]]: ...
+
+    def branch_prs(
+        self, branch: str, complete: bool = False,
+    ) -> list[dict[str, object]]: ...
+
+    def pr_label(self, name: str) -> Label | None: ...
 
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str,
+        label: Label | None = None,
+        on_created: Callable[[int], None] | None = None,
     ) -> PullRequest: ...
+
+    def add_pr_label(self, number: int, label: Label) -> None: ...
+    def pr_labels(self, number: int) -> tuple[str, ...]: ...
 
     def update_body(self, number: int, body: str) -> PullRequest: ...
 

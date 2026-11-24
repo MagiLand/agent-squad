@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 import time
 
@@ -52,7 +53,7 @@ def parser() -> argparse.ArgumentParser:
     )
     for name in ("base-url", "implementer-token-file", "reviewer-token-file"):
         init.add_argument("--" + name)
-    for name in ("owner", "repo", "base-branch"):
+    for name in ("owner", "repo", "base-branch", "pr-hold-label"):
         init.add_argument("--" + name)
     init.add_argument("--json", action="store_true")
     doctor = groups.add_parser("doctor")
@@ -210,6 +211,7 @@ def execute(args: argparse.Namespace) -> dict:
             base_url=args.base_url,
             implementer_token_file=args.implementer_token_file,
             reviewer_token_file=args.reviewer_token_file,
+            pr_hold_label=args.pr_hold_label,
         )
     # doctor reports invalid configuration as one of its prerequisite failures.
     if args.group == "doctor":
@@ -280,6 +282,14 @@ def execute(args: argparse.Namespace) -> dict:
             commands.read_file(args.report),
             args.title,
             partial=args.partial,
+            rerun=shlex.join([
+                "agent-squad", "pr", "create", "--as", "implementer",
+                "--issue", str(args.issue),
+                *(("--task", args.task) if args.task else ()),
+                *(("--partial",) if args.partial else ()),
+                "--report", args.report,
+                *(("--title", args.title) if args.title is not None else ()),
+            ]),
         )
     if key == ("pr", "report"):
         return commands.report_pr(

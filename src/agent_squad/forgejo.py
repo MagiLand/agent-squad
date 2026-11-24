@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from email.message import Message
@@ -33,6 +34,7 @@ from .forge import (
     ForgeError,
     IssueDependencies,
     IssueQuery,
+    Label,
     IssueRecord,
     ListedIssue,
     MergeRefused,
@@ -980,9 +982,15 @@ class Forgejo:
             ) from None
         return tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
 
-    def branch_prs(self, branch: str) -> list[dict[str, object]]:
+    def branch_prs(
+        self, branch: str, complete: bool = False,
+    ) -> list[dict[str, object]]:
+        # ``complete`` reads to an empty page, past a short one (#174).
+        endpoint = f"{self.prefix}/pulls?state=all"
+        rows = (self._all_pages(endpoint) if complete
+                else self.listing(endpoint))
         matches = []
-        for row in self.listing(f"{self.prefix}/pulls?state=all"):
+        for row in rows:
             data = object_value(row, "pull request")
             head = object_value(data.get("head"), "pull request head")
             # Historical PRs may lack commit metadata after branch deletion.
@@ -990,15 +998,57 @@ class Forgejo:
                 matches.append(data)
         return matches
 
+    def pr_label(self, name: str) -> Label | None:
+        """The repository label named exactly ``name``, otherwise the
+        owner's organization label of that name (#174).
+
+        Both lists are read to an empty page, past a short one. The
+        repository's label list leaves organization labels out. A 404 from
+        the organization read means the owner is not an organization
+        (17.0.1 answers 404 for a user), so there is no such label.
+        """
+        found = self._named_label(f"{self.prefix}/labels", name)
+        if found is not None:
+            return found
+        owner = quote(self.repository.configuration.forge.owner, safe="")
+        try:
+            return self._named_label(f"/orgs/{owner}/labels", name)
+        except ForgeError as error:
+            if error.status == 404:
+                return None
+            raise
+
+    def _named_label(self, endpoint: str, name: str) -> Label | None:
+        for row in self._all_pages(endpoint):
+            data = object_value(row, "label")
+            if V.require_string(data.get("name"), "label.name") == name:
+                exclusive = data.get("exclusive", False)
+                if not isinstance(exclusive, bool):
+                    raise ForgeError("label.exclusive must be a boolean")
+                return Label(
+                    name, positive(data.get("id"), "label.id"), exclusive)
+        return None
+
     def create_pr(
-        self, title: str, head_branch: str, base_branch: str, body: str
+        self, title: str, head_branch: str, base_branch: str, body: str,
+        label: Label | None = None,
+        on_created: Callable[[int], None] | None = None,
     ) -> PullRequest:
+        payload: dict[str, object] = {
+            "title": title, "head": head_branch, "base": base_branch,
+            "body": body,
+        }
+        if label is not None:
+            # By ID, in the create request itself (#174); the caller reads
+            # the labels back, since an ID may be dropped silently.
+            payload["labels"] = [label.id]
         data = object_value(self.api(
-            f"{self.prefix}/pulls", method="POST",
-            body={"title": title, "head": head_branch,
-                  "base": base_branch, "body": body},
+            f"{self.prefix}/pulls", method="POST", body=payload,
         ), "created pull request")
         number = positive(data.get("number"), "PR number")
+        if on_created is not None:
+            # The PR exists before the read-back below can fail (#174).
+            on_created(number)
         pr = self.pr(number)
         if (
             pr.head_branch != head_branch or pr.base_branch != base_branch
@@ -1008,6 +1058,26 @@ class Forgejo:
         ):
             raise ForgeError(f"PR {number} created; read-back mismatch")
         return pr
+
+    def add_pr_label(self, number: int, label: Label) -> None:
+        """Add one label to a PR by ID, keeping its other labels."""
+        self.api(
+            f"{self.prefix}/issues/{number}/labels", method="POST",
+            body={"labels": [label.id]},
+        )
+
+    def pr_labels(self, number: int) -> tuple[str, ...]:
+        data = object_value(
+            self.api(f"{self.prefix}/pulls/{number}"), "pull request"
+        )
+        if positive(data.get("number"), "PR number") != number:
+            raise ForgeError("pull request response has another number")
+        return tuple(
+            V.require_string(
+                object_value(label, "label").get("name"), "label.name"
+            )
+            for label in array(data.get("labels"), "labels")
+        )
 
     def update_body(self, number: int, body: str) -> PullRequest:
         self.api(

@@ -319,6 +319,13 @@ class Handler(BaseHTTPRequestHandler):
             if account in settings.get("user_failure", []):
                 return 401, {"message": "user unavailable: " + auth}
             return 200, {"login": settings.get("login_mismatch", account)}
+        if parts[:1] == ["orgs"] and parts[2:] == ["labels"]:
+            # Organization labels (#174), which the repository's label list
+            # leaves out. 17.0.1 answers 404 when the owner is a user.
+            if parts[1] != "MagiLand" or settings.get("owner_is_user"):
+                return 404, {"message": "organization not found"}
+            return 200, self.paged(model.get("org_labels", []), query,
+                                   settings)
         if parts[:3] != ["repos", "MagiLand", "trial"]:
             return 404, {"message": "repository not found"}
         if account in settings.get("repository_denied", []):
@@ -411,7 +418,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.dependencies(
                     model, account, issue, number, parts[5], query)
             if parts[5:6] == ["labels"]:
-                return self.issue_labels(model, issue, parts[6:], body)
+                # Label writes reach the PR on a number an issue shares, as
+                # comment writes do (#174); issue label refuses a PR before
+                # writing, and its tests use numbers no PR shares.
+                if pr is not None:
+                    pr.setdefault("labels", [])
+                return self.issue_labels(
+                    model, pr or issue, parts[6:], body, pr is not None)
             if parts[5:] == ["timeline"] and self.command == "GET":
                 return self.timeline(model, account, number, issue, query)
             if issue is None and pr is not None:
@@ -432,6 +445,12 @@ class Handler(BaseHTTPRequestHandler):
                           "sha": self.branch(model, body["base"])},
                     state="open", merged=False, merge_commit_sha=None,
                     reviews=[], comments=[], conversation=[], threads=[],
+                    # F16 takes label IDs, repository or organization ones,
+                    # and drops an unknown ID silently (#174).
+                    labels=[] if settings.get("drop_pr_labels") else [
+                        dict(label) for label in self.known_labels(model)
+                        if label["id"] in body.get("labels", [])
+                    ],
                 )
                 prs[number] = row
                 return 201, pr_wire(row, self.branch(model, body["base"]))
@@ -446,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
             pr["head"]["sha"] = self.branch(model, pr["head"]["ref"])
             pr.setdefault("merge_base", pr["base"]["sha"])
         if len(parts) == 5:
+            if self.command == "GET" and settings.get("pr_read_status"):
+                return settings["pr_read_status"], {
+                    "message": "synthetic read failure"}
             if pr["merged"] and settings.get("merge_confirmation_403"):
                 return 403, {"message": "merge confirmation unreadable"}
             if self.command == "PATCH":
@@ -626,20 +648,30 @@ class Handler(BaseHTTPRequestHandler):
                            "full_name": source},
         }
 
+    @staticmethod
+    def known_labels(model: dict) -> list[dict]:
+        """Repository labels, then the owner organization's (#174)."""
+        return [*model.get("labels", []), *model.get("org_labels", [])]
+
     def issue_labels(
         self, model: dict, issue: dict | None, rest: list[str], body: object,
+        is_pr: bool = False,
     ) -> tuple[int, object]:
         """Serve F16's issue label writes (#144).
 
         POST takes all IDs or all names and drops an unknown one silently.
         DELETE takes a name, or an ID when no label has that name, answers
-        422 when neither matches and 204 otherwise. ``ignore_label_writes``
-        answers as if the change were made and changes nothing.
+        422 when neither matches and 204 otherwise; names match repository
+        labels, then organization labels. ``ignore_label_writes``, and on a
+        PR ``drop_pr_labels``, answer as if the change were made and change
+        nothing.
         """
         if issue is None:
             return 404, {"message": "issue not found"}
-        known = model.get("labels", [])
-        keep = not model["settings"].get("ignore_label_writes")
+        known = self.known_labels(model)
+        settings = model["settings"]
+        keep = not settings.get("ignore_label_writes") and not (
+            is_pr and settings.get("drop_pr_labels"))
         names = [label["name"] for label in issue["labels"]]
         if self.command == "POST":
             values = body.get("labels", [])
@@ -674,7 +706,8 @@ class Handler(BaseHTTPRequestHandler):
         # (synthetic, source-backed like issue GET).
         fields = ("id", "number", "title", "state", "body", "user",
                   "created_at")
-        return {**{k: pr[k] for k in fields}, "labels": [],
+        return {**{k: pr[k] for k in fields},
+                "labels": pr.get("labels", []),
                 "milestone": milestone_wire(
                     find_milestone(model, pr.get("milestone"))),
                 "pull_request": {"merged": pr["merged"]}}

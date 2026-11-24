@@ -112,6 +112,19 @@ def record_implementation(metadata: Path, identity: dict, pr: int) -> None:
         json.dump(owner, stream)
 
 
+def recorded_pr(repository: Repository, issue: int, branch: str) -> int | None:
+    """The PR this worktree's implementation record names, or None when
+    there is no such record or it is not this worktree's (#174)."""
+    try:
+        metadata, _ = implementation_identity(repository, issue, branch)
+        if not metadata.exists():
+            return None
+        pr = decode_json(metadata.read_text()).get("pr")
+    except (RetainedError, OSError, ValueError):
+        return None
+    return pr if type(pr) is int else None
+
+
 def owned_implementation(
     repository: Repository, pr: int, branch: str, head: str
 ) -> tuple[Path, int]:

@@ -47,11 +47,13 @@ from .forge import (
     Forge,
     IssueQuery,
     IssueState,
+    Label,
     PullRequest,
     ReviewComment,
     ReviewPublication,
     Snapshot,
     array,
+    label_scope,
     positive,
     requested_state,
 )
@@ -503,6 +505,7 @@ def create_pr(
     report: str,
     title: str | None,
     partial: bool = False,
+    rerun: str | None = None,
 ) -> dict:
     if partial and task is None:
         raise AgentSquadError("--partial requires --task")
@@ -532,17 +535,116 @@ def create_pr(
     )
     if not pushed or pushed.split()[0] != head:
         raise GateError("branch HEAD has not been pushed to origin")
-    if forge.branch_prs(branch):
-        raise AgentSquadError("a PR already exists for this branch")
+    label = find_hold_label(repository, forge)
+    rerun = rerun or "the same pr create command again"
+    # With a hold label the list must be complete: the repair needs the
+    # branch's only PR (#174).
+    existing = forge.branch_prs(branch, complete=label is not None)
+    if existing:
+        if label is None:
+            raise AgentSquadError(PR_EXISTS)
+        return repair_hold_label(
+            repository, forge, issue, branch, existing, label)
     from .merging import implementation_identity, record_implementation
 
     metadata, identity = implementation_identity(repository, issue, branch)
-    created = forge.create_pr(
-        title or issue_record["title"], branch,
-        repository.configuration.base_branch, body,
-    )
-    record_implementation(metadata, identity, created.number)
-    return asdict(created)
+    recorded: list[int] = []
+
+    def on_created(number: int) -> None:
+        # Recorded as soon as the forge answers the create, before any read
+        # that can fail, so that a PR without its label stays the loop's PR
+        # and a rerun can repair it (#174).
+        record_implementation(metadata, identity, number)
+        recorded.append(number)
+
+    try:
+        created = forge.create_pr(
+            title or issue_record["title"], branch,
+            repository.configuration.base_branch, body, label, on_created,
+        )
+        if label is None:
+            return asdict(created) | {"hold_label": None}
+        labels = forge.pr_labels(created.number)
+    except ForgeError as error:
+        if label is None or not recorded:
+            raise
+        raise AgentSquadError(
+            f"PR #{recorded[0]} created, but it could not be read back:"
+            f" {error}; it may lack the hold label {label.name}, so the"
+            f" forge's own merging may merge it; run {rerun} to add it"
+        ) from None
+    if label.name not in labels:
+        raise AgentSquadError(
+            f"PR #{created.number} created without the hold label"
+            f" {label.name}, so the forge's own merging may merge it; run"
+            f" {rerun} to add the label"
+        )
+    return asdict(created) | {
+        "hold_label": {"name": label.name, "applied": True},
+    }
+
+
+PR_EXISTS = "a PR already exists for this branch"
+
+
+def find_hold_label(repository: Repository, forge: Forge) -> Label | None:
+    """The configured hold label, found before any write (#174)."""
+    name = repository.configuration.pr_hold_label
+    if name is None:
+        return None
+    label = forge.pr_label(name)
+    if label is None:
+        raise AgentSquadError(
+            f"pr_hold_label {name} is not a label the forge can put on this"
+            " repository's pull requests; nothing was written"
+        )
+    return label
+
+
+def repair_hold_label(
+    repository: Repository, forge: Forge, issue: int, branch: str,
+    existing: list[dict[str, object]], label: Label,
+) -> dict:
+    """Add the missing hold label to this worktree's open PR (#174).
+
+    Only the branch's one open PR, opened by the Implementer's account and
+    named by this worktree's implementation record, is repaired; nothing
+    but the label changes. Every other PR keeps the existing refusal.
+    """
+    from .merging import recorded_pr
+
+    if len(existing) != 1:
+        raise AgentSquadError(PR_EXISTS)
+    number = positive(existing[0].get("number"), "PR number")
+    pr = forge.pr(number)
+    if (
+        pr.number != number or pr.state != "open" or pr.merged
+        or pr.head_branch != branch
+        or pr.evidence.author.casefold() != forge.account.casefold()
+        or recorded_pr(repository, issue, branch) != number
+    ):
+        raise AgentSquadError(PR_EXISTS)
+    before = forge.pr_labels(number)
+    if label.name in before:
+        raise AgentSquadError(PR_EXISTS)
+    # Adding an exclusive label would remove the PR's other labels of its
+    # scope, and the repair changes no other label (§11.4).
+    displaced = [name for name in before if label.scope is not None
+                 and label_scope(name) == label.scope]
+    if displaced:
+        raise AgentSquadError(
+            f"PR #{number} lacks the hold label {label.name}, which is"
+            f" exclusive in the scope {label.scope}; adding it would remove"
+            f" {', '.join(displaced)}, so nothing was written and the forge's"
+            " own merging may merge the PR"
+        )
+    forge.add_pr_label(number, label)
+    if label.name not in forge.pr_labels(number):
+        raise AgentSquadError(
+            f"PR #{number} still lacks the hold label {label.name} after"
+            " adding it, so the forge's own merging may merge it"
+        )
+    return asdict(pr) | {"hold_label": {"name": label.name, "applied": True}}
 
 
 def report_pr(forge: Forge, number: int, report: str) -> dict:

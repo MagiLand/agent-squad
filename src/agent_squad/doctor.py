@@ -350,6 +350,18 @@ def diagnose(
                 forge.repository_record()
 
             check(f"{role} repository access", readable)
+            if role == "implementer" and config.pr_hold_label is not None:
+                def hold_label() -> str:
+                    # The lookup pr create makes before it writes (#174).
+                    name = config.pr_hold_label
+                    if forge.pr_label(name) is None:
+                        raise AgentSquadError(
+                            f"pr_hold_label {name} is not a label the forge"
+                            " can put on this repository's pull requests"
+                        )
+                    return name
+
+                check("PR hold label", hold_label)
             if role == "reviewer":
                 def reviewer_write() -> str:
                     permission = forge.repository_permission()
