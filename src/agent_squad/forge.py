@@ -371,11 +371,21 @@ class Label:
     """A label found by its exact name to put on pull requests (#174).
 
     ``id`` is the forge's label ID; the adapter chooses whether it applies
-    the label by ID or by name.
+    the label by ID or by name. ``exclusive`` is Forgejo's flag: adding an
+    exclusive label removes the other labels of its scope (§11.4).
     """
 
     name: str
     id: int
+    exclusive: bool = False
+
+    @property
+    def scope(self) -> str | None:
+        """The exclusive scope: the name before its last inner ``/``."""
+        cut = self.name.rfind("/")
+        if not self.exclusive or cut <= 0 or cut == len(self.name) - 1:
+            return None
+        return self.name[:cut]
 
 
 class MergeAnswer(TypedDict):

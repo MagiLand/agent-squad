@@ -621,9 +621,22 @@ def repair_hold_label(
         or pr.head_branch != branch
         or pr.evidence.author.casefold() != forge.account.casefold()
         or recorded_pr(repository, issue, branch) != number
-        or label.name in forge.pr_labels(number)
     ):
         raise AgentSquadError(PR_EXISTS)
+    before = forge.pr_labels(number)
+    if label.name in before:
+        raise AgentSquadError(PR_EXISTS)
+    # Adding an exclusive label would remove the PR's other labels of its
+    # scope, and the repair changes no other label (§11.4).
+    displaced = [name for name in before if label.scope is not None
+                 and name[:name.rfind("/")] == label.scope]
+    if displaced:
+        raise AgentSquadError(
+            f"PR #{number} lacks the hold label {label.name}, which is"
+            f" exclusive in the scope {label.scope}; adding it would remove"
+            f" {', '.join(displaced)}, so nothing was written and the forge's"
+            " own merging may merge the PR"
+        )
     forge.add_pr_label(number, label)
     if label.name not in forge.pr_labels(number):
         raise AgentSquadError(

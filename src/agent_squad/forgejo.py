@@ -1022,7 +1022,11 @@ class Forgejo:
         for row in self._all_pages(endpoint):
             data = object_value(row, "label")
             if V.require_string(data.get("name"), "label.name") == name:
-                return Label(name, positive(data.get("id"), "label.id"))
+                exclusive = data.get("exclusive", False)
+                if not isinstance(exclusive, bool):
+                    raise ForgeError("label.exclusive must be a boolean")
+                return Label(
+                    name, positive(data.get("id"), "label.id"), exclusive)
         return None
 
     def create_pr(

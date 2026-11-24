@@ -1125,16 +1125,17 @@ class GitHub:
         pr = parse_pullrequest(
             self.api(f"{self.prefix}/pulls", method="POST", body=payload)
         )
-        if on_created is not None:
-            on_created(pr.number)
         if label is not None:
             # The create endpoint takes no labels, so the label follows
-            # before anything else (#174). The PR exists either way: a failed
-            # write is left to the caller's read-back, which reports it.
+            # before anything else, even the caller's record (#174). The PR
+            # exists either way: a failed write is left to the caller's
+            # read-back, which reports it.
             try:
                 self.add_pr_label(pr.number, label)
             except ForgeError:
                 pass
+        if on_created is not None:
+            on_created(pr.number)
         return pr
 
     def add_pr_label(self, number: int, label: Label) -> None:

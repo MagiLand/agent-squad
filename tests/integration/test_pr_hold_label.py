@@ -1,6 +1,7 @@
 """The configured hold label on every PR that pr create opens (#174)."""
 
 import json
+import os
 from pathlib import Path
 import unittest
 
@@ -155,6 +156,23 @@ class HoldLabelContract:
                          {"name": HOLD, "applied": True})
         (write,) = self.writes(start)
         self.assertEqual(write[:2], ("POST", f"{REPO}/issues/1/labels"))
+        self.assertEqual(self.pr_labels(), [HOLD])
+
+    def test_a_failed_record_write_still_labels_the_pr(self) -> None:
+        # The label goes on the PR before the local record is written: in
+        # the create request on Forgejo, right after it on GitHub.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        self.add_label()
+        self.configure()
+        admin = self.ownership.parent
+        mode = admin.stat().st_mode
+        admin.chmod(0o555)
+        self.addCleanup(admin.chmod, mode)
+        refused = self.create(expected=1)
+        self.assertIn("Permission denied", refused["error"])
+        admin.chmod(mode)
+        self.assertFalse(self.ownership.exists())
         self.assertEqual(self.pr_labels(), [HOLD])
 
     def test_repair_refuses_another_account_or_no_record(self) -> None:
@@ -378,6 +396,39 @@ class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):
         self.assertEqual(write, ("POST", f"{REPO}/issues/1/labels",
                                  {"labels": [70]}))
         self.assertEqual(self.pr_labels(), [HOLD])
+
+    def test_an_exclusive_hold_label_never_displaces_a_label(self) -> None:
+        # F16 removes the other labels of an exclusive label's scope (§11.4).
+        f = self.f
+        hold = "merge/hold"
+        model = f.read_model()
+        model["labels"] = [{"id": 50, "name": hold, "exclusive": True}]
+        f.save_model(model)
+        self.configure(hold)
+        f.settings(drop_pr_labels=True)
+        self.create(expected=1)
+        f.settings(drop_pr_labels=False)
+        for present, refused in ((["merge/ready", "area/backend"], True),
+                                 (["area/backend"], False)):
+            with self.subTest(present=present):
+                model = f.read_model()
+                model["prs"]["1"]["labels"] = [
+                    {"id": 60 + i, "name": name}
+                    for i, name in enumerate(present)]
+                f.save_model(model)
+                start = len(model["calls"])
+                if refused:
+                    error = self.create(expected=1)["error"]
+                    self.assertIn(
+                        f"PR #1 lacks the hold label {hold}, which is"
+                        " exclusive in the scope merge; adding it would"
+                        " remove merge/ready, so nothing was written", error)
+                    self.assertEqual(self.writes(start), [])
+                    self.assertEqual(self.pr_labels(), present)
+                else:
+                    self.assertEqual(self.create()["hold_label"],
+                                     {"name": hold, "applied": True})
+                    self.assertEqual(self.pr_labels(), present + [hold])
 
     def test_a_label_past_a_short_page_is_found(self) -> None:
         # A server cap below 50 makes every page short (#174).
