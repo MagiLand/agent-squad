@@ -536,7 +536,9 @@ def create_pr(
         raise GateError("branch HEAD has not been pushed to origin")
     label = find_hold_label(repository, forge)
     rerun = rerun or "the same pr create command again"
-    existing = forge.branch_prs(branch)
+    # With a hold label the list must be complete: the repair needs the
+    # branch's only PR (#174).
+    existing = forge.branch_prs(branch, complete=label is not None)
     if existing:
         if label is None:
             raise AgentSquadError(PR_EXISTS)
@@ -545,22 +547,30 @@ def create_pr(
     from .merging import implementation_identity, record_implementation
 
     metadata, identity = implementation_identity(repository, issue, branch)
-    created = forge.create_pr(
-        title or issue_record["title"], branch,
-        repository.configuration.base_branch, body, label,
-    )
-    # Recorded before the labels are read, so that a PR without its label
-    # stays the loop's PR and a rerun can repair it (#174).
-    record_implementation(metadata, identity, created.number)
-    if label is None:
-        return asdict(created) | {"hold_label": None}
+    recorded: list[int] = []
+
+    def on_created(number: int) -> None:
+        # Recorded as soon as the forge answers the create, before any read
+        # that can fail, so that a PR without its label stays the loop's PR
+        # and a rerun can repair it (#174).
+        record_implementation(metadata, identity, number)
+        recorded.append(number)
+
     try:
+        created = forge.create_pr(
+            title or issue_record["title"], branch,
+            repository.configuration.base_branch, body, label, on_created,
+        )
+        if label is None:
+            return asdict(created) | {"hold_label": None}
         labels = forge.pr_labels(created.number)
     except ForgeError as error:
+        if label is None or not recorded:
+            raise
         raise AgentSquadError(
-            f"PR #{created.number} created, but its labels could not be read"
-            f" back: {error}; it may lack the hold label {label.name}, so"
-            f" the forge's own merging may merge it; run {rerun} to add it"
+            f"PR #{recorded[0]} created, but it could not be read back:"
+            f" {error}; it may lack the hold label {label.name}, so the"
+            f" forge's own merging may merge it; run {rerun} to add it"
         ) from None
     if label.name not in labels:
         raise AgentSquadError(

@@ -465,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
             pr["head"]["sha"] = self.branch(model, pr["head"]["ref"])
             pr.setdefault("merge_base", pr["base"]["sha"])
         if len(parts) == 5:
+            if self.command == "GET" and settings.get("pr_read_status"):
+                return settings["pr_read_status"], {
+                    "message": "synthetic read failure"}
             if pr["merged"] and settings.get("merge_confirmation_403"):
                 return 403, {"message": "merge confirmation unreadable"}
             if self.command == "PATCH":

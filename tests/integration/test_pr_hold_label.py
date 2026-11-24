@@ -131,6 +131,32 @@ class HoldLabelContract:
                          "error: a PR already exists for this branch")
         self.assertEqual(self.writes(start), [])
 
+    def test_an_unreadable_pr_keeps_its_record_and_is_repaired(
+        self,
+    ) -> None:
+        # The create succeeds and drops the label; the first read of the new
+        # PR fails (on Forgejo inside the create, on GitHub at the read-back).
+        f = self.f
+        self.add_label()
+        self.configure()
+        f.settings(drop_pr_labels=True, pr_read_status=502)
+        refused = self.create(expected=1)
+        self.assertIn("PR #1 created, but it could not be read back",
+                      refused["error"])
+        self.assertIn(f"it may lack the hold label {HOLD}", refused["error"])
+        self.assertIn(
+            "run agent-squad pr create --as implementer --issue 1"
+            f" --report {f.report} to add it", refused["error"])
+        self.assertEqual(json.loads(self.ownership.read_text())["pr"], 1)
+        self.assertEqual(self.pr_labels(), [])
+        f.settings(drop_pr_labels=False, pr_read_status=None)
+        start = len(f.read_model()["calls"])
+        self.assertEqual(self.create()["hold_label"],
+                         {"name": HOLD, "applied": True})
+        (write,) = self.writes(start)
+        self.assertEqual(write[:2], ("POST", f"{REPO}/issues/1/labels"))
+        self.assertEqual(self.pr_labels(), [HOLD])
+
     def test_repair_refuses_another_account_or_no_record(self) -> None:
         f = self.f
         self.add_label()
@@ -281,18 +307,6 @@ class GitHubHoldLabelTests(HoldLabelContract, unittest.TestCase):
                          {"name": HOLD, "applied": True})
         self.assertEqual(self.pr_labels(), [HOLD])
 
-    def test_an_unreadable_label_read_back_keeps_the_record(self) -> None:
-        f = self.f
-        self.add_label()
-        self.configure()
-        f.settings(pr_read_status=502)
-        refused = self.create(expected=1)
-        self.assertIn("PR #1 created, but its labels could not be read back",
-                      refused["error"])
-        self.assertIn(f"it may lack the hold label {HOLD}", refused["error"])
-        self.assertEqual(json.loads(self.ownership.read_text())["pr"], 1)
-        self.assertEqual(self.pr_labels(), [HOLD])
-
 
 class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):
     fixture = ForgejoFixture
@@ -364,6 +378,42 @@ class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):
         self.assertEqual(write, ("POST", f"{REPO}/issues/1/labels",
                                  {"labels": [70]}))
         self.assertEqual(self.pr_labels(), [HOLD])
+
+    def test_a_label_past_a_short_page_is_found(self) -> None:
+        # A server cap below 50 makes every page short (#174).
+        f = self.f
+        model = f.read_model()
+        model["labels"] = [{"id": 41, "name": "needs-triage"}]
+        f.save_model(model)
+        self.add_label()
+        self.configure()
+        f.settings(max_response_items=1)
+        self.assertEqual(self.create()["hold_label"],
+                         {"name": HOLD, "applied": True})
+        self.assertEqual(self.pr_labels(), [HOLD])
+        result = f.cli("doctor")
+        (row,) = [d for d in result["diagnostics"]
+                  if d["check"] == "PR hold label"]
+        self.assertEqual(row["severity"], "pass")
+
+    def test_the_repair_sees_a_second_pr_past_a_short_page(self) -> None:
+        f = self.f
+        self.add_label()
+        self.configure()
+        f.settings(drop_pr_labels=True)
+        self.create(expected=1)
+        f.settings(drop_pr_labels=False, max_response_items=1)
+        model = f.read_model()
+        # An earlier, closed PR on the same branch, on the second page.
+        model["prs"]["2"] = dict(model["prs"]["1"], id=2, number=2,
+                                 state="closed")
+        f.save_model(model)
+        start = len(model["calls"])
+        refused = self.create(expected=1)
+        self.assertEqual(refused["error"],
+                         "error: a PR already exists for this branch")
+        self.assertEqual(self.writes(start), [])
+        self.assertEqual(self.pr_labels(), [])
 
 
 if __name__ == "__main__":

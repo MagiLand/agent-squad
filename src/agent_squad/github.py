@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 import json
 import os
@@ -1115,6 +1116,7 @@ class GitHub:
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str,
         label: Label | None = None,
+        on_created: Callable[[int], None] | None = None,
     ) -> PullRequest:
         payload = {
             "title": title, "head": head_branch, "base": base_branch,
@@ -1123,6 +1125,8 @@ class GitHub:
         pr = parse_pullrequest(
             self.api(f"{self.prefix}/pulls", method="POST", body=payload)
         )
+        if on_created is not None:
+            on_created(pr.number)
         if label is not None:
             # The create endpoint takes no labels, so the label follows
             # before anything else (#174). The PR exists either way: a failed
@@ -1320,7 +1324,10 @@ class GitHub:
             return False
         return record.get("delete_branch_on_merge") is True
 
-    def branch_prs(self, branch: str) -> list[dict[str, object]]:
+    def branch_prs(
+        self, branch: str, complete: bool = False,
+    ) -> list[dict[str, object]]:
+        # Pages of 100 end only at the last one, so every read is complete.
         config = self.repository.configuration
         query = urlencode(
             {"head": f"{config.forge.owner}:{branch}", "state": "all"}
