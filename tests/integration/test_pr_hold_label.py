@@ -408,8 +408,12 @@ class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):
         f.settings(drop_pr_labels=True)
         self.create(expected=1)
         f.settings(drop_pr_labels=False)
+        # Only a name with an inner "/" has a scope: "merges" and "merge/"
+        # have none, so they do not conflict with merge/hold (PR #177 REV-5).
         for present, refused in ((["merge/ready", "area/backend"], True),
-                                 (["area/backend"], False)):
+                                 (["area/backend"], False),
+                                 (["merges"], False), (["merge/"], False),
+                                 (["/merge"], False)):
             with self.subTest(present=present):
                 model = f.read_model()
                 model["prs"]["1"]["labels"] = [
@@ -429,6 +433,9 @@ class ForgejoHoldLabelTests(HoldLabelContract, unittest.TestCase):
                     self.assertEqual(self.create()["hold_label"],
                                      {"name": hold, "applied": True})
                     self.assertEqual(self.pr_labels(), present + [hold])
+                    (write,) = self.writes(start)
+                    self.assertEqual(write[:2],
+                                     ("POST", f"{REPO}/issues/1/labels"))
 
     def test_a_label_past_a_short_page_is_found(self) -> None:
         # A server cap below 50 makes every page short (#174).

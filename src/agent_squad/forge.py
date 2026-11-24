@@ -366,6 +366,13 @@ def exposed(read: Callable[[], Exposed | None]) -> Exposed | None:
         raise
 
 
+def label_scope(name: str) -> str | None:
+    """The scope a label name would have if exclusive: the name before its
+    last ``/``, when that ``/`` is neither first nor last (§11.0)."""
+    cut = name.rfind("/")
+    return name[:cut] if 0 < cut < len(name) - 1 else None
+
+
 @dataclass(frozen=True)
 class Label:
     """A label found by its exact name to put on pull requests (#174).
@@ -381,11 +388,8 @@ class Label:
 
     @property
     def scope(self) -> str | None:
-        """The exclusive scope: the name before its last inner ``/``."""
-        cut = self.name.rfind("/")
-        if not self.exclusive or cut <= 0 or cut == len(self.name) - 1:
-            return None
-        return self.name[:cut]
+        """The exclusive scope, or none for a label that is not exclusive."""
+        return label_scope(self.name) if self.exclusive else None
 
 
 class MergeAnswer(TypedDict):

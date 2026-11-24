@@ -53,6 +53,7 @@ from .forge import (
     ReviewPublication,
     Snapshot,
     array,
+    label_scope,
     positive,
     requested_state,
 )
@@ -629,7 +630,7 @@ def repair_hold_label(
     # Adding an exclusive label would remove the PR's other labels of its
     # scope, and the repair changes no other label (§11.4).
     displaced = [name for name in before if label.scope is not None
-                 and name[:name.rfind("/")] == label.scope]
+                 and label_scope(name) == label.scope]
     if displaced:
         raise AgentSquadError(
             f"PR #{number} lacks the hold label {label.name}, which is"
