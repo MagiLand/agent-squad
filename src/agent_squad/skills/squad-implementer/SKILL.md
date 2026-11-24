@@ -139,6 +139,14 @@ as `Fixes` precedes `#<N>`; reword the text instead. Start a later stage in a
 fresh `<worktree_root>/issue-<N>` worktree on a branch no earlier PR used:
 `pr create` refuses a branch that already has a PR, even a merged one.
 
+When the configuration sets `pr_hold_label`, every PR that `pr create` opens
+carries that hold label, which keeps the forge's own merging (such as a merge
+train) off the PR; the label stays on the PR, and no agent removes it. When
+`pr create` exits 1 because the hold label is missing, run the same
+`pr create` once more: it adds the label to that PR and changes nothing else.
+If the label is still missing, stop and tell the Developer at once that the PR
+is exposed to the forge's own merging.
+
 At `pr create` and after every push, apply section 8's review-before-merge rule
 to the whole PR. Name any applicable item and its reason under “Areas worth
 extra review”. Right after creation, unless the Developer kept the merge
@@ -421,7 +429,8 @@ and request review of the new head. Reapply the hold rule after the push.
 Report and wait if the review budget is exhausted or a conflict needs a choice
 outside the Task. A same-head review still carries the old merge-base and does
 not fix this refusal. `--accept-moved-base` remains the Developer's explicit
-choice.
+choice. The `pr_hold_label` hold label is not a merge hold: `pr merge`
+ignores it, and the label stays on the PR.
 
 Report visible human-approval or required-check requirements and any forge
 refusal. After a successful merge the PR description is frozen: `pr report`

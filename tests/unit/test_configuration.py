@@ -70,6 +70,26 @@ class ConfigurationTests(unittest.TestCase):
         value.pop("developer_accounts")
         self.assertEqual(Configuration.from_dict(value).developer_accounts, ())
 
+    def test_optional_hold_label_round_trip_and_validation(self) -> None:
+        # Absent stays absent, so earlier configurations keep their shape.
+        base = config().to_dict()
+        self.assertNotIn("pr_hold_label", base)
+        self.assertIsNone(Configuration.from_dict(base).pr_hold_label)
+        for name in ("no-auto-merge", "hold: train", "a"):
+            with self.subTest(name=name):
+                data = {**base, "pr_hold_label": name}
+                loaded = Configuration.from_dict(data)
+                self.assertEqual(loaded.pr_hold_label, name)
+                self.assertEqual(loaded.to_dict(), data)
+        for value in ("", " hold", "hold ", "\thold", "hold\n", "ho\x00ld",
+                      None, 7, ["hold"]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ConfigurationError, "pr_hold_label must"
+                ):
+                    Configuration.from_dict(
+                        {**base, "pr_hold_label": value})
+
     def test_unknown_fields_wrong_types_and_limits(self) -> None:
         mutations = [
             ("schema_version", True),

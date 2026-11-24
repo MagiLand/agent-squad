@@ -14,7 +14,7 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 from .forge import (
     CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable,
     ClosingPullRequest, Comment, Evidence, ForgeError, IssueDependencies,
-    IssueQuery, IssueRecord, ListedIssue, MergeResult, Milestone,
+    IssueQuery, IssueRecord, Label, ListedIssue, MergeResult, Milestone,
     PullRequest, RelatedIssue, Review, ReviewPublication, ReviewState, Role,
     Snapshot, ThreadState, V, array, boolean, branch_present, closing_order,
     delete_and_confirm, exposed, milestone_title, object_value, oid,
@@ -141,6 +141,14 @@ def parse_issue(value: object) -> IssueRecord:
         "milestone": milestone_title(data.get("milestone"), "issue.milestone"),
         "comments": (),
     }
+
+
+def label_names(value: object) -> tuple[str, ...]:
+    return tuple(
+        V.require_string(object_value(label, "label").get("name"),
+                         "label.name")
+        for label in array(value, "labels")
+    )
 
 
 def parse_related_issue(value: object) -> RelatedIssue:
@@ -1095,16 +1103,50 @@ class GitHub:
         except ForgeError:
             return None
 
+    def pr_label(self, name: str) -> Label | None:
+        """The repository label named exactly ``name`` (#174); GitHub
+        labels belong to the repository alone."""
+        for row in self.listing(f"{self.prefix}/labels"):
+            data = object_value(row, "label")
+            if V.require_string(data.get("name"), "label.name") == name:
+                return Label(name, positive(data.get("id"), "label.id"))
+        return None
+
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str,
+        label: Label | None = None,
     ) -> PullRequest:
         payload = {
             "title": title, "head": head_branch, "base": base_branch,
             "body": body,
         }
-        return parse_pullrequest(
+        pr = parse_pullrequest(
             self.api(f"{self.prefix}/pulls", method="POST", body=payload)
         )
+        if label is not None:
+            # The create endpoint takes no labels, so the label follows
+            # before anything else (#174). The PR exists either way: a failed
+            # write is left to the caller's read-back, which reports it.
+            try:
+                self.add_pr_label(pr.number, label)
+            except ForgeError:
+                pass
+        return pr
+
+    def add_pr_label(self, number: int, label: Label) -> None:
+        """Add one label to a PR by name, keeping its other labels."""
+        self.api(
+            f"{self.prefix}/issues/{number}/labels", method="POST",
+            body={"labels": [label.name]},
+        )
+
+    def pr_labels(self, number: int) -> tuple[str, ...]:
+        data = object_value(
+            self.api(f"{self.prefix}/pulls/{number}"), "pull request"
+        )
+        if positive(data.get("number"), "PR number") != number:
+            raise ForgeError("pull request response has another number")
+        return label_names(data.get("labels"))
 
     def branch_rules(self, branch: str) -> dict[str, object]:
         """Report classic protection and active rulesets when exposed."""

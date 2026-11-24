@@ -729,7 +729,7 @@ if kind == "issues":
                 "id", "number", "title", "state", "body", "user",
                 "created_at",
             )},
-            "labels": [],
+            "labels": pull.get("labels", []),
             "milestone": milestone_wire(pull.get("milestone")),
             "pull_request": {
                 "url": "https://api.github.com/repos/"
@@ -794,13 +794,19 @@ if kind == "issues":
                 "blocking": blocking(number)}[parts[6]]
         output(paged([dependency_row(ref, here) for ref in rows], query))
     if parts[5:6] == ["labels"]:
-        # Label writes reach the issue on a number a PR shares; the command
-        # refuses a PR before writing. ignore_label_writes answers as if
-        # the change were made and changes nothing.
+        # Label writes reach the PR on a number an issue shares, as comment
+        # writes do (#174); issue label refuses a PR before writing, and its
+        # tests use numbers no PR shares. ignore_label_writes, and for a PR
+        # drop_pr_labels, answer as if the change were made and change
+        # nothing.
+        if pull is not None:
+            issue = pull
+            issue.setdefault("labels", [])
         if issue is None:
             fail("Not Found", 404)
         names = [label["name"] for label in issue["labels"]]
-        keep = not settings.get("ignore_label_writes")
+        keep = not settings.get("ignore_label_writes") and not (
+            pull is not None and settings.get("drop_pr_labels"))
         if method == "POST":
             # Only existing labels apply, as for issue creation (§19).
             known = [label["name"] for label in model.get("labels", [])]
@@ -834,6 +840,7 @@ if number is None:
             comments=[],
             conversation=[],
             threads=[],
+            labels=[],
         )
         prs[number] = pr
         output(pr)
@@ -852,7 +859,8 @@ if len(parts) == 5:
         if settings.get("fail_mirror"):
             fail("injected Task mirror failure", 503)
         pr["body"] = payload["body"]
-    output(pr)
+    # GitHub serves a PR's labels; older fixture PRs carry none.
+    output({**pr, "labels": pr.get("labels", [])})
 if parts[5] == "merge":
     import subprocess
     import tempfile

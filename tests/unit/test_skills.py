@@ -606,6 +606,50 @@ class PartialDeliverySkillTests(unittest.TestCase):
             "--partial", packaged_skill("squad-reviewer").decode())
 
 
+class HoldLabelSkillTests(unittest.TestCase):
+    """Every loop PR keeps the configured hold label (#174)."""
+
+    def setUp(self) -> None:
+        self.implementer = flat(packaged_skill("squad-implementer").decode())
+        spec = flat((PROJECT_ROOT / "docs/agent-squad-spec.md").read_text())
+        self.spec_implementer = section(
+            spec, "### 12.2 `squad-implementer`: mandatory rules",
+            "### 12.3")
+
+    def test_the_label_stays_and_a_missing_one_is_repaired_once(
+        self,
+    ) -> None:
+        publish = section(self.implementer, "## 2. Implement and publish",
+                          "## 3.")
+        for rule in (
+            "When the configuration sets `pr_hold_label`, every PR that "
+            "`pr create` opens carries that hold label",
+            "the label stays on the PR, and no agent removes it.",
+            "When `pr create` exits 1 because the hold label is missing, run "
+            "the same `pr create` once more",
+            "If the label is still missing, stop and tell the Developer at "
+            "once that the PR is exposed to the forge's own merging.",
+        ):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, publish)
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        self.assertIn(
+            "The `pr_hold_label` hold label is not a merge hold: `pr merge` "
+            "ignores it", finishing)
+        for outline in (
+            "every PR that `pr create` opens carries that label and no agent "
+            "removes it",
+            "when `pr create` exits 1 because the hold label is missing, run "
+            "`pr create` once more, and if the label is still missing, stop "
+            "and tell the Developer at once that the PR is exposed to the "
+            "forge's own merging",
+            "The hold label of `pr_hold_label` is not a merge hold: "
+            "`pr merge` ignores it and no agent removes it",
+        ):
+            with self.subTest(outline=outline):
+                self.assertIn(outline, self.spec_implementer)
+
+
 class IssueClosingRuleSkillTests(unittest.TestCase):
     """The Implementer applies a documented issue-closing rule (#144)."""
 

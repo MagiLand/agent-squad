@@ -172,6 +172,15 @@ permission. Herdr, skills, Git and orphan-resource checks apply to both forges.
 Doctor reports problems without repairing configuration or removing orphaned
 resources.
 
+If the forge merges pull requests on its own, for example through a merge
+train that leaves alone a PR carrying a hold label, name that label at `init`
+with `--pr-hold-label <name>` (stored as `pr_hold_label`). `pr create` then
+puts it on every PR it opens, and `doctor` checks that it exists as a
+repository label or, on Forgejo, as an organization label of the owner. The
+loop still merges with `pr merge`, which ignores the label, and no command
+removes it. When `pr create` reports that the label is missing, running the
+same command again adds it to that PR.
+
 ## Work through an issue
 
 Invoke `$squad-implementer` in Codex or `/squad-implementer` in Claude Code and

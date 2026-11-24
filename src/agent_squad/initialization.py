@@ -102,6 +102,8 @@ class Configuration:
     merge_method: str
     worktree_root: str
     scratch_root: str
+    # The label pr create puts on every PR it opens (#174); None: no label.
+    pr_hold_label: str | None = None
 
     @classmethod
     def from_dict(cls, value: object) -> Configuration:
@@ -126,6 +128,7 @@ class Configuration:
             },
             optional={
                 "developer_accounts", "identity_mode", "approver_accounts",
+                "pr_hold_label",
             },
             path="configuration",
         )
@@ -236,6 +239,11 @@ class Configuration:
             V.require_string(data[key], key)
             for key in ("worktree_root", "scratch_root")
         ]
+        # Absent means no label; null is a wrong type like any other.
+        hold = (
+            validate_label_name(data["pr_hold_label"], "pr_hold_label")
+            if "pr_hold_label" in data else None
+        )
         return cls(
             2,
             ForgeConfiguration(**forge),
@@ -250,6 +258,7 @@ class Configuration:
             budget,
             method,
             *roots,
+            hold,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -260,12 +269,29 @@ class Configuration:
         ):
             if value[section][field] is None:
                 del value[section][field]
+        # Absent, not null: a configuration without the field keeps its
+        # earlier shape (#174).
+        if value["pr_hold_label"] is None:
+            del value["pr_hold_label"]
         return value
 
     def account(self, role: str) -> str:
         if role not in ("implementer", "reviewer"):
             raise ConfigurationError(f"unknown role: {role}")
         return getattr(self, role).forge_account
+
+
+def validate_label_name(value: object, label: str) -> str:
+    """A label name as configured: non-empty, no surrounding whitespace,
+    and no null byte (#174)."""
+    if not isinstance(value, str):
+        raise ConfigurationError(f"{label} must be a string")
+    if not value or value != value.strip() or "\x00" in value:
+        raise ConfigurationError(
+            f"{label} must be non-empty, without leading or trailing"
+            " whitespace or null bytes"
+        )
+    return value
 
 
 def validate_base_url(value: object) -> str:
@@ -523,6 +549,7 @@ def initialize_repository(
     base_url: str | None = None,
     implementer_token_file: str | None = None,
     reviewer_token_file: str | None = None,
+    pr_hold_label: str | None = None,
 ) -> dict[str, object]:
     from .forge import make_forge
 
@@ -560,6 +587,9 @@ def initialize_repository(
             "merge_method": "merge",
             "worktree_root": ".agent-squad/worktrees",
             "scratch_root": ".agent-squad/review-scratch",
+            # An empty name is refused, not taken as absent.
+            **({"pr_hold_label": pr_hold_label}
+               if pr_hold_label is not None else {}),
         }
     )
     exists = (
@@ -622,10 +652,12 @@ def initialize_repository(
     if not exists:
         atomic_config(repository.configuration_path, config)
         events.observe(config.forge)
+    configured, requested = config.to_dict(), defaults.to_dict()
+    # An optional field may be absent from either side (#174).
     differences = {
-        k: {"configured": v, "default": defaults.to_dict()[k]}
-        for k, v in config.to_dict().items()
-        if v != defaults.to_dict()[k]
+        k: {"configured": configured.get(k), "default": requested.get(k)}
+        for k in [*configured, *(k for k in requested if k not in configured)]
+        if configured.get(k) != requested.get(k)
     }
     return {
         "configuration_path": str(repository.configuration_path),

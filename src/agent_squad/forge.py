@@ -366,6 +366,18 @@ def exposed(read: Callable[[], Exposed | None]) -> Exposed | None:
         raise
 
 
+@dataclass(frozen=True)
+class Label:
+    """A label found by its exact name to put on pull requests (#174).
+
+    ``id`` is the forge's label ID; the adapter chooses whether it applies
+    the label by ID or by name.
+    """
+
+    name: str
+    id: int
+
+
 class MergeAnswer(TypedDict):
     status: int
     message: str
@@ -444,9 +456,15 @@ class Forge(Protocol):
     def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None: ...
     def branch_prs(self, branch: str) -> list[dict[str, object]]: ...
 
+    def pr_label(self, name: str) -> Label | None: ...
+
     def create_pr(
         self, title: str, head_branch: str, base_branch: str, body: str,
+        label: Label | None = None,
     ) -> PullRequest: ...
+
+    def add_pr_label(self, number: int, label: Label) -> None: ...
+    def pr_labels(self, number: int) -> tuple[str, ...]: ...
 
     def update_body(self, number: int, body: str) -> PullRequest: ...
 
