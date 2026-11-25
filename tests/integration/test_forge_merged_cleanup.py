@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import json
 import shutil
+import stat
 import os
 from pathlib import Path
 import sys
@@ -24,9 +25,20 @@ from agent_squad.merging import cleanup_pr
 COMMAND = "agent-squad pr cleanup --as implementer --pr 1"
 
 
-def open_descriptors() -> int:
-    """How many file descriptors this process holds open."""
-    return len(os.listdir("/dev/fd"))
+def open_directories() -> int:
+    """How many directories this process holds open.
+
+    Only directories are counted: the in-process Forgejo fake closes each
+    request's socket on its own thread, some time after the answer.
+    """
+    count = 0
+    for name in os.listdir("/dev/fd"):
+        try:
+            count += stat.S_ISDIR(os.fstat(int(name)).st_mode)
+        except OSError:
+            # The listing's own descriptor, closed again by now.
+            pass
+    return count
 
 
 def call_path(call: dict) -> str:
@@ -606,11 +618,11 @@ class ForgeMergedCleanup:
                 type(forge), "graphql", create=True,
                 side_effect=ForgeError("reviews unreadable"),
             ):
-                descriptors = open_descriptors()
+                descriptors = open_directories()
                 with self.assertRaisesRegex(ForgeError, "reviews unreadable"):
                     cleanup_pr(repository, forge, 1)
                 # The proved Git directory is not left open.
-                self.assertEqual(open_descriptors(), descriptors)
+                self.assertEqual(open_directories(), descriptors)
         self.assertEqual(self.writes(), writes)
         self.assertFalse(self.record.exists())
         self.assertTrue(f.worktree.exists())
@@ -666,7 +678,7 @@ class ForgeMergedCleanup:
         name but is not the proved one, and gets neither marker nor record."""
         f = self.f
         merge_commit = self.forge_merge("merge")
-        writes, descriptors = self.writes(), open_descriptors()
+        writes, descriptors = self.writes(), open_directories()
         directory, done, recreated = self.recreate_checkout_on("git_output")
         with patch.dict(os.environ, f.env, clear=True), recreated:
             repository = load_initialized_repository(f.repo)
@@ -678,7 +690,7 @@ class ForgeMergedCleanup:
                          "implementation Git directory changed")
         self.assert_retained_unrecorded(result)
         self.assert_nothing_marked(directory, writes)
-        self.assertEqual(open_descriptors(), descriptors)
+        self.assertEqual(open_directories(), descriptors)
         # A new run proves the checkout that is there now.
         self.assert_finished(self.cleanup(), merge_commit)
 
@@ -688,7 +700,7 @@ class ForgeMergedCleanup:
         """REV-20: the proof must be about the directory held open."""
         f = self.f
         merge_commit = self.forge_merge("merge")
-        writes, descriptors = self.writes(), open_descriptors()
+        writes, descriptors = self.writes(), open_directories()
         directory, done, recreated = self.recreate_checkout_on(
             "owned_implementation")
         with patch.dict(os.environ, f.env, clear=True), recreated:
@@ -701,7 +713,7 @@ class ForgeMergedCleanup:
                     repository, make_forge(repository, "implementer"), 1)
         self.assertTrue(done)
         self.assert_nothing_marked(directory, writes)
-        self.assertEqual(open_descriptors(), descriptors)
+        self.assertEqual(open_directories(), descriptors)
         self.assert_finished(self.cleanup(), merge_commit)
 
     def approval_after_a_blocking_finding(self, verified: str) -> None:
