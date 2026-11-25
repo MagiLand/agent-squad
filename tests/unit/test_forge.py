@@ -666,6 +666,42 @@ class GraphQLReadTests(unittest.TestCase):
             read.call_args_list[1].args[0],
         )
 
+    def test_snapshot_without_conversation_does_not_ask_for_it(self) -> None:
+        """#175: the list is left out of the query by its variable, and no
+        page of it is read, even if an answer were to carry one."""
+        note = {
+            'fullDatabaseId': '40',
+            'author': {'__typename': 'User', 'login': 'dev'},
+            'body': 'note', 'createdAt': '2026-01-01T00:00:40Z',
+        }
+        asked = graphql_pull(comments=[note])
+        with patch.object(self.forge, 'graphql', return_value=asked) as read:
+            whole = self.forge.snapshot(1)
+        self.assertIs(read.call_args.args[1]['conversation'], True)
+        self.assertEqual([c.id for c in whole.conversation], [40])
+        query = read.call_args.args[0]
+        self.assertIn('$conversation:Boolean!', query)
+        self.assertIn(
+            'comments(first:100) @include(if:$conversation) {', query)
+        # GitHub omits a field whose @include is false.
+        omitted = graphql_pull()
+        del omitted['repository']['pullRequest']['comments']
+        further = graphql_pull()
+        further['repository']['pullRequest']['comments'] = page([note], 'c1')
+        for answer in (omitted, further):
+            with patch.object(
+                self.forge, 'graphql', return_value=answer,
+            ) as read:
+                partial = self.forge.snapshot(1, conversation=False)
+            read.assert_called_once()
+            self.assertIs(read.call_args.args[1]['conversation'], False)
+            self.assertEqual(partial.conversation, ())
+            self.assertEqual(partial.pr, whole.pr)
+        # Asked for and absent, the answer is refused.
+        with patch.object(self.forge, 'graphql', return_value=omitted):
+            with self.assertRaises(ForgeError):
+                self.forge.snapshot(1)
+
     def test_a_repeated_cursor_fails_the_read(self) -> None:
         again = {'node': {'reviews': page([], 'p1')}}
         with patch.object(self.forge, 'graphql', return_value=again):
