@@ -7,10 +7,10 @@ on the forge; no delivery status or review result is stored here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import errno
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import time
 import uuid
@@ -371,73 +371,78 @@ def verify_workspace(
     return workspace
 
 
-# A name that is not there: the only failure to read a path that still
-# says where the path would be.
-MISSING = (errno.ENOENT, errno.ENOTDIR)
+def placed_directory(path: str) -> tuple[os.stat_result, str, tuple[str, ...]]:
+    """Where a directory is, as the operating system reads its spelling.
 
+    Returns the identity of the deepest directory on ``path`` that exists,
+    the spelling that names it, and the names below it that do not exist.
+    Every question is put to the operating system on the spelling as
+    reported; no path is resolved or normalized here, because a reading
+    worked out in this process can skip what the system would refuse and
+    end somewhere else.
 
-def placed_directory(path: str) -> tuple[Path, Path]:
-    """Where a directory is, by the file system's own strict reading.
-
-    Returns the directory's place and the part of it that exists. The
-    deepest existing part of ``path`` is resolved strictly: every component
-    and symbolic link on the way is read, and one that cannot be read, or
-    that loops, raises. Nothing is resolved leniently, because a lenient
-    reading skips what it cannot read and can end somewhere else. Only
-    plain names that are absent may follow the existing part. A symbolic
-    link that leads to a missing path, and ``..`` below a missing name,
-    cannot be placed and raise as well (#175).
+    Only a final name is ever set aside, and only when the system reports
+    that name itself as absent: the directory that would hold it is then
+    the spelling without it. Everything else raises: any other error, a
+    path that exists and is not a directory, a symbolic link that leads to
+    a missing path, and ``.`` or ``..`` below a missing name (#175).
     """
-    candidate = Path(path)
+    spelling = path
     absent: list[str] = []
     while True:
         try:
-            existing = Path(os.path.realpath(candidate, strict=True))
-            break
-        except OSError as error:
-            if error.errno not in MISSING:
-                raise
-        try:
-            os.lstat(candidate)
-        except OSError as error:
-            if error.errno not in MISSING:
-                raise
+            status = os.stat(spelling)
+        except FileNotFoundError:
+            pass
         else:
-            raise ValueError(f"{candidate} leads to a path that is missing")
-        if candidate.name in ("", ".."):
-            raise ValueError(f"{candidate} is below a path that is missing")
-        absent.append(candidate.name)
-        candidate = candidate.parent
-    return existing.joinpath(*reversed(absent)), existing
+            if not stat.S_ISDIR(status.st_mode):
+                raise ValueError(f"{spelling} is not a directory")
+            return status, spelling, tuple(reversed(absent))
+        # A trailing separator would make the system follow a final link.
+        entry = spelling.rstrip("/")
+        above, name = os.path.split(entry)
+        if name in ("", ".", ".."):
+            raise ValueError(f"{spelling} is below a path that is missing")
+        try:
+            os.lstat(entry)
+        except FileNotFoundError:
+            absent.append(name)
+            spelling = above
+        else:
+            raise ValueError(f"{entry} leads to a path that is missing")
 
 
 def directory_in_checkout(
-    path: str, label: str, checkout: tuple[Path, Path],
+    path: str, label: str,
+    checkout: tuple[os.stat_result, str, tuple[str, ...]],
 ) -> bool:
     """Whether a directory that Herdr reports is the checkout or lies below
     it; a directory that cannot be placed keeps every resource.
 
-    ``checkout`` is the checkout's own place from placed_directory(). No
-    path prefix is trusted on its own: a file system that ignores letter
-    case reads another spelling as the same directory and leaves the
-    spelling as given, so the existing part of the directory, or any
-    directory above it, being the same directory as the checkout also
-    counts.
+    ``checkout`` is the checkout's own place from placed_directory(). The
+    directory is inside when it, or a directory above it, is the same
+    directory as the checkout. The directories above it are read from the
+    operating system as ``<spelling>/..``, ``<spelling>/../..`` and so on
+    until the root answers for its own parent, so neither a symbolic link,
+    a ``..`` nor another letter case in the spelling is interpreted here.
+    Under a checkout that is gone, the directory is inside when it lies in
+    the same existing directory under the checkout's missing names (#175).
     """
-    home, home_existing = checkout
+    home, _, home_absent = checkout
     try:
-        place, existing = placed_directory(path)
-        if place.is_relative_to(home):
-            return True
-        if home != home_existing:
-            # The checkout itself is gone; nothing can be that directory.
-            return False
-        target = os.stat(home)
-        return any(
-            os.path.samestat(os.stat(directory), target)
-            for directory in (existing, *existing.parents)
-        )
-    except (OSError, RuntimeError, ValueError) as error:
+        current, spelling, absent = placed_directory(path)
+        if home_absent:
+            return os.path.samestat(current, home) and (
+                absent[:len(home_absent)] == home_absent
+            )
+        while not os.path.samestat(current, home):
+            spelling = f"{spelling}/.."
+            above = os.stat(spelling)
+            if os.path.samestat(above, current):
+                return False
+            current = above
+        return True
+    except (OSError, ValueError) as error:
         raise RetainedError(
             f"cannot resolve {label} {path}: {error}"
         ) from None
@@ -451,7 +456,7 @@ def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
     """
     try:
         checkout = placed_directory(str(worktree.path))
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, ValueError) as error:
         raise RetainedError(
             f"cannot resolve review worktree {worktree.path}: {error}"
         ) from None

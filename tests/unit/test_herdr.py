@@ -1,5 +1,6 @@
 """Exact handoff strings and installed Herdr contracts."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -132,7 +133,7 @@ class PaneDirectoryTests(unittest.TestCase):
         self.other = self.root / "other"
         self.other.mkdir()
 
-    def inside(self, path: Path) -> bool:
+    def inside(self, path: Path | str) -> bool:
         from agent_squad.reviewer import (
             directory_in_checkout, placed_directory,
         )
@@ -141,7 +142,7 @@ class PaneDirectoryTests(unittest.TestCase):
             str(path), "Herdr pane directory",
             placed_directory(str(self.checkout)))
 
-    def refused(self, path: Path) -> str:
+    def refused(self, path: Path | str) -> str:
         from agent_squad.initialization import RetainedError
 
         with self.assertRaises(RetainedError) as caught:
@@ -172,22 +173,34 @@ class PaneDirectoryTests(unittest.TestCase):
         # Absent names below an existing directory say where they would be.
         self.assertTrue(self.inside(self.checkout / "gone" / "deeper"))
         self.assertTrue(self.inside(link / "gone"))
-        self.assertEqual(
-            placed_directory(str(link / "gone" / "deeper")),
-            (self.checkout / "gone" / "deeper", self.checkout))
+        status, spelling, absent = placed_directory(
+            str(link / "gone" / "deeper"))
+        self.assertTrue(os.path.samestat(status, os.stat(self.checkout)))
+        self.assertEqual((spelling, absent), (str(link), ("gone", "deeper")))
+        # A name in the checkout that leads out of it is where it leads.
+        out = self.checkout / "out"
+        out.symlink_to(self.other)
         for path in (self.other, self.other / "gone", self.root,
-                     self.root / "checkout-2", self.checkout / ".."):
+                     self.root / "checkout-2", self.checkout / "..",
+                     out, out / "gone"):
             with self.subTest(path=path.relative_to(self.root)):
                 self.assertFalse(self.inside(path))
-        # A component that is a file cannot lead into the checkout.
-        (self.other / "file").write_text("x")
-        self.assertFalse(self.inside(self.other / "file" / "below"))
+        # The spelling is read as reported: separators and "." included.
+        for text in (f"{link}/", f"{link}//deep/.", f"{link}/gone/"):
+            with self.subTest(text=text):
+                self.assertTrue(self.inside(text))
+        self.assertFalse(self.inside(f"{self.other}/gone//"))
         # A checkout that is gone is still named by the paths below it.
         self.checkout.rename(self.root / "moved")
         self.assertTrue(self.inside(self.checkout))
         self.assertTrue(self.inside(self.checkout / "deep"))
+        self.assertTrue(self.inside(
+            self.other / ".." / "checkout" / "deep"))
         self.assertFalse(self.inside(self.other))
         self.assertFalse(self.inside(self.root / "moved"))
+        self.assertFalse(self.inside(self.root / "checkout-2" / "deep"))
+        # The same missing names under another directory are elsewhere.
+        self.assertFalse(self.inside(self.other / "checkout" / "deep"))
 
     def test_wrong_case_spelling_is_inside_where_the_file_system_folds(
         self,
@@ -195,115 +208,145 @@ class PaneDirectoryTests(unittest.TestCase):
         shouted = self.root / "CHECKOUT"
         if not shouted.exists():
             self.skipTest("the file system is case-sensitive")
-        self.assertNotEqual(
-            os.path.realpath(shouted, strict=True), str(self.checkout))
         self.assertTrue(self.inside(shouted))
         self.assertTrue(self.inside(shouted / "deep"))
         self.assertTrue(self.inside(shouted / "gone" / "deeper"))
         self.assertFalse(self.inside(self.root / "OTHER"))
 
-    def test_same_directory_under_another_spelling_is_inside(self) -> None:
-        """The case above runs only where the file system folds case. This
-        one stands in for it everywhere: the strict reading is kept from
-        rewriting one name, as it does not rewrite a spelling, so only the
-        comparison of the directories themselves can place the path."""
-        spelling = self.other / "spelling"
-        spelling.symlink_to(self.checkout)
-        read = os.path.realpath
+    def changes(self) -> dict:
+        """What the name ``hop``, a link into the checkout, can become so
+        that the path through it no longer leads anywhere readable."""
+        def unsearchable(hop: Path) -> None:
+            hop.mkdir()
+            self.unreadable(hop)
 
-        def keep_spelling(path, *, strict=False):
-            text = os.fspath(path)
-            if text == str(spelling) or text.startswith(f"{spelling}/"):
-                os.stat(text)
-                return text
-            return read(path, strict=strict)
+        def loop(hop: Path) -> None:
+            hop.symlink_to(hop.name)
 
-        with patch("os.path.realpath", keep_spelling):
-            self.assertTrue(self.inside(spelling))
-            self.assertTrue(self.inside(spelling / "deep" / "deeper"))
-            self.assertTrue(self.inside(spelling / "gone" / "deeper"))
-            self.assertFalse(self.inside(self.other))
-            self.assertFalse(self.inside(self.other / "gone"))
+        def dangling(hop: Path) -> None:
+            hop.symlink_to(hop.parent / "absent")
+
+        return {
+            "a directory that cannot be searched": unsearchable,
+            "a file": Path.touch,
+            "a loop": loop,
+            "a link to nowhere": dangling,
+        }
 
     def test_path_that_led_into_the_checkout_is_never_placed_outside(
         self,
     ) -> None:
-        """REV-18: each of these named the checkout, or a directory in it,
-        before something on the way stopped being readable or present. A
-        lenient reading skips that part and ends somewhere else. Each must
-        be refused, and so keep the checkout; none may read as outside."""
-        blocked = self.root / "blocked"
-        blocked.mkdir()
-        stage = self.root / "stage"
-        stage.mkdir()
-        internal = blocked / "internal"
-        internal.symlink_to(self.checkout / "deep" / "deeper")
-        paths = {
-            # Another name for the checkout, below the blocked directory.
-            "alias below": blocked / "alias",
-            # A plain path whose symlink target climbs out of a directory
-            # reached through the blocked one.
-            "target through": self.root / "pane-directory",
-            # The same, with a name ahead of the blocked directory in the
-            # target that is removed: the strict reading says missing.
-            "target through, after a missing name": self.root / "staged",
-            # A directory in the checkout that was removed.
-            "dangling": self.root / "dangling",
-            "below a dangling link": self.root / "dangling" / "below",
+        """REV-18: every path here named a directory in the checkout
+        through the link ``hop`` before ``hop`` became something that the
+        operating system does not read through. Each must then be refused,
+        and so keep the checkout; none may read as outside. A reading that
+        works the path out itself ends at the readable decoys instead."""
+        # Where ``hop`` sits: the reported spelling, and the link that the
+        # spelling's last name is, if it is one.
+        places = {
+            "the final name": ("hop", None),
+            "the final name, with a separator": ("hop/", None),
+            "inside the spelling": ("hop/deeper", None),
+            "before .. in the spelling": ("hop/../deep", None),
+            "inside a link target": ("alias", "hop/deeper"),
+            "before .. in a link target": ("alias", "hop/../deep"),
+            "before .. in an absolute link target": (
+                "alias", "{case}/hop/../deep"),
+            "below a link target": ("alias/deeper", "hop"),
+            "behind two links": ("alias", "second"),
         }
-        paths["alias below"].symlink_to(self.checkout)
-        paths["target through"].symlink_to(internal / ".." / "..")
-        paths["target through, after a missing name"].symlink_to(
-            stage / ".." / "blocked" / "internal" / ".." / "..")
-        removed = self.checkout / "removed"
-        removed.mkdir()
-        paths["dangling"].symlink_to(removed)
-        for name, path in paths.items():
-            if "missing" not in name and "dangling" not in name:
-                with self.subTest(name, before=True):
-                    self.assertTrue(path.samefile(self.checkout))
+        number = 0
+        for place, (reported, target) in places.items():
+            for change, become in self.changes().items():
+                number += 1
+                case = self.root / f"case-{number}"
+                # Decoys: what "hop/../deep" and the like name when ".."
+                # is taken off the text instead of read from the system.
+                (case / "deep" / "deeper").mkdir(parents=True)
+                (case / "deeper").mkdir()
+                hop = case / "hop"
+                hop.symlink_to(self.checkout / "deep")
+                if target is not None:
+                    (case / "alias").symlink_to(target.format(case=case))
+                    (case / "second").symlink_to("hop/../deep")
+                path = f"{case}/{reported}"
+                with self.subTest(place=place, change=change):
                     self.assertTrue(self.inside(path))
-        self.assertTrue(self.inside(paths["dangling"]))
-        self.assertTrue(
-            paths["target through, after a missing name"].samefile(
-                self.checkout))
-        removed.rmdir()
-        stage.rmdir()
-        self.unreadable(blocked)
-        reasons = {
-            "alias below": "Permission denied",
-            "target through": "Permission denied",
-            "target through, after a missing name":
-                "leads to a path that is missing",
-            "dangling": "leads to a path that is missing",
-            "below a dangling link": "leads to a path that is missing",
-        }
-        for name, path in paths.items():
-            with self.subTest(name):
-                self.assertIn(reasons[name], self.refused(path))
-        # What a lenient reading makes of two of them: a readable
-        # directory that is not the checkout.
-        self.assertEqual(paths["target through"].resolve(), self.root)
-        self.assertEqual(
-            paths["target through, after a missing name"].resolve(),
-            self.root)
+                    hop.unlink()
+                    become(hop)
+                    with self.assertRaises(OSError):
+                        os.stat(os.path.join(path, "."))
+                    self.refused(path)
+                    # Below it nothing can be placed either.
+                    self.refused(f"{path}/gone")
+
+    def test_changed_link_target_is_never_placed_outside(self) -> None:
+        """REV-18: the link stays and what it names changes. A link whose
+        target is no longer a directory is refused rather than set aside
+        as a missing name, which would place the pane beside the link."""
+        target = self.checkout / "target"
+        target.mkdir()
+        alias = self.other / "alias"
+        alias.symlink_to(target)
+        self.assertTrue(self.inside(alias))
+        target.rmdir()
+        for path in (alias, alias / "below", f"{alias}/"):
+            with self.subTest("removed", path=path):
+                self.assertIn(
+                    f"{alias} leads to a path that is missing",
+                    self.refused(path))
+        self.refused(f"{alias}/.")
+        target.touch()
+        for path in (alias, alias / "below", f"{alias}/", f"{alias}/."):
+            with self.subTest("a file", path=path):
+                self.refused(path)
+        self.assertIn(f"{alias} is not a directory", self.refused(alias))
+
+    def test_path_that_is_not_a_directory_is_refused(self) -> None:
+        """A working directory cannot be a file, so a path that names one
+        says nothing about where the pane is."""
+        file = self.other / "file"
+        file.touch()
+        self.assertIn(f"{file} is not a directory", self.refused(file))
+        self.refused(file / "below")
+        self.refused(self.checkout / ".." / "other" / "file")
+
+    def test_directory_that_cannot_be_searched_is_refused(self) -> None:
+        """The directories above one that cannot be searched cannot be
+        read from the operating system, so it is not placed. The checkout
+        itself needs nothing above it."""
+        closed = self.other / "closed"
+        closed.mkdir()
+        self.unreadable(closed)
+        self.refused(closed)
+        self.refused(closed / "below")
+        self.unreadable(self.checkout)
+        self.assertTrue(self.inside(self.checkout))
+        self.refused(self.checkout / "deep")
+        self.assertFalse(self.inside(self.other))
 
     def test_path_that_cannot_be_placed_is_refused(self) -> None:
         loop = self.root / "loop"
         loop.symlink_to(loop.name)
-        self.assertIn("Too many levels of symbolic links", self.refused(loop))
+        self.assertIn(os.strerror(errno.ELOOP), self.refused(loop))
         self.refused(loop / "below")
-        self.assertIn("null byte", self.refused(self.root / "nul\x00"))
+        self.refused(self.root / "nul\x00")
+        self.refused(self.root / ("long" * 100) / ("name" * 100))
         # Names that climb out of a directory that is gone: where they
         # would lead depends on what that directory was.
         self.assertIn("is below a path that is missing", self.refused(
             self.checkout / "gone" / ".." / ".." / "other"))
+        self.assertIn("is below a path that is missing", self.refused(
+            f"{self.checkout}/gone/."))
         self.assertIn("leads to a path that is missing", self.refused(
             self.dangling()))
+        self.assertIn("leads to a path that is missing", self.refused(
+            f"{self.dangling()}/"))
 
     def dangling(self) -> Path:
         link = self.root / "nowhere"
-        link.symlink_to(self.root / "absent")
+        if not link.is_symlink():
+            link.symlink_to(self.root / "absent")
         return link
 
     def unused(self, path: Path, **inventory: list):

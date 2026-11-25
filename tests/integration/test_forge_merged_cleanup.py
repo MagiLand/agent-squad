@@ -1476,11 +1476,11 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
             blocked.mkdir()
             alias = blocked / "pane-directory"
             alias.symlink_to(review, target_is_directory=True)
-            self.assertEqual(alias.resolve(strict=True), review.resolve())
+            self.assertTrue(alias.samefile(review))
             blocked.chmod(0)
             self.addCleanup(blocked.chmod, 0o700)
             with self.assertRaises(PermissionError):
-                alias.resolve(strict=True)
+                alias.stat()
             return alias, f"cannot resolve Herdr pane directory {alias}"
 
         # Registered before the fixture's own cleanup, so it runs after
@@ -1494,8 +1494,8 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
     ) -> None:
         """REV-18: the pane's directory is a plain path whose symlink
         target climbs out of a directory reached through one that cannot
-        be searched. A lenient reading skips that part and ends at a
-        readable directory elsewhere."""
+        be searched. A reading that skips that part ends at a readable
+        directory elsewhere."""
         def place(review: Path) -> tuple[Path, str]:
             blocked = self.f.root / "blocked"
             blocked.mkdir()
@@ -1510,11 +1510,134 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
             self.addCleanup(blocked.chmod, 0o700)
             with self.assertRaises(PermissionError):
                 reported.stat()
-            self.assertEqual(reported.resolve(), self.f.root.resolve())
             return reported, f"cannot resolve Herdr pane directory {reported}"
 
         self.pane_keeps_the_checkout(place)
         (self.f.root / "blocked").chmod(0o700)
+
+    def pane_directory_past_a_changed_name(self, become, error) -> None:
+        """REV-18: the pane's directory is a link to ``hop/../leaf``, and
+        ``hop`` led into the checkout, so the pane worked in the checkout's
+        ``leaf``. ``become`` then makes ``hop`` something the operating
+        system does not read through, and reading the pane's directory
+        fails with ``error``. Taking ``hop/..`` off the text instead names
+        the readable ``leaf`` beside the link, outside the checkout."""
+        def place(review: Path) -> tuple[Path, str]:
+            root = self.f.root
+            (review / "sub").mkdir()
+            (review / "leaf").mkdir()
+            (root / "leaf").mkdir()
+            hop = root / "hop"
+            hop.symlink_to(review / "sub", target_is_directory=True)
+            reported = root / "pane-directory"
+            reported.symlink_to("hop/../leaf", target_is_directory=True)
+            self.assertTrue(reported.samefile(review / "leaf"))
+            hop.unlink()
+            become(hop)
+            with self.assertRaises(error):
+                reported.stat()
+            return reported, f"cannot resolve Herdr pane directory {reported}"
+
+        self.pane_keeps_the_checkout(place)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_pane_directory_past_an_unsearchable_name_keeps_the_checkout(
+        self,
+    ) -> None:
+        def become(hop: Path) -> None:
+            hop.mkdir()
+            hop.chmod(0)
+            self.addCleanup(hop.chmod, 0o700)
+
+        self.pane_directory_past_a_changed_name(become, PermissionError)
+        (self.f.root / "hop").chmod(0o700)
+
+    def test_pane_directory_past_a_file_keeps_the_checkout(self) -> None:
+        self.pane_directory_past_a_changed_name(
+            Path.touch, NotADirectoryError)
+
+    def test_pane_directory_that_became_a_file_keeps_the_checkout(
+        self,
+    ) -> None:
+        """REV-18: the pane's directory is a link to a directory in the
+        checkout that a file replaced. A working directory cannot be a
+        file, so the pane is not placed beside the link."""
+        def place(review: Path) -> tuple[Path, str]:
+            target = review / "sub"
+            target.mkdir()
+            reported = self.f.root / "pane-directory"
+            reported.symlink_to(target, target_is_directory=True)
+            self.assertTrue(reported.samefile(target))
+            target.rmdir()
+            target.touch()
+            return reported, f"cannot resolve Herdr pane directory {reported}"
+
+        self.pane_keeps_the_checkout(place)
+
+    def test_pane_directory_whose_target_is_gone_keeps_the_checkout(
+        self,
+    ) -> None:
+        """REV-18: the pane's directory is a link to a directory in the
+        checkout that was removed. The link's own name is not absent, so
+        the pane is not placed beside the link."""
+        def place(review: Path) -> tuple[Path, str]:
+            target = review / "sub"
+            target.mkdir()
+            reported = self.f.root / "pane-directory"
+            reported.symlink_to(target, target_is_directory=True)
+            self.assertTrue(reported.samefile(target))
+            target.rmdir()
+            return reported, f"cannot resolve Herdr pane directory {reported}"
+
+        self.pane_keeps_the_checkout(place)
+
+    def test_pane_directory_linked_below_the_checkout_keeps_it(self) -> None:
+        """Control for the cases above: while every name can be read, a
+        link whose target climbs with ``..`` to a directory below the
+        checkout is in the checkout, although its text names a directory
+        beside the link."""
+        def place(review: Path) -> tuple[Path, str]:
+            root = self.f.root
+            (review / "sub").mkdir()
+            (review / "leaf").mkdir()
+            (root / "leaf").mkdir()
+            (root / "hop").symlink_to(
+                review / "sub", target_is_directory=True)
+            reported = root / "pane-directory"
+            reported.symlink_to("hop/../leaf", target_is_directory=True)
+            self.assertTrue(reported.samefile(review / "leaf"))
+            return reported, "an unowned Herdr pane still uses this worktree"
+
+        self.pane_keeps_the_checkout(place)
+
+    def test_pane_directory_that_is_gone_does_not_keep_the_checkout(
+        self,
+    ) -> None:
+        """Control: a pane whose directory outside the checkout was
+        removed is still placed by its name, and the retry finishes."""
+        f = self.f
+        review, workspace = self.unregistered_reviewer()
+        f.git("worktree", "lock", str(review))
+        merge_commit = self.forge_merge("merge")
+        self.cleanup(expected=3)
+        f.git("worktree", "unlock", str(review))
+        model = f.herdr_model()
+        model["workspaces"].append({
+            "workspace_id": "w-stale", "label": "stale", "tab_count": 1,
+            "pane_count": 1, "active_tab_id": "w-stale:t1",
+            "worktree": None,
+        })
+        model["tabs"].append(
+            {"workspace_id": "w-stale", "tab_id": "w-stale:t1"})
+        model["panes"].append({
+            "workspace_id": "w-stale", "tab_id": "w-stale:t1",
+            "pane_id": "w-stale:p1", "terminal_id": "w-stale-terminal",
+            "cwd": str(f.root / "removed" / "directory"), "agent": None,
+            "agent_status": "unknown",
+        })
+        f.save_herdr(model)
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+        self.assertFalse(review.exists())
 
     def test_pane_directory_in_another_case_keeps_the_checkout(self) -> None:
         """REV-18: on a case-insensitive file system, another spelling of
@@ -1523,7 +1646,6 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
             shouted = review.parent / review.name.upper()
             if not shouted.exists():
                 self.skipTest("the file system is case-sensitive")
-            self.assertNotEqual(shouted.resolve(), review.resolve())
             # A directory below it that is gone: only an ancestor is the
             # same directory as the checkout.
             return (shouted / "gone" / "deeper",
