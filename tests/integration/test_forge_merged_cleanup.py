@@ -153,6 +153,17 @@ class ForgeMergedCleanup:
         self.assertEqual(result["approved_head"], self.head)
         self.assert_finished(result, merge_commit)
 
+    def test_approved_head_can_be_older_than_the_merged_head(self) -> None:
+        f = self.f
+        f.review("approved")
+        approved = self.head
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nlater = 4\n")
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertEqual(result["approved_head"], approved)
+        self.assertNotEqual(result["approved_head"], result["head"])
+        self.assert_finished(result, merge_commit)
+
     def test_unproven_ownership_is_refused_without_change(self) -> None:
         f = self.f
 
@@ -378,6 +389,35 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
 class ForgejoForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
     fixture = ForgejoFixture
     forge_deletes_branch = True
+
+    def test_branch_the_forge_kept_is_deleted_by_cleanup(self) -> None:
+        f = self.f
+        f.settings(leave_branch=True)
+        merge_commit = self.forge_merge("merge")
+        self.assertNotEqual(
+            f.git("ls-remote", "--heads", "origin", "issue-1"), "")
+        start = len(f.read_model()["calls"])
+        result = self.cleanup()
+        deletes = [c["path"] for c in f.read_model()["calls"][start:]
+                   if c["method"] == "DELETE"]
+        self.assertEqual(len(deletes), 1)
+        self.assertTrue(deletes[0].endswith("/branches/issue-1"), deletes)
+        self.assert_finished(result, merge_commit)
+
+    def test_synthetic_head_after_the_merge_is_not_trusted(self) -> None:
+        """E9: the merged PR reports an older head and a synthetic branch."""
+        f = self.f
+        f.review("approved")
+        f.settings(post_merge_head_discrepancy=True)
+        merge_commit = self.forge_merge("merge")
+        reported = f.cli("pr", "head", "--pr", "1", cwd=f.repo)
+        self.assertEqual(reported["head_branch"], "synthetic-pull-ref")
+        self.assertNotEqual(reported["head"], self.head)
+        result = self.cleanup()
+        self.assertEqual(result["head"], self.head)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assert_finished(result, merge_commit)
 
 
 if __name__ == "__main__":
