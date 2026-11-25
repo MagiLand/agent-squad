@@ -511,7 +511,8 @@ class ForgejoMutationTests(unittest.TestCase):
             def malformed(handler, model, auth, body):
                 status, result = dispatch(handler, model, auth, body)
                 if "/pulls?" in handler.path:
-                    return 200, [row]
+                    # One page, then the empty page that ends the read.
+                    return 200, [row] if "page=1" in handler.path else []
                 return status, result
 
             with self.subTest(row=row), patch.object(

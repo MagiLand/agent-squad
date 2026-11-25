@@ -806,7 +806,9 @@ class Handler(BaseHTTPRequestHandler):
 
         ``model["checks"][sha]`` lists statuses in creation order; the read
         keeps the latest per context, serves 30 rows by default and at most
-        50, and reports ``state`` and ``total_count`` for its page alone.
+        50, or at most ``max_response_items`` as 17.0.1 did in the triage
+        of #168, and reports ``state`` and ``total_count`` for its page
+        alone.
         """
         if account in model.get("settings", {}).get("checks_denied", []):
             return 403, {"message": "status read refused"}
@@ -819,6 +821,9 @@ class Handler(BaseHTTPRequestHandler):
             latest.pop(row["context"], None)
             latest[row["context"]] = row
         size = min(int(query.get("limit", ["30"])[0]), 50)
+        cap = model.get("settings", {}).get("max_response_items")
+        if cap is not None:
+            size = min(size, cap)
         page = int(query.get("page", ["1"])[0])
         rows = list(latest.values())[(page - 1) * size:page * size]
         states = {row["status"] for row in rows}

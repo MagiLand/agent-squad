@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError
 
 from tests._support import add_src_to_path
@@ -395,25 +395,6 @@ class TransportTests(unittest.TestCase):
                     with self.assertRaisesRegex(ForgeError, "at least 16.0.0"):
                         self.forge.version()
 
-    def test_pagination_uses_fifty_and_stops_on_short_page(self) -> None:
-        self.open.side_effect = [
-            self.response(list(range(50))),
-            self.response([50, 51]),
-        ]
-        self.assertEqual(
-            self.forge.listing("/reviews?state=all"), list(range(52))
-        )
-        self.assertEqual(
-            [
-                c.args[0].full_url.rsplit("/", 1)[1]
-                for c in self.open.call_args_list
-            ],
-            [
-                "reviews?state=all&limit=50&page=1",
-                "reviews?state=all&limit=50&page=2",
-            ],
-        )
-
     def test_branch_rule_visibility_and_repository_push_permission(
         self,
     ) -> None:
@@ -450,13 +431,13 @@ class TransportTests(unittest.TestCase):
         match = {"head": {"ref": "feature"}, "state": "closed"}
         self.open.side_effect = [
             self.response([unrelated] * 50), self.response([match]),
+            self.response([]),
         ]
         self.assertEqual(self.forge.branch_prs("feature"), [match])
         self.assertEqual(
             [c.args[0].full_url.rsplit("/", 1)[1]
              for c in self.open.call_args_list],
-            ["pulls?state=all&limit=50&page=1",
-             "pulls?state=all&limit=50&page=2"],
+            [f"pulls?state=all&limit=50&page={page}" for page in (1, 2, 3)],
         )
 
     def test_branch_lookup_does_not_accept_partial_pagination(self) -> None:
@@ -475,11 +456,13 @@ class TransportTests(unittest.TestCase):
                     self.open.reset_mock()
                     self.open.side_effect = [
                         self.response([{"head": {"ref": first_branch}}] * 50),
-                        page,
+                        page, self.response([]),
                     ]
                     with self.assertRaises(ForgeError):
                         self.forge.branch_prs("feature")
-                    self.assertEqual(self.open.call_count, 2)
+                    # Rows are checked once every page is read (#168).
+                    self.assertEqual(self.open.call_count,
+                                     3 if failure == "identity" else 2)
 
 
 class BranchLookupTests(unittest.TestCase):
@@ -491,10 +474,10 @@ class BranchLookupTests(unittest.TestCase):
         row["base"]["sha"] = ""
         forge = SimpleNamespace(
             prefix="/repos/example/project",
-            listing=Mock(return_value=[row]),
+            _all_pages=Mock(return_value=[row]),
         )
         self.assertEqual(Forgejo.branch_prs(forge, "feature/new-work"), [])
-        forge.listing.assert_called_once_with(
+        forge._all_pages.assert_called_once_with(
             "/repos/example/project/pulls?state=all"
         )
 
@@ -519,7 +502,7 @@ class BranchLookupTests(unittest.TestCase):
                                 parent[key] = value
                             forge = SimpleNamespace(
                                 prefix="/repos/example/project",
-                                listing=lambda path: [row],
+                                _all_pages=lambda path: [row],
                             )
                             matches = Forgejo.branch_prs(forge, "feature")
                             self.assertEqual(
@@ -535,7 +518,7 @@ class BranchLookupTests(unittest.TestCase):
             pull_ref, "Feature", "feature/child", "feature",
         )]
         forge = SimpleNamespace(prefix="/repos/example/project",
-                                listing=lambda path: rows)
+                                _all_pages=lambda path: rows)
         self.assertEqual(Forgejo.branch_prs(forge, "feature"), [rows[-1]])
         self.assertEqual(Forgejo.branch_prs(forge, pull_ref), [rows[0]])
 
@@ -553,7 +536,7 @@ class BranchLookupTests(unittest.TestCase):
             with self.subTest(row=row):
                 forge = SimpleNamespace(
                     prefix="/repos/example/project",
-                    listing=lambda path: [{"head": {"ref": "other"}}, row],
+                    _all_pages=lambda path: [{"head": {"ref": "other"}}, row],
                 )
                 with self.assertRaisesRegex(ForgeError, message):
                     Forgejo.branch_prs(forge, "feature")
@@ -700,7 +683,7 @@ class RecordedParserTests(unittest.TestCase):
             dict(row, id=10, submitted_at="2025-12-31T19:00:00-05:00"),
             dict(row, id=5, submitted_at="2026-01-01T00:00:01Z"),
         ]
-        with patch.object(forge, "listing", return_value=rows):
+        with patch.object(forge, "_all_pages", return_value=rows):
             self.assertEqual(
                 [r.evidence.id for r in forge.reviews(1)], [10, 20, 5]
             )
@@ -751,13 +734,14 @@ class MutationContractTests(unittest.TestCase):
             "labels": [{"id": 51, "name": "needs-triage"}],
         }
         forge.api.side_effect = [
-            labels, [{"id": 51, "name": "needs-triage"}], created,
+            labels, [{"id": 51, "name": "needs-triage"}], [], created,
         ]
         record = forge.create_issue("T", "Body", "needs-triage")
         self.assertEqual(
             [c.args[0] for c in forge.api.call_args_list],
             ["/repos/owner/repo/labels?limit=50&page=1",
              "/repos/owner/repo/labels?limit=50&page=2",
+             "/repos/owner/repo/labels?limit=50&page=3",
              "/repos/owner/repo/issues"],
         )
         self.assertEqual(forge.api.call_args.kwargs, {
@@ -774,7 +758,7 @@ class MutationContractTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 forge.api.side_effect = [
-                    [{"id": 51, "name": "needs-triage"}],
+                    [{"id": 51, "name": "needs-triage"}], [],
                     {**created, field: value},
                 ]
                 with self.assertRaisesRegex(
@@ -782,13 +766,15 @@ class MutationContractTests(unittest.TestCase):
                 ):
                     forge.create_issue("T", "Body", "needs-triage")
         forge.api.reset_mock()
-        forge.api.side_effect = [[{"id": 52, "name": "Needs-Triage"}]]
+        forge.api.side_effect = [[{"id": 52, "name": "Needs-Triage"}], []]
         with self.assertRaisesRegex(
             ForgeError, "^repository has no needs-triage label$"
         ):
             forge.create_issue("T", "Body", "needs-triage")
-        forge.api.assert_called_once_with(
-            "/repos/owner/repo/labels?limit=50&page=1")
+        self.assertEqual(forge.api.call_args_list, [
+            call("/repos/owner/repo/labels?limit=50&page=1"),
+            call("/repos/owner/repo/labels?limit=50&page=2"),
+        ])
 
     def test_dependencies_read_pages_until_an_empty_one(self):
         forge = self.forge()
@@ -868,13 +854,14 @@ class MutationContractTests(unittest.TestCase):
         forge.api.side_effect = [
             [{"id": 41, "name": "ready-for-agent"},
              {"id": 46, "name": "a/b c"}],
-            [], None, None,
+            [], {}, None, None,
         ]
         forge.change_issue_labels(
             5, ("a/b c", "ready-for-agent"), ("12", "stale"))
         self.assertEqual(
             [(c.args, c.kwargs) for c in forge.api.call_args_list], [
                 (("/repos/owner/repo/labels?limit=50&page=1",), {}),
+                (("/repos/owner/repo/labels?limit=50&page=2",), {}),
                 (("/repos/owner/repo/issues/5/labels",),
                  {"method": "POST", "body": {"labels": [46, 41]}}),
                 (("/repos/owner/repo/issues/5/labels/12",),
@@ -883,13 +870,15 @@ class MutationContractTests(unittest.TestCase):
                  {"method": "DELETE"}),
             ])
         forge.api.reset_mock()
-        forge.api.side_effect = [[{"id": 41, "name": "ready-for-agent"}]]
+        forge.api.side_effect = [[{"id": 41, "name": "ready-for-agent"}], []]
         with self.assertRaisesRegex(
             ForgeError, "^repository has no Ready label$"
         ):
             forge.change_issue_labels(5, ("Ready",), ("stale",))
-        forge.api.assert_called_once_with(
-            "/repos/owner/repo/labels?limit=50&page=1")
+        self.assertEqual(forge.api.call_args_list, [
+            call("/repos/owner/repo/labels?limit=50&page=1"),
+            call("/repos/owner/repo/labels?limit=50&page=2"),
+        ])
         forge.api.reset_mock()
         forge.api.side_effect = None
         forge.change_issue_labels(5, (), ("x y",))
@@ -901,15 +890,17 @@ class MutationContractTests(unittest.TestCase):
         row = {"number": 3, "title": " Same ", "pull_request": None}
         forge.api.side_effect = [[
             row, {**row, "number": 4, "pull_request": {"merged": False}},
-        ]]
+        ], []]
         self.assertEqual(forge.open_issues(), {3: " Same "})
-        forge.api.assert_called_once_with(
-            "/repos/owner/repo/issues?state=open&type=issues&limit=50&page=1")
-        forge.api.side_effect = [[{"id": 1, "name": "bug"}]]
+        self.assertEqual(forge.api.call_args_list, [
+            call("/repos/owner/repo/issues?state=open&type=issues"
+                 f"&limit=50&page={page}") for page in (1, 2)
+        ])
+        forge.api.side_effect = [[{"id": 1, "name": "bug"}], []]
         self.assertEqual(forge.labels(), ("bug",))
         for ident in (0, "1", None):
             with self.subTest(ident=ident):
-                forge.api.side_effect = [[{"id": ident, "name": "bug"}]]
+                forge.api.side_effect = [[{"id": ident, "name": "bug"}], []]
                 with self.assertRaisesRegex(ForgeError, "label.id"):
                     forge.labels()
 
@@ -1452,3 +1443,93 @@ class IssueListingTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ForgeError, "issue.milestone"):
                     parse_issue({**forgejo_issue(1), "milestone": value})
+
+
+def status_row(context, status="success"):
+    return {"id": 1, "context": context, "status": status,
+            "description": "", "target_url": "", "creator": None}
+
+
+class PagedReadTests(unittest.TestCase):
+    """Every paged list read goes to an empty page (#168).
+
+    A server whose ``max_response_items`` is below 50 serves only short
+    pages, so a short page never ends a read.
+    """
+
+    def setUp(self) -> None:
+        self.forge = object.__new__(Forgejo)
+        self.forge.account = "reviewer"
+        self.forge.prefix = "/repos/owner/repo"
+        self.forge.api = Mock()
+
+    def paths(self):
+        return [c.args[0] for c in self.forge.api.call_args_list]
+
+    def reads(self):
+        """(name, read, endpoint, two pages, empty page, expected)."""
+        label = [{"id": 1, "name": "bug"}, {"id": 2, "name": "wontfix"}]
+        issue = [forgejo_issue(9, state="open"),
+                 forgejo_issue(8, state="open")]
+        review = recording("032-e4-reviews.json")
+        pr = [{"head": {"ref": "other"}}, {"head": {"ref": "feature"}}]
+        status = [status_row("a"), status_row("b", "failure")]
+        # The requested-review row is skipped; five reviews remain.
+        review_ids = sorted(
+            r.evidence.id for r in map(parse_review, review) if r)
+        self.assertEqual(len(review_ids), 5)
+        return [
+            ("labels", self.forge.labels, "labels",
+             [label[:1], label[1:]], [], ("bug", "wontfix")),
+            ("_label_ids", self.forge._label_ids, "labels",
+             [label[:1], label[1:]], [], {"bug": 1, "wontfix": 2}),
+            ("open_issues", self.forge.open_issues,
+             "issues?state=open&type=issues",
+             [issue[:1], issue[1:]], [], {9: "T9", 8: "T8"}),
+            ("reviews",
+             lambda: sorted(r.evidence.id for r in self.forge.reviews(1)),
+             "pulls/1/reviews", [review[:3], review[3:]], [], review_ids),
+            ("branch_prs", lambda: self.forge.branch_prs("feature"),
+             "pulls?state=all", [pr[:1], pr[1:]], [], [pr[1]]),
+            ("checks", lambda: tuple(c.name for c in self.forge.checks("s")),
+             "commits/s/status",
+             [{"statuses": status[:1]}, {"statuses": status[1:]}],
+             {"statuses": None, "total_count": 0}, ("a", "b")),
+        ]
+
+    def test_each_read_continues_past_a_short_page_to_an_empty_one(self):
+        for name, read, endpoint, pages, empty, expected in self.reads():
+            with self.subTest(read=name):
+                self.forge.api.reset_mock()
+                self.forge.api.side_effect = [*pages, empty]
+                self.assertEqual(read(), expected)
+                separator = "&" if "?" in endpoint else "?"
+                self.assertEqual(self.paths(), [
+                    f"/repos/owner/repo/{endpoint}{separator}"
+                    f"limit=50&page={page}" for page in (1, 2, 3)
+                ])
+
+    def test_each_read_fails_a_page_that_repeats_the_previous_one(self):
+        for name, read, endpoint, pages, empty, expected in self.reads():
+            with self.subTest(read=name):
+                self.forge.api.reset_mock()
+                self.forge.api.side_effect = [pages[0], pages[0], empty]
+                with self.assertRaisesRegex(ForgeError, "repeated a page"):
+                    read()
+                self.assertEqual(len(self.paths()), 2)
+
+    def test_an_empty_status_list_also_ends_the_checks_read(self):
+        self.forge.api.side_effect = [
+            {"statuses": [status_row("a")]}, {"statuses": []},
+        ]
+        self.assertEqual([c.name for c in self.forge.checks("s")], ["a"])
+        self.assertEqual(len(self.paths()), 2)
+
+    def test_a_refused_later_status_page_is_still_unavailable(self):
+        from agent_squad.forge import ChecksUnavailable
+
+        self.forge.api.side_effect = [
+            {"statuses": [status_row("a")]}, ForgeError("refused", 403),
+        ]
+        with self.assertRaises(ChecksUnavailable):
+            self.forge.checks("s")

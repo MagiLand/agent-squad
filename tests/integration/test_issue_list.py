@@ -339,14 +339,14 @@ class ForgejoIssueListTests(IssueListContract, unittest.TestCase):
             [f"{REPO}/issues/{n}/timeline" for n in (2, 3, 4)],
         )
 
-    def test_a_label_lost_to_a_short_label_page_is_refused(self) -> None:
-        # The label read predates #164 and stops at a short page, as the
-        # triage observed on F16; the result is an error, never a list.
+    def test_a_label_beyond_a_short_label_page_is_found(self) -> None:
+        # The label read goes past a short page to an empty one (#168), so
+        # a label on the second page filters as it does without the cap.
+        uncapped = self.listed("--label", "bug", "--state", "all")
+        self.assertTrue(uncapped["issues"])
         self.f.settings(max_response_items=2)
-        result = self.listed("--label", "bug", expected=1)
-        self.assertTrue(result["error"].startswith(
-            "error: repository has no label named bug"))
-        self.assertFalse([r for r in self.sent if "/issues" in r])
+        self.assertEqual(
+            self.listed("--label", "bug", "--state", "all"), uncapped)
 
     def test_open_issues_get_no_timeline_read(self) -> None:
         result = self.listed("--milestone", "v1", "--state", "open")
