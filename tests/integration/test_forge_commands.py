@@ -1934,9 +1934,11 @@ class ForgejoReadCommandTests(unittest.TestCase):
             for c in f.read_model()["calls"]
             if "/reviews?" in c["path"]
         ]
-        self.assertEqual(len(review_paths), 2)
-        self.assertTrue(review_paths[0].endswith("limit=50&page=1"))
-        self.assertTrue(review_paths[1].endswith("limit=50&page=2"))
+        # The short second page does not end the read; the empty third
+        # page does (#168).
+        self.assertEqual(len(review_paths), 3)
+        for page, path in enumerate(review_paths, 1):
+            self.assertTrue(path.endswith(f"limit=50&page={page}"))
 
     def test_server_uses_loopback_and_close_removes_listening_socket(
         self,

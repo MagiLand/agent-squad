@@ -629,11 +629,12 @@ class ForgejoCheckTests(CheckFixtureMixin, unittest.TestCase):
         self.assertEqual(len(ci["checks"]), 61)
         self.assertEqual(ci["summary"], "failed")
         # Page 1 reports state "success" and total_count 50; neither ends
-        # the read.
+        # the read, nor does the short page 2: page 3, without statuses,
+        # does (#168).
         self.assertEqual(
             [c["path"].rpartition("?")[2]
              for c in self.check_reads()[start:]],
-            ["limit=50&page=1", "limit=50&page=2"],
+            ["limit=50&page=1", "limit=50&page=2", "limit=50&page=3"],
         )
 
     def test_push_and_pull_request_results_are_both_reported(self) -> None:

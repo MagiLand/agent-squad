@@ -639,20 +639,6 @@ class Forgejo:
                 self._check_version(token)
         return self._request(endpoint, token, method=method, body=body)
 
-    def listing(self, endpoint: str) -> list:
-        result = []
-        page = 1
-        while True:
-            separator = "&" if "?" in endpoint else "?"
-            entries = array(
-                self.api(f"{endpoint}{separator}limit=50&page={page}"),
-                "list",
-            )
-            result.extend(entries)
-            if len(entries) < 50:
-                return result
-            page += 1
-
     def repository_record(self) -> dict[str, object]:
         data = object_value(self.api(self.prefix), "repository")
         positive(data.get("id"), "repository.id")
@@ -695,7 +681,7 @@ class Forgejo:
     def open_issues(self) -> dict[int, str]:
         result = {}
         query = "state=open&type=issues"
-        for row in self.listing(f"{self.prefix}/issues?{query}"):
+        for row in self._all_pages(f"{self.prefix}/issues?{query}"):
             data = object_value(row, "issue")
             if data.get("pull_request") is None:
                 number = positive(data.get("number"), "issue.number")
@@ -704,7 +690,7 @@ class Forgejo:
 
     def _label_ids(self) -> dict[str, int]:
         result = {}
-        for row in self.listing(f"{self.prefix}/labels"):
+        for row in self._all_pages(f"{self.prefix}/labels"):
             data = object_value(row, "label")
             name = V.require_string(data.get("name"), "label.name")
             result[name] = positive(data.get("id"), "label.id")
@@ -795,13 +781,18 @@ class Forgejo:
             )
         return record
 
-    def _all_pages(self, endpoint: str, *, null_ends: bool = False) -> list:
+    def _all_pages(
+        self, endpoint: str, *, null_ends: bool = False,
+        key: str | None = None,
+    ) -> list:
         """Read pages until an empty one; fail a page that repeats.
 
         A short page does not end the read: the server caps ``limit`` at its
-        ``max_response_items``, which may be below 50, and some lists drop
-        rows after paging (#164). ``null_ends`` accepts JSON null as the
-        empty page, which F16's issue timeline serves beyond its end.
+        ``max_response_items``, which may be below 50 (#168), and some lists
+        drop rows after paging (#164). ``null_ends`` accepts JSON null as
+        the empty page, which F16's issue timeline serves beyond its end.
+        With ``key`` each page is an object whose ``key`` holds the rows,
+        and null there is an empty page, as the combined status serves.
         """
         separator = "&" if "?" in endpoint else "?"
         result: list = []
@@ -809,8 +800,12 @@ class Forgejo:
         page = 1
         while True:
             value = self.api(f"{endpoint}{separator}limit=50&page={page}")
-            entries = [] if value is None and null_ends else array(
-                value, "list")
+            if key is not None:
+                value = object_value(value, "page").get(key)
+                entries = [] if value is None else array(value, key)
+            else:
+                entries = [] if value is None and null_ends else array(
+                    value, "list")
             if not entries:
                 return result
             if entries == previous:
@@ -884,7 +879,8 @@ class Forgejo:
     def reviews(self, number: int) -> tuple[Review, ...]:
         result = [
             parse_review(r)
-            for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
+            # Oldest first: a read cut short would lose the newest (#168).
+            for r in self._all_pages(f"{self.prefix}/pulls/{number}/reviews")
         ]
         return tuple(
             sorted(
@@ -956,24 +952,14 @@ class Forgejo:
     def checks(self, sha: str) -> tuple[Check, ...]:
         """Read the latest commit status per context at one commit (#145).
 
-        The combined read pages at 50 rows; each page's ``state`` and
-        ``total_count`` describe that page alone, so neither is read.
+        The combined read is paged like a list and read to a page without
+        statuses, which is ``statuses: null`` (#168); each page's ``state``
+        and ``total_count`` describe that page alone, so neither is read.
         """
-        rows: list = []
-        page = 1
         try:
-            while True:
-                data = object_value(self.api(
-                    f"{self.prefix}/commits/{sha}/status"
-                    f"?limit=50&page={page}"
-                ), "combined status")
-                # A commit without statuses answers ``statuses: null``.
-                values = data.get("statuses")
-                entries = [] if values is None else array(values, "statuses")
-                rows.extend(entries)
-                if len(entries) < 50:
-                    break
-                page += 1
+            rows = self._all_pages(
+                f"{self.prefix}/commits/{sha}/status", key="statuses"
+            )
         except ForgeError as error:
             if error.status not in CHECK_REFUSALS:
                 raise
@@ -985,12 +971,10 @@ class Forgejo:
     def branch_prs(
         self, branch: str, complete: bool = False,
     ) -> list[dict[str, object]]:
-        # ``complete`` reads to an empty page, past a short one (#174).
-        endpoint = f"{self.prefix}/pulls?state=all"
-        rows = (self._all_pages(endpoint) if complete
-                else self.listing(endpoint))
+        # Every read goes to an empty page, past a short one (#168), so
+        # each is complete, as ``complete`` asks for (#174).
         matches = []
-        for row in rows:
+        for row in self._all_pages(f"{self.prefix}/pulls?state=all"):
             data = object_value(row, "pull request")
             head = object_value(data.get("head"), "pull request head")
             # Historical PRs may lack commit metadata after branch deletion.
