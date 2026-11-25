@@ -560,7 +560,7 @@ class ForgeBoundaryTests(unittest.TestCase):
         forge.branch_rules.side_effect = AssertionError('must not read rules')
         forge.merge.side_effect = ForgeError('refused', 405)
         state = {'target': {'head': H}, 'approval': {'approved': True},
-                 'closes_issue': True}
+                 'closes_issue': True, 'reviews': []}
         with (
             patch('agent_squad.merging.state_for', return_value=state),
             patch('agent_squad.merging.check_merge_gate', return_value=False),

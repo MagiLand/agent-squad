@@ -296,7 +296,7 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge.merge.side_effect = error
         self.forge = forge
         state = {"pr": {"merged": merged}, "target": {"head": H},
-                 "closes_issue": True}
+                 "closes_issue": True, "reviews": []}
         gate = (
             {"return_value": False} if error
             else {"side_effect": GateError("pr merge refused: x")}

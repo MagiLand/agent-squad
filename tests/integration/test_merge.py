@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from tests._support import FakeClock
-from tests.forge_support import ForgeFixture
+from tests.forge_support import ForgeFixture, is_write
 from agent_squad.github import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
@@ -1170,11 +1170,8 @@ class ResumedCleanupTests(unittest.TestCase):
                    for c in self.f.read_model()["calls"])
 
     def writes(self) -> list:
-        return [
-            c for c in self.f.read_model()["calls"]
-            if "--method" in c["arguments"]
-            and c["arguments"][c["arguments"].index("--method") + 1] != "GET"
-        ]
+        # The snapshot read is a GraphQL query sent with POST (#175).
+        return [c for c in self.f.read_model()["calls"] if is_write(c)]
 
     def cleanup(self, expected: int = 0) -> dict:
         merges = self.merge_calls()
@@ -1220,7 +1217,7 @@ class ResumedCleanupTests(unittest.TestCase):
             "schema_version": 1, "common": str(f.repo / ".git"), "pr": 1,
             "head": self.head, "head_branch": "issue-1",
             "base_branch": "main", "merge_method": "merge",
-            "moved_base": False, "issue": 1,
+            "moved_base": False, "issue": 1, "outside_pr_merge": False,
         })
         refused = self.merge(expected=4)
         self.assertIn("PR is not open", refused["error"])
