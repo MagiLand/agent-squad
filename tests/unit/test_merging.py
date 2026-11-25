@@ -294,6 +294,8 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = False
         forge.merge.side_effect = error
+        # merge_pr refuses a merged PR from the snapshot itself (#175).
+        forge.snapshot.return_value.pr.merged = merged
         self.forge = forge
         state = {"pr": {"merged": merged}, "target": {"head": H},
                  "closes_issue": True, "reviews": []}
