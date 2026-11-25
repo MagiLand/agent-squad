@@ -569,10 +569,12 @@ def cleanup_merge(
     """Stop on a failed step; preserve unrelated or replaced resources.
 
     ``cleanup_marker`` is the marker left in the proved implementation Git
-    directory for a merge made outside pr merge (#175): after the worktree
-    is gone, only that marker surviving, which means the original checkout
-    was moved, refuses the step; other records neither block nor authorize
-    that cleanup. Without it, any record that may be the PR's refuses.
+    directory for a merge made outside pr merge (#175). A registered
+    implementation worktree must hold it in its own Git directory. After
+    the worktree is gone, only that marker surviving, which means the
+    original checkout was moved, refuses the step; other records neither
+    block nor authorize that cleanup. Without it, any record that may be
+    the PR's refuses.
 
     The identities come from the merge record, so a repeated run finishes
     after an earlier one removed the implementation worktree and its
@@ -623,6 +625,19 @@ def cleanup_merge(
             raise RetainedError(
                 f"implementation ownership names issue #{owner}, the merge"
                 f" record #{issue}: {path}"
+            )
+        # The ownership record can be copied into a replacement checkout
+        # at the same path, branch, and head; only the checkout that the
+        # record proved holds the marker in its Git directory (#175).
+        if cleanup_marker is not None and (
+            linked_record(repository, path).parent.resolve()
+            != cleanup_marker.parent
+            or cleanup_marker.is_symlink()
+            or not cleanup_marker.is_file()
+        ):
+            raise RetainedError(
+                "implementation worktree does not hold the merge record's"
+                f" cleanup marker: {path}"
             )
         return path
 
@@ -943,8 +958,9 @@ def merge_pr(
         if not merged.merged:
             return
         # Refused from the merged state and local records alone, before the
-        # branch rules or any read of the PR head, which a merged Forgejo PR
-        # may report stale (E9) so that fetching it fails (#175).
+        # branch rules, the PR's reviews and conversation, or any read of
+        # the PR head, which a merged Forgejo PR may report stale (E9) so
+        # that fetching it fails (#175).
         path = merge_record_path(repository, pr)
         refused = "pr merge refused: PR is not open"
         if path.exists() or path.is_symlink():
@@ -960,13 +976,15 @@ def merge_pr(
             )
         raise GateError(refused)
 
-    snapshot = forge.snapshot(pr)
-    refuse_merged(snapshot.pr)
+    # The PR alone first: a failed read of anything else must not hide the
+    # cleanup command of a PR that is already merged (#175).
+    opened = forge.pr(pr)
+    refuse_merged(opened)
     rules = (
-        forge.branch_rules(snapshot.pr.base_branch)
+        forge.branch_rules(opened.base_branch)
         if forge.can_read_branch_rules else {"visibility": "not visible"}
     )
-    # Re-read authority after the potentially slow rules lookup.
+    # Read authority after the potentially slow rules lookup.
     snapshot = forge.snapshot(pr)
     refuse_merged(snapshot.pr)
     state = state_for(repository, snapshot)
@@ -1070,9 +1088,10 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
     # Read on every run, before any change, so the Implementer can report
     # whether the merged head was the approved one. It is read from review
     # evidence alone: fetching the PR head or the commits of earlier reviews
-    # can fail after a merge (E9) and must not strand the cleanup.
+    # can fail after a merge (E9) and must not strand the cleanup, and
+    # neither must the PR's ordinary conversation, which is not read.
     approved = approved_review_head(
-        forge.snapshot(pr), repository.configuration
+        forge.snapshot(pr, conversation=False), repository.configuration
     )
     # Only the merge commit comes from the forge: a merged Forgejo PR can
     # report a synthetic head branch and an older head (E9).

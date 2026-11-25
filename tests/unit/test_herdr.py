@@ -118,6 +118,84 @@ class HandoffTemplateTests(unittest.TestCase):
                 stopped_message(1, H, reason)
 
 
+def pane_directory(cwd: str) -> Path:
+    from agent_squad.reviewer import resolved_directory
+
+    return resolved_directory(cwd, "Herdr pane directory")
+
+
+class PaneDirectoryTests(unittest.TestCase):
+    """#175: a pane directory that cannot be resolved keeps the checkout."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def refused(self, cwd: Path) -> str:
+        from agent_squad.initialization import RetainedError
+
+        with self.assertRaises(RetainedError) as caught:
+            pane_directory(str(cwd))
+        return str(caught.exception)
+
+    def test_unresolvable_checkout_or_pane_keeps_the_checkout(self) -> None:
+        from unittest.mock import Mock
+        from agent_squad.initialization import RetainedError
+        from agent_squad.reviewer import remove_unused_checkout
+
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+        pane = {"workspaces": [], "panes": [{"cwd": str(loop)}]}
+        empty = {"workspaces": [], "panes": []}
+        for path, snapshot, label in (
+            (checkout, pane, f"Herdr pane directory {loop}"),
+            (loop, empty, f"review worktree {loop}"),
+        ):
+            with self.subTest(label=label):
+                worktree = Mock(path=path)
+                with self.assertRaises(RetainedError) as caught:
+                    remove_unused_checkout(worktree, snapshot)
+                self.assertIn(f"cannot resolve {label}",
+                              str(caught.exception))
+                worktree.remove.assert_not_called()
+        worktree = Mock(path=checkout)
+        self.assertIs(remove_unused_checkout(worktree, empty),
+                      worktree.remove.return_value)
+
+    def test_resolved_directories_are_returned(self) -> None:
+
+        real = self.root / "real"
+        real.mkdir()
+        link = self.root / "link"
+        link.symlink_to(real)
+        self.assertEqual(pane_directory(str(link / ".")), real)
+        # A directory that is gone still has a usable path.
+        self.assertEqual(
+            pane_directory(str(link / "gone")), real / "gone")
+
+    def test_symlink_loop_is_refused_on_every_python(self) -> None:
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        expected = f"cannot resolve Herdr pane directory {loop}"
+        self.assertIn(expected, self.refused(loop))
+        # Python 3.13 and later return the loop unresolved from resolve().
+        with patch("pathlib.Path.resolve", lambda self: self):
+            self.assertIn(expected, self.refused(loop))
+            self.assertIn(expected, self.refused(loop / "below"))
+
+    def test_other_resolution_failures_are_refused(self) -> None:
+        for error in (OSError("unreadable"), RuntimeError("loop"),
+                      ValueError("embedded null byte")):
+            with self.subTest(error=type(error).__name__):
+                with patch("pathlib.Path.resolve", side_effect=error):
+                    self.assertIn(
+                        "cannot resolve Herdr pane directory /x: "
+                        + str(error), self.refused(Path("/x")))
+
+
 class LaunchGateTests(unittest.TestCase):
     def test_every_launch_gate_refuses_before_resource_creation(self) -> None:
         from unittest.mock import Mock, call, patch

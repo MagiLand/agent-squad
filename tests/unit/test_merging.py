@@ -277,7 +277,10 @@ class CompleteMergeTests(unittest.TestCase):
 
 
 class MergeRecordRefusalTests(unittest.TestCase):
-    def merge(self, *, merged: bool, error: Exception | None = None):
+    def merge(
+        self, *, merged: bool, error: Exception | None = None,
+        snapshot_error: Exception | None = None,
+    ):
         from tempfile import TemporaryDirectory
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -295,8 +298,11 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = False
         forge.merge.side_effect = error
-        # merge_pr refuses a merged PR from the snapshot itself (#175).
+        # merge_pr refuses a merged PR from the PR read alone, before the
+        # snapshot (#175).
+        forge.pr.return_value.merged = merged
         forge.snapshot.return_value.pr.merged = merged
+        forge.snapshot.side_effect = snapshot_error
         self.forge = forge
         state = {"pr": {"merged": merged}, "target": {"head": H},
                  "closes_issue": True, "reviews": []}
@@ -309,8 +315,21 @@ class MergeRecordRefusalTests(unittest.TestCase):
                 patch("agent_squad.merging.write_merge_record"):
             return merge_pr(repository, forge, 1), common
 
+    def test_merged_pr_is_refused_from_the_pr_read_alone(self):
+        """#175: a merged PR is refused before the branch rules and the
+        snapshot, whose reads of reviews and conversation may fail."""
+        from agent_squad.forge import ForgeError
+
+        with self.assertRaises(GateError) as caught:
+            self.merge(merged=True, snapshot_error=ForgeError("unreadable"))
+        self.assertIn("pr cleanup --as implementer --pr 1",
+                      str(caught.exception))
+        self.forge.pr.assert_called_once_with(1)
+        self.forge.snapshot.assert_not_called()
+        self.forge.branch_rules.assert_not_called()
+
     def test_pr_merged_during_the_rules_read_is_refused(self):
-        """#175: the snapshot re-read after the branch rules is checked for
+        """#175: the snapshot read after the branch rules is checked for
         the merged state before any live state is derived."""
         from tempfile import TemporaryDirectory
         from types import SimpleNamespace
@@ -329,9 +348,8 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = True
         forge.branch_rules.return_value = {}
-        before, after = Mock(), Mock()
-        before.pr.merged, after.pr.merged = False, True
-        forge.snapshot.side_effect = [before, after]
+        forge.pr.return_value.merged = False
+        forge.snapshot.return_value.pr.merged = True
         with patch("agent_squad.merging.state_for",
                    side_effect=AssertionError("live state derived")):
             with self.assertRaises(GateError) as caught:
@@ -340,6 +358,7 @@ class MergeRecordRefusalTests(unittest.TestCase):
         self.assertIn("pr cleanup --as implementer --pr 1",
                       str(caught.exception))
         forge.branch_rules.assert_called_once()
+        forge.snapshot.assert_called_once_with(1)
         forge.merge.assert_not_called()
 
     def test_refusal_names_pr_cleanup_only_for_a_merged_pr(self):
@@ -393,7 +412,8 @@ class MergeRecordRefusalTests(unittest.TestCase):
         self.assertEqual(result["cleanup_command"],
                          "agent-squad pr cleanup --as implementer --pr 1")
         self.assertTrue((common / "agent-squad-merge-pr1.json").exists())
-        self.forge.pr.assert_not_called()
+        # Only the read that opens merge_pr; none follows the answer.
+        self.forge.pr.assert_called_once_with(1)
 
 
 class SurvivingOwnerTests(unittest.TestCase):

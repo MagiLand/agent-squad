@@ -461,7 +461,12 @@ class Forge(Protocol):
 
     def snapshot(
         self, number: int, *, with_checks: bool = False,
-    ) -> Snapshot: ...
+        conversation: bool = True,
+    ) -> Snapshot:
+        """Read the PR with its reviews and review comments. Without
+        ``conversation`` the PR's ordinary conversation is not read, and
+        the snapshot holds none (#175)."""
+        ...
 
     def branch_rules(self, branch: str) -> dict[str, object]: ...
     def checks(self, sha: str) -> tuple[Check, ...]: ...

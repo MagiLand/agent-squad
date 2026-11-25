@@ -557,6 +557,7 @@ class ForgeBoundaryTests(unittest.TestCase):
         forge = Mock(spec=Forge)
         forge.can_read_branch_rules = False
         forge.snapshot.return_value = snapshot()
+        forge.pr.return_value = snapshot().pr
         forge.branch_rules.side_effect = AssertionError('must not read rules')
         forge.merge.side_effect = ForgeError('refused', 405)
         state = {'target': {'head': H}, 'approval': {'approved': True},

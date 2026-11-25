@@ -11,7 +11,7 @@ from unittest.mock import patch
 from tests.forge_support import (
     ForgeFixture, ForgejoFixture, finding, is_write,
 )
-from agent_squad.forge import make_forge
+from agent_squad.forge import ForgeError, make_forge
 from agent_squad.initialization import load_initialized_repository
 from agent_squad.conventions import approved_review_head
 from agent_squad.herdr import HerdrError
@@ -402,6 +402,208 @@ class ForgeMergedCleanup:
         self.assertTrue(unrelated.exists())
         f.git("worktree", "remove", "--force", str(unrelated))
         self.assert_finished(second, merge_commit, "up to date")
+
+    def replace_checkout(self) -> tuple[Path, Path]:
+        """Park the original checkout, detached, and put a new worktree with
+        a copy of its ownership record at the issue path, on the same branch
+        and head. Return the parked path and the cleanup marker."""
+        f = self.f
+        marker = Path(
+            json.loads(self.record.read_text())["implementation_record"])
+        self.assertTrue(marker.is_file())
+        owner = "agent-squad-implementation.json"
+        text = (marker.parent / owner).read_text()
+        parked = f.root / "parked-original"
+        f.git("worktree", "move", str(f.worktree), str(parked))
+        f.git("switch", "--detach", cwd=parked)
+        f.git("worktree", "add", str(f.worktree), "issue-1")
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        self.assertNotEqual(admin.resolve(), marker.parent)
+        (admin / owner).write_text(text)
+        self.assertEqual(f.git("rev-parse", "HEAD", cwd=f.worktree),
+                         self.head)
+        return parked, marker
+
+    def assert_replacement_refused(self, parked: Path, marker: Path) -> None:
+        f = self.f
+        writes = self.writes()
+        refused = self.cleanup(expected=3)
+        self.assertEqual(
+            [s["step"] for s in refused["cleanup"]],
+            ["implementation ownership"])
+        self.assertIn("does not hold the merge record's cleanup marker",
+                      refused["cleanup"][0]["detail"])
+        self.assertEqual(self.writes(), writes)
+        self.assertTrue(parked.exists())
+        self.assertTrue(marker.is_file())
+        self.assertTrue(f.worktree.exists())
+        self.assertTrue(self.record.exists())
+        self.assertTrue(self.scratch.exists())
+        self.assertTrue(self.issue_scratch.exists())
+        self.assertNotEqual(f.git("branch", "--list", "issue-1"), "")
+
+    def restore_checkout(self, parked: Path) -> None:
+        f = self.f
+        f.git("worktree", "remove", "--force", str(f.worktree))
+        f.git("switch", "issue-1", cwd=parked)
+        f.git("worktree", "move", str(parked), str(f.worktree))
+
+    def test_replacement_checkout_without_the_marker_is_refused(
+        self,
+    ) -> None:
+        """REV-17: a new worktree at the issue path, on the branch and head,
+        with a copied ownership record is not the proved checkout."""
+        f = self.f
+        merge_commit = self.forge_merge("merge")
+        blocker = f.worktree / "untracked.txt"
+        blocker.write_text("retain")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"],
+                         "implementation worktree")
+        parked, marker = self.replace_checkout()
+        self.assert_replacement_refused(parked, marker)
+        # A symlink to the marker in the replacement's Git directory is not
+        # the marker either.
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        record = json.loads(self.record.read_text())
+        linked = admin.resolve() / marker.name
+        linked.symlink_to(marker)
+        self.record.write_text(json.dumps(
+            {**record, "implementation_record": str(linked)}))
+        self.assert_replacement_refused(parked, marker)
+        self.record.write_text(json.dumps(record))
+        self.restore_checkout(parked)
+        (f.worktree / "untracked.txt").unlink()
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def test_recreated_checkout_in_the_reused_git_directory_is_refused(
+        self,
+    ) -> None:
+        """REV-17: after the proved checkout was removed, a new worktree at
+        the issue path, on a recreated branch, gets the same Git directory
+        but not the marker."""
+        f = self.f
+        target = f.root / "scratch-target"
+        target.mkdir()
+        shutil.rmtree(self.scratch)
+        self.scratch.symlink_to(target)
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        owner = (admin / "agent-squad-implementation.json").read_text()
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"], "scratch directory")
+        marker = Path(
+            json.loads(self.record.read_text())["implementation_record"])
+        self.assertEqual(marker.parent, admin.resolve())
+        self.assertFalse(admin.exists())
+        f.git("worktree", "add", "-b", "issue-1", str(f.worktree), self.head)
+        self.assertEqual(
+            Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree)),
+            admin)
+        (admin / "agent-squad-implementation.json").write_text(owner)
+        writes = self.writes()
+        refused = self.cleanup(expected=3)
+        self.assertEqual([s["step"] for s in refused["cleanup"]],
+                         ["implementation ownership"])
+        self.assertIn("does not hold the merge record's cleanup marker",
+                      refused["cleanup"][0]["detail"])
+        self.assertEqual(self.writes(), writes)
+        self.assertTrue(f.worktree.exists())
+        self.assertTrue(self.record.exists())
+        f.git("worktree", "remove", "--force", str(f.worktree))
+        f.git("branch", "-D", "issue-1")
+        self.scratch.unlink()
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def break_conversation(self) -> None:
+        """Make only the read of the PR's ordinary conversation fail."""
+        raise NotImplementedError
+
+    def conversation_failure(self, *, retry: bool) -> None:
+        """REV-19: neither the pr merge refusal nor pr cleanup reads the
+        PR's ordinary conversation after the forge merged."""
+        f = self.f
+        f.review("approved", [finding("optional")])
+        merge_commit = self.forge_merge("merge")
+        if retry:
+            blocker = f.worktree / "untracked.txt"
+            blocker.write_text("retain")
+            first = self.cleanup(expected=3)
+            self.assertEqual(first["cleanup"][-1]["step"],
+                             "implementation worktree")
+            self.assertTrue(self.record.exists())
+            blocker.unlink()
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            forge = make_forge(repository, "implementer")
+            whole = forge.snapshot(1)
+            self.break_conversation()
+            with self.assertRaises(ForgeError):
+                forge.snapshot(1)
+            partial = forge.snapshot(1, conversation=False)
+        self.assertEqual(partial.conversation, ())
+        self.assertEqual(partial.pr, whole.pr)
+        self.assertEqual(partial.reviews, whole.reviews)
+        self.assertEqual(partial.comments, whole.comments)
+        self.assertTrue(whole.reviews and whole.comments)
+        self.assertEqual(f.run([
+            sys.executable, "-m", "agent_squad", "status", "--pr", "1",
+            "--json",
+        ], cwd=f.repo).returncode, 1)
+        writes = self.writes()
+        calls = len(f.read_model()["calls"])
+        refused = self.pr("merge", 4)
+        self.assertIn("PR is not open", refused["error"])
+        self.assertIn(COMMAND, refused["error"])
+        self.assertEqual(self.writes(), writes)
+        # The refusal reads the PR and nothing else; gh's token lookup is
+        # not a forge read.
+        reads = [call_path(c) for c in f.read_model()["calls"][calls:]
+                 if call_path(c) != "token"]
+        self.assertEqual(len(reads), 1, reads)
+        self.assertTrue(reads[0].endswith("/pulls/1"), reads)
+        calls = len(f.read_model()["calls"])
+        result = self.cleanup()
+        self.assertFalse(any(
+            call_path(c).endswith("/issues/1/comments")
+            for c in f.read_model()["calls"][calls:]))
+        self.assertEqual(result["approved_head"], self.head)
+        self.assert_finished(
+            result, merge_commit, "up to date" if retry else "fast-forwarded")
+
+    def test_failed_conversation_read_does_not_stop_a_first_run(
+        self,
+    ) -> None:
+        self.conversation_failure(retry=False)
+
+    def test_failed_conversation_read_does_not_stop_a_retry(self) -> None:
+        self.conversation_failure(retry=True)
+
+    def test_failed_review_read_stops_cleanup_before_any_change(
+        self,
+    ) -> None:
+        """The approval evidence is still read on every run."""
+        f = self.f
+        f.review("approved")
+        merge_commit = self.forge_merge("merge")
+        writes = self.writes()
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            forge = make_forge(repository, "implementer")
+            with patch.object(
+                type(forge), "reviews",
+                side_effect=ForgeError("reviews unreadable"),
+            ), patch.object(
+                type(forge), "graphql", create=True,
+                side_effect=ForgeError("reviews unreadable"),
+            ):
+                with self.assertRaisesRegex(ForgeError, "reviews unreadable"):
+                    cleanup_pr(repository, forge, 1)
+        self.assertEqual(self.writes(), writes)
+        self.assertFalse(self.record.exists())
+        self.assertTrue(f.worktree.exists())
+        self.assertTrue(self.scratch.exists())
+        self.assert_finished(self.cleanup(), merge_commit)
 
     def edit_review(self, head: str, **values: str) -> None:
         """Change the one approving review at ``head`` in the fake model."""
@@ -976,6 +1178,75 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
             "protection" in call_path(c) or "/rules/" in call_path(c)
             for c in f.read_model()["calls"][calls:]))
 
+    def break_conversation(self) -> None:
+        f = self.f
+        model = f.read_model()
+        model["prs"]["1"]["conversation"] = [{
+            "id": 12345, "user": {"login": "contributor"},
+            "body": "Maintenance note",
+            "created_at": "2026-11-25T02:00:00Z",
+        }]
+        f.save_model(model)
+        # A page that never advances: the adapter refuses a repeated cursor.
+        f.settings(page_sizes={"PullRequest.comments": 0})
+
+    def test_replacement_checkout_is_refused_before_any_deletion(
+        self,
+    ) -> None:
+        """REV-17: with the remote branch still present, the ownership step
+        refuses the replacement before the first deleting step."""
+        f = self.f
+        f.settings(branch_delete_403=True)
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"], "remote branch")
+        f.settings(branch_delete_403=False)
+        parked, marker = self.replace_checkout()
+        self.assert_replacement_refused(parked, marker)
+        self.assertNotEqual(
+            f.git("ls-remote", "--heads", "origin", "issue-1"), "")
+        self.restore_checkout(parked)
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def test_unresolvable_pane_directory_keeps_the_checkout(self) -> None:
+        """REV-18: a pane whose directory leads through a symlink loop
+        leaves the checkout's use unknown; the step fails with a report."""
+        f = self.f
+        review, workspace = self.unregistered_reviewer()
+        f.git("worktree", "lock", str(review))
+        merge_commit = self.forge_merge("merge")
+        self.cleanup(expected=3)
+        f.git("worktree", "unlock", str(review))
+        loop = f.root / "stale-pane-directory"
+        loop.symlink_to(loop.name)
+        model = f.herdr_model()
+        self.assertEqual(model["workspaces"], [])
+        model["workspaces"].append({
+            "workspace_id": "w-stale", "label": "stale", "tab_count": 1,
+            "pane_count": 1, "active_tab_id": "w-stale:t1",
+            "worktree": None,
+        })
+        model["tabs"].append(
+            {"workspace_id": "w-stale", "tab_id": "w-stale:t1"})
+        model["panes"].append({
+            "workspace_id": "w-stale", "tab_id": "w-stale:t1",
+            "pane_id": "w-stale:p1", "terminal_id": "w-stale-terminal",
+            "cwd": str(loop), "agent": None, "agent_status": "unknown",
+        })
+        f.save_herdr(model)
+        kept = self.cleanup(expected=3)
+        self.assertEqual(kept["cleanup"][-1]["step"], "review worktree")
+        self.assertIn(f"cannot resolve Herdr pane directory {loop}",
+                      kept["cleanup"][-1]["detail"])
+        self.assertTrue(review.exists())
+        self.assertTrue(self.record.exists())
+        model = f.herdr_model()
+        for key in ("workspaces", "tabs", "panes"):
+            model[key] = [x for x in model[key]
+                          if x["workspace_id"] != "w-stale"]
+        f.save_herdr(model)
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
     def test_moved_original_checkout_still_blocks_a_retry(self) -> None:
         """REV-10 control: the proved record survives a moved checkout."""
         f = self.f
@@ -1075,6 +1346,9 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
 class ForgejoForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
     fixture = ForgejoFixture
     forge_deletes_branch = True
+
+    def break_conversation(self) -> None:
+        self.f.settings(conversation_read_status=500)
 
     def test_branch_the_forge_kept_is_deleted_by_cleanup(self) -> None:
         f = self.f

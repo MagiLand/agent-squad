@@ -7,6 +7,7 @@ on the forge; no delivery status or review result is stored here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import json
 import os
 from pathlib import Path
@@ -370,13 +371,38 @@ def verify_workspace(
     return workspace
 
 
+def resolved_directory(path: str, label: str) -> Path:
+    """Resolve a directory named by Herdr or a record, or keep every
+    resource.
+
+    A directory that cannot be resolved, such as one that now leads
+    through a symlink loop, leaves the checkout's use unknown (#175).
+    """
+    try:
+        resolved = Path(path).resolve()
+        try:
+            resolved.stat()
+        except OSError as error:
+            # Python 3.11 and 3.12 raise RuntimeError from resolve() for a
+            # symlink loop; later versions return the path unresolved, and
+            # only this read reports the loop. A directory that is merely
+            # gone or unreadable still has a usable resolved path.
+            if error.errno == errno.ELOOP:
+                raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RetainedError(
+            f"cannot resolve {label} {path}: {error}"
+        ) from None
+    return resolved
+
+
 def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
     """Remove an owned checkout that no Herdr workspace or pane still uses.
 
     A workspace counts by its worktree registration, and a pane by a
     working directory at or below the checkout (#175).
     """
-    checkout = worktree.path.resolve()
+    checkout = resolved_directory(str(worktree.path), "review worktree")
     for workspace in resource_objects(snapshot, "workspaces"):
         registration = workspace.get("worktree") or {}
         if not isinstance(registration, dict):
@@ -388,7 +414,9 @@ def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
     for pane in resource_objects(snapshot, "panes"):
         cwd = pane.get("cwd")
         if isinstance(cwd, str) and Path(cwd).is_absolute() and (
-            Path(cwd).resolve().is_relative_to(checkout)
+            resolved_directory(
+                cwd, "Herdr pane directory"
+            ).is_relative_to(checkout)
         ):
             raise RetainedError(
                 "an unowned Herdr pane still uses this worktree"
