@@ -772,6 +772,34 @@ class ForgeMergedCleanup:
     def test_approval_verified_only_afterwards_is_not_reported(self) -> None:
         self.approval_after_a_blocking_finding("after")
 
+    def test_retry_after_pr_merge_reports_the_recorded_approval(
+        self,
+    ) -> None:
+        """REV-23: pr merge verified the approval and recorded its head;
+        the retry reports that head and reads no review, whatever the
+        forge says about the review by then."""
+        f = self.f
+        f.review("approved")
+        blocker = f.worktree / "untracked.txt"
+        blocker.write_text("retain")
+        stopped = self.pr("merge", 3)
+        self.assertEqual(stopped["cleanup"][-1]["step"],
+                         "implementation worktree")
+        self.assertEqual(stopped["approved_head"], self.head)
+        self.assertEqual(stopped["merged_head"], self.head)
+        blocker.unlink()
+        self.edit_review(self.head, state="COMMENTED")
+        calls = len(f.read_model()["calls"])
+        result = self.cleanup()
+        reads = [call_path(c) for c in f.read_model()["calls"][calls:]]
+        self.assertFalse(
+            any(p == "graphql" or "/reviews" in p for p in reads), reads)
+        self.assertIs(result["merged_outside_pr_merge"], False)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+        self.assertEqual(result["merge_record"]["result"], "deleted")
+        self.assertFalse(f.worktree.exists())
+
     def edit_review(self, head: str, **values: str) -> None:
         """Change the one approving review at ``head`` in the fake model."""
         model = self.f.read_model()
@@ -1022,6 +1050,22 @@ class ForgeMergedCleanup:
                 dict(json.loads(original), common=str(f.origin))))
             assert_refused("cannot prove implementation ownership")
             owner.write_text(original)
+        with self.subTest(case="Git directory links back elsewhere"):
+            # The worktree's Git identity differs: its Git directory names
+            # another checkout, so it is not a candidate at all.
+            backlink = admin / "gitdir"
+            linked = backlink.read_text()
+            worktrees = f.git("worktree", "list", "--porcelain")
+            writes = self.writes()
+            backlink.write_text(str(f.root / "elsewhere" / ".git") + "\n")
+            refused = self.cleanup(expected=4)
+            backlink.write_text(linked)
+            self.assertIn("no implementation record names PR #1",
+                          refused["error"])
+            self.assertEqual(
+                f.git("worktree", "list", "--porcelain"), worktrees)
+            self.assertEqual(self.writes(), writes)
+            self.assertFalse(self.record.exists())
         with self.subTest(case="worktree on another branch"):
             f.git("switch", "-c", "elsewhere", cwd=f.worktree)
             assert_refused("implementation branch or HEAD changed")
@@ -1444,6 +1488,34 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.pane_keeps_the_checkout(place)
         (self.f.root / "inaccessible-pane-parent").chmod(0o700)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_pane_directory_through_an_unreadable_target_keeps_the_checkout(
+        self,
+    ) -> None:
+        """REV-18: the pane's directory is a plain path whose symlink
+        target climbs out of a directory reached through one that cannot
+        be searched. A lenient reading skips that part and ends at a
+        readable directory elsewhere."""
+        def place(review: Path) -> tuple[Path, str]:
+            blocked = self.f.root / "blocked"
+            blocked.mkdir()
+            target = review / "deep" / "deeper"
+            target.mkdir(parents=True)
+            internal = blocked / "internal"
+            internal.symlink_to(target)
+            reported = self.f.root / "pane-directory"
+            reported.symlink_to(internal / ".." / "..")
+            self.assertTrue(reported.samefile(review))
+            blocked.chmod(0)
+            self.addCleanup(blocked.chmod, 0o700)
+            with self.assertRaises(PermissionError):
+                reported.stat()
+            self.assertEqual(reported.resolve(), self.f.root.resolve())
+            return reported, f"cannot resolve Herdr pane directory {reported}"
+
+        self.pane_keeps_the_checkout(place)
+        (self.f.root / "blocked").chmod(0o700)
+
     def test_pane_directory_in_another_case_keeps_the_checkout(self) -> None:
         """REV-18: on a case-insensitive file system, another spelling of
         the checkout's name is the same directory."""
@@ -1521,6 +1593,9 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.assertIsNone(record.pop("implementation_record"))
         self.record.write_text(json.dumps(record))
         f.settings(branch_delete_403=False)
+        # Such a record is pr merge's, so its head is the approved one
+        # whatever happened to the review since.
+        self.edit_review(self.head, state="DISMISSED")
         result = self.cleanup()
         self.assertIs(result["merged_outside_pr_merge"], False)
         self.assertEqual(result["approved_head"], self.head)
@@ -1537,6 +1612,20 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
                     / "agent-squad-implementation.json")
         marker = "agent-squad-cleanup-" + "0" * 32
         climbing = str(self.f.repo / ".git/worktrees/.." / marker)
+        slots = record["common"] + "/worktrees"
+        # The saved text is checked as written: a path object would drop
+        # the "." and the doubled separator, and read a NUL as absent.
+        malformed = [
+            f"{slots}/./issue-1/{marker}", f"{slots}/issue-1/./{marker}",
+            f"{slots}/a/../issue-1/{marker}", f"{slots}//issue-1/{marker}",
+            f"{slots}/issue-1//{marker}", f"{slots}/issue-1/{marker}/",
+            f"{slots}/issue-1/{marker}/.", f"{slots}/issue-1/x/{marker}",
+            f"{slots}/issue\x00-1/{marker}", f"{slots}/issue-1/{marker}\x00",
+            f"{slots}/issue-1/{marker}\n", f"{slots}/issue-\ud800/{marker}",
+            f"{slots}/issue-1/{marker.upper()}", f"{slots}/{marker}",
+            f"worktrees/issue-1/{marker}", f"/{slots}/issue-1/{marker}",
+            ["x"],
+        ]
         for values in (
             {"outside_pr_merge": "true"}, {"outside_pr_merge": 1},
             {"outside_pr_merge": None},
@@ -1544,7 +1633,11 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
             {"outside_pr_merge": True, "implementation_record": "x.json"},
             {"outside_pr_merge": True, "implementation_record": owner},
             {"outside_pr_merge": True, "implementation_record": climbing},
+            *({"outside_pr_merge": True, "implementation_record": value}
+              for value in malformed),
             {"implementation_record": owner},
+            {"head_branch": "issue\x00-1"}, {"base_branch": "main\x00"},
+            {"head_branch": "issue-\ud800"}, {"base_branch": ""},
         ):
             with self.subTest(values=values):
                 self.record.write_text(json.dumps(dict(record, **values)))
@@ -1553,6 +1646,13 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
                 self.assertIn("malformed merge record", result["error"])
                 self.assertEqual(len(f.read_model()["calls"]), calls)
         self.assertTrue(f.worktree.exists())
+        # The well-formed text is accepted: the record loads, and the
+        # ownership step then finds that this checkout holds no marker.
+        self.record.write_text(json.dumps(dict(
+            record, outside_pr_merge=True,
+            implementation_record=f"{slots}/issue-1/{marker}")))
+        accepted = self.cleanup(expected=3)
+        self.assertIn("cleanup marker", accepted["cleanup"][0]["detail"])
 
 
 class ForgejoForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):

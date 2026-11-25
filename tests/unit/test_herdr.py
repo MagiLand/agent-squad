@@ -120,44 +120,63 @@ class HandoffTemplateTests(unittest.TestCase):
 
 class PaneDirectoryTests(unittest.TestCase):
     """#175: a directory Herdr reports either is in the checkout, is not,
-    or cannot be placed, and then the checkout is kept."""
+    or cannot be placed, and then the checkout is kept. Every case reads a
+    real tree; nothing about the file system is patched."""
 
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         self.checkout = self.root / "checkout"
-        (self.checkout / "sub").mkdir(parents=True)
+        (self.checkout / "deep" / "deeper").mkdir(parents=True)
         self.other = self.root / "other"
         self.other.mkdir()
 
     def inside(self, path: Path) -> bool:
-        from agent_squad.reviewer import directory_in_checkout
+        from agent_squad.reviewer import (
+            directory_in_checkout, placed_directory,
+        )
 
         return directory_in_checkout(
-            str(path), "Herdr pane directory", self.checkout)
+            str(path), "Herdr pane directory",
+            placed_directory(str(self.checkout)))
 
     def refused(self, path: Path) -> str:
         from agent_squad.initialization import RetainedError
 
         with self.assertRaises(RetainedError) as caught:
             self.inside(path)
+        self.assertIn(f"cannot resolve Herdr pane directory {path}: ",
+                      str(caught.exception))
         return str(caught.exception)
+
+    def unreadable(self, directory: Path) -> None:
+        """Take away the right to search ``directory`` until cleanup."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads every directory")
+        directory.chmod(0)
+        self.addCleanup(directory.chmod, 0o700)
 
     def test_directories_are_placed_by_name_and_through_symlinks(
         self,
     ) -> None:
+        from agent_squad.reviewer import placed_directory
+
         link = self.root / "link"
         link.symlink_to(self.checkout)
-        for path in (self.checkout, self.checkout / "sub", link,
-                     link / "sub", self.checkout / "sub" / ".."):
+        for path in (self.checkout, self.checkout / "deep", link,
+                     link / "deep", self.checkout / "deep" / "..",
+                     link / "deep" / "deeper" / ".." / ".."):
             with self.subTest(path=path.relative_to(self.root)):
                 self.assertTrue(self.inside(path))
-        # A directory that is gone still says where it was.
+        # Absent names below an existing directory say where they would be.
         self.assertTrue(self.inside(self.checkout / "gone" / "deeper"))
         self.assertTrue(self.inside(link / "gone"))
+        self.assertEqual(
+            placed_directory(str(link / "gone" / "deeper")),
+            (self.checkout / "gone" / "deeper", self.checkout))
         for path in (self.other, self.other / "gone", self.root,
-                     self.root / "checkout-2"):
+                     self.root / "checkout-2", self.checkout / ".."):
             with self.subTest(path=path.relative_to(self.root)):
                 self.assertFalse(self.inside(path))
         # A component that is a file cannot lead into the checkout.
@@ -166,24 +185,9 @@ class PaneDirectoryTests(unittest.TestCase):
         # A checkout that is gone is still named by the paths below it.
         self.checkout.rename(self.root / "moved")
         self.assertTrue(self.inside(self.checkout))
-        self.assertTrue(self.inside(self.checkout / "sub"))
+        self.assertTrue(self.inside(self.checkout / "deep"))
         self.assertFalse(self.inside(self.other))
-
-    def test_same_directory_under_another_name_is_inside(self) -> None:
-        """Resolution does not correct the spelling on a case-insensitive
-        file system, and leaves an unreadable component unresolved. The
-        alias here is a symlink that resolve() is kept from following."""
-        alias = self.other / "alias"
-        alias.symlink_to(self.checkout)
-        with patch("pathlib.Path.resolve", lambda self: self):
-            self.assertTrue(self.inside(alias))
-            self.assertTrue(self.inside(alias / "sub"))
-            self.assertTrue(self.inside(alias / "gone" / "deeper"))
-            self.assertFalse(self.inside(self.other))
-            self.assertFalse(self.inside(self.other / "gone"))
-            # A checkout that is gone has no directory to be the same as.
-            self.checkout.rename(self.root / "moved")
-            self.assertFalse(self.inside(self.other))
+        self.assertFalse(self.inside(self.root / "moved"))
 
     def test_wrong_case_spelling_is_inside_where_the_file_system_folds(
         self,
@@ -191,61 +195,116 @@ class PaneDirectoryTests(unittest.TestCase):
         shouted = self.root / "CHECKOUT"
         if not shouted.exists():
             self.skipTest("the file system is case-sensitive")
-        self.assertNotEqual(shouted.resolve(), self.checkout)
+        self.assertNotEqual(
+            os.path.realpath(shouted, strict=True), str(self.checkout))
         self.assertTrue(self.inside(shouted))
-        self.assertTrue(self.inside(shouted / "sub"))
+        self.assertTrue(self.inside(shouted / "deep"))
+        self.assertTrue(self.inside(shouted / "gone" / "deeper"))
+        self.assertFalse(self.inside(self.root / "OTHER"))
 
-    def test_symlink_loop_is_refused_on_every_python(self) -> None:
+    def test_same_directory_under_another_spelling_is_inside(self) -> None:
+        """The case above runs only where the file system folds case. This
+        one stands in for it everywhere: the strict reading is kept from
+        rewriting one name, as it does not rewrite a spelling, so only the
+        comparison of the directories themselves can place the path."""
+        spelling = self.other / "spelling"
+        spelling.symlink_to(self.checkout)
+        read = os.path.realpath
+
+        def keep_spelling(path, *, strict=False):
+            text = os.fspath(path)
+            if text == str(spelling) or text.startswith(f"{spelling}/"):
+                os.stat(text)
+                return text
+            return read(path, strict=strict)
+
+        with patch("os.path.realpath", keep_spelling):
+            self.assertTrue(self.inside(spelling))
+            self.assertTrue(self.inside(spelling / "deep" / "deeper"))
+            self.assertTrue(self.inside(spelling / "gone" / "deeper"))
+            self.assertFalse(self.inside(self.other))
+            self.assertFalse(self.inside(self.other / "gone"))
+
+    def test_path_that_led_into_the_checkout_is_never_placed_outside(
+        self,
+    ) -> None:
+        """REV-18: each of these named the checkout, or a directory in it,
+        before something on the way stopped being readable or present. A
+        lenient reading skips that part and ends somewhere else. Each must
+        be refused, and so keep the checkout; none may read as outside."""
+        blocked = self.root / "blocked"
+        blocked.mkdir()
+        stage = self.root / "stage"
+        stage.mkdir()
+        internal = blocked / "internal"
+        internal.symlink_to(self.checkout / "deep" / "deeper")
+        paths = {
+            # Another name for the checkout, below the blocked directory.
+            "alias below": blocked / "alias",
+            # A plain path whose symlink target climbs out of a directory
+            # reached through the blocked one.
+            "target through": self.root / "pane-directory",
+            # The same, with a name ahead of the blocked directory in the
+            # target that is removed: the strict reading says missing.
+            "target through, after a missing name": self.root / "staged",
+            # A directory in the checkout that was removed.
+            "dangling": self.root / "dangling",
+            "below a dangling link": self.root / "dangling" / "below",
+        }
+        paths["alias below"].symlink_to(self.checkout)
+        paths["target through"].symlink_to(internal / ".." / "..")
+        paths["target through, after a missing name"].symlink_to(
+            stage / ".." / "blocked" / "internal" / ".." / "..")
+        removed = self.checkout / "removed"
+        removed.mkdir()
+        paths["dangling"].symlink_to(removed)
+        for name, path in paths.items():
+            if "missing" not in name and "dangling" not in name:
+                with self.subTest(name, before=True):
+                    self.assertTrue(path.samefile(self.checkout))
+                    self.assertTrue(self.inside(path))
+        self.assertTrue(self.inside(paths["dangling"]))
+        self.assertTrue(
+            paths["target through, after a missing name"].samefile(
+                self.checkout))
+        removed.rmdir()
+        stage.rmdir()
+        self.unreadable(blocked)
+        reasons = {
+            "alias below": "Permission denied",
+            "target through": "Permission denied",
+            "target through, after a missing name":
+                "leads to a path that is missing",
+            "dangling": "leads to a path that is missing",
+            "below a dangling link": "leads to a path that is missing",
+        }
+        for name, path in paths.items():
+            with self.subTest(name):
+                self.assertIn(reasons[name], self.refused(path))
+        # What a lenient reading makes of two of them: a readable
+        # directory that is not the checkout.
+        self.assertEqual(paths["target through"].resolve(), self.root)
+        self.assertEqual(
+            paths["target through, after a missing name"].resolve(),
+            self.root)
+
+    def test_path_that_cannot_be_placed_is_refused(self) -> None:
         loop = self.root / "loop"
         loop.symlink_to(loop.name)
-        expected = f"cannot resolve Herdr pane directory {loop}"
-        self.assertIn(expected, self.refused(loop))
-        # Python 3.13 and later return the loop unresolved from resolve().
-        with patch("pathlib.Path.resolve", lambda self: self):
-            self.assertIn(expected, self.refused(loop))
-            self.assertIn(expected, self.refused(loop / "below"))
+        self.assertIn("Too many levels of symbolic links", self.refused(loop))
+        self.refused(loop / "below")
+        self.assertIn("null byte", self.refused(self.root / "nul\x00"))
+        # Names that climb out of a directory that is gone: where they
+        # would lead depends on what that directory was.
+        self.assertIn("is below a path that is missing", self.refused(
+            self.checkout / "gone" / ".." / ".." / "other"))
+        self.assertIn("leads to a path that is missing", self.refused(
+            self.dangling()))
 
-    def test_only_a_missing_path_is_tolerated(self) -> None:
-        """REV-18: a path that cannot be read, such as one below a parent
-        without search permission, says nothing about where it leads."""
-        import errno
-        from agent_squad.reviewer import directory_status
-
-        read = Path.stat
-        target = self.other / "pane"
-
-        def failing(code: int):
-            def stat(path: Path, **options: object):
-                if path == target:
-                    raise OSError(code, os.strerror(code), str(path))
-                return read(path, **options)
-            return stat
-
-        for code in (errno.ENOENT, errno.ENOTDIR):
-            with self.subTest(code=errno.errorcode[code]):
-                with patch("pathlib.Path.stat", failing(code)):
-                    self.assertIsNone(directory_status(target))
-                    self.assertFalse(self.inside(target))
-        for code in (errno.EACCES, errno.EPERM, errno.ELOOP, errno.EIO,
-                     errno.ENAMETOOLONG):
-            with self.subTest(code=errno.errorcode[code]):
-                with patch("pathlib.Path.stat", failing(code)):
-                    self.assertIn(
-                        f"cannot resolve Herdr pane directory {target}: ",
-                        self.refused(target))
-                    # Below it, the unreadable parent is refused as well.
-                    self.assertIn(
-                        "cannot resolve Herdr pane directory",
-                        self.refused(target / "gone"))
-
-    def test_resolution_failures_are_refused(self) -> None:
-        for error in (OSError("unreadable"), RuntimeError("loop"),
-                      ValueError("embedded null byte")):
-            with self.subTest(error=type(error).__name__):
-                with patch("pathlib.Path.resolve", side_effect=error):
-                    self.assertIn(
-                        "cannot resolve Herdr pane directory /x: "
-                        + str(error), self.refused(Path("/x")))
+    def dangling(self) -> Path:
+        link = self.root / "nowhere"
+        link.symlink_to(self.root / "absent")
+        return link
 
     def unused(self, path: Path, **inventory: list):
         from unittest.mock import Mock
@@ -264,7 +323,7 @@ class PaneDirectoryTests(unittest.TestCase):
         alias.symlink_to(self.checkout)
         cases = {
             "pane in the checkout": (
-                self.checkout, {"panes": [{"cwd": str(alias / "sub")}]},
+                self.checkout, {"panes": [{"cwd": str(alias / "deep")}]},
                 "an unowned Herdr pane still uses this worktree"),
             "pane that cannot be placed": (
                 self.checkout, {"panes": [{"cwd": str(loop)}]},
@@ -279,6 +338,9 @@ class PaneDirectoryTests(unittest.TestCase):
                 f"cannot resolve Herdr worktree registration {loop}"),
             "checkout that cannot be placed": (
                 loop, {}, f"cannot resolve review worktree {loop}"),
+            "checkout by another name": (
+                alias, {"panes": [{"cwd": str(self.checkout / "deep")}]},
+                "an unowned Herdr pane still uses this worktree"),
         }
         for name, (path, inventory, message) in cases.items():
             with self.subTest(name):
@@ -287,15 +349,6 @@ class PaneDirectoryTests(unittest.TestCase):
                     remove()
                 self.assertIn(message, str(caught.exception))
                 worktree.remove.assert_not_called()
-        # Python 3.13 and later return a loop unresolved from resolve(),
-        # so the checkout's own status is read as well.
-        worktree, remove = self.unused(loop)
-        with patch("pathlib.Path.resolve", lambda self: self):
-            with self.assertRaises(RetainedError) as caught:
-                remove()
-        self.assertIn(f"cannot resolve review worktree {loop}",
-                      str(caught.exception))
-        worktree.remove.assert_not_called()
         elsewhere = {
             "panes": [{"cwd": str(self.other)}, {"cwd": "relative"},
                       {"cwd": None}, {}],

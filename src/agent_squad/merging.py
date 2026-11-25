@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -387,17 +388,51 @@ def forge_merged_record(
     }, descriptor
 
 
-def marker_in_worktree_slot(repository: Repository, marker: Path) -> bool:
-    """Whether ``marker`` names a cleanup marker directly in one worktree
-    directory of the common Git directory."""
+def file_name_text(value: object) -> bool:
+    """Whether a saved value is text that can name a file system entry or
+    be passed to Git: a non-empty string without a NUL that encodes."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        os.fsencode(value)
+    except ValueError:
+        return False
+    return True
+
+
+def marker_in_worktree_slot(repository: Repository, marker: object) -> bool:
+    """Whether a saved value names a cleanup marker directly in one worktree
+    directory of the common Git directory.
+
+    The text itself is checked, before any path is made from it: a path
+    object drops ``.`` components and repeated separators, and a path with
+    a NUL only reads as one that does not exist. The value must be exactly
+    ``<common>/worktrees/<one name>/<marker>`` (#175).
+    """
+    if not file_name_text(marker):
+        return False
+    prefix = f"{repository.common}/worktrees/"
+    if not marker.startswith(prefix):
+        return False
+    slot, separator, name = marker[len(prefix):].partition("/")
     return (
-        marker.is_absolute()
-        and not any(part in (".", "..") for part in marker.parts)
-        and marker.parent.parent == repository.common / "worktrees"
-        and re.fullmatch(
-            rf"{CLEANUP_MARKER}[0-9a-f]{{32}}", marker.name
-        ) is not None
+        separator == "/"
+        and slot not in ("", ".", "..")
+        and re.fullmatch(rf"{CLEANUP_MARKER}[0-9a-f]{{32}}", name) is not None
     )
+
+
+def marker_remains(marker: Path) -> bool:
+    """Whether the cleanup marker is still there. Only a name that is
+    absent means that it is gone; any other failure to read it raises, so
+    that the step fails instead of taking the checkout for removed."""
+    try:
+        os.lstat(marker)
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ENOTDIR):
+            return False
+        raise
+    return True
 
 
 def merge_record_path(repository: Repository, pr: int) -> Path:
@@ -475,9 +510,8 @@ def load_merge_record(repository: Repository, pr: int) -> dict | None:
         and (
             record["implementation_record"] is None
             if not record["outside_pr_merge"]
-            else isinstance(record["implementation_record"], str)
-            and marker_in_worktree_slot(
-                repository, Path(record["implementation_record"])
+            else marker_in_worktree_slot(
+                repository, record["implementation_record"]
             )
         )
         and type(record["schema_version"]) is int
@@ -490,7 +524,7 @@ def load_merge_record(repository: Repository, pr: int) -> dict | None:
         and type(record["issue"]) is int
         and record["issue"] >= 1
         and all(
-            isinstance(record[key], str) and record[key]
+            file_name_text(record[key])
             and run_git(
                 repository.primary, "check-ref-format",
                 f"refs/heads/{record[key]}",
@@ -673,7 +707,7 @@ def cleanup_merge(
             return True
         if cleanup_marker is None:
             survivors = ownership_records(repository, pr)
-        elif cleanup_marker.exists() or cleanup_marker.is_symlink():
+        elif marker_remains(cleanup_marker):
             survivors = [cleanup_marker]
         else:
             survivors = []
@@ -1173,14 +1207,22 @@ def finish_cleanup(
     ``implementation`` is the open descriptor of the implementation Git
     directory that a first run proved, or None on a run from a saved record.
     """
-    # Read on every run, before any change, so the Implementer can report
-    # whether the merged head was the approved one. It is read from review
-    # evidence alone: fetching the PR head or the commits of earlier reviews
-    # can fail after a merge (E9) and must not strand the cleanup, and
-    # neither must the PR's ordinary conversation, which is not read.
-    approved = approved_review_head(
-        forge.snapshot(pr, conversation=False), repository.configuration
-    )
+    if record["outside_pr_merge"]:
+        # Read on every run for a merge made outside pr merge, before any
+        # change, so the Implementer can report whether the merged head
+        # was the approved one. It is read from review evidence alone:
+        # fetching the PR head or the commits of earlier reviews can fail
+        # after a merge (E9) and must not strand the cleanup, and neither
+        # must the PR's ordinary conversation, which is not read.
+        approved = approved_review_head(
+            forge.snapshot(pr, conversation=False), repository.configuration
+        )
+    else:
+        # pr merge verified this approval before its merge request and
+        # recorded the head. No review is read again: a review dismissed
+        # since then would lose the approval that authorized the merge,
+        # and an unreadable one would strand the cleanup.
+        approved = record["head"]
     # Only the merge commit comes from the forge: a merged Forgejo PR can
     # report a synthetic head branch and an older head (E9).
     return complete_merge(repository, forge, record, merged.merge_commit, {

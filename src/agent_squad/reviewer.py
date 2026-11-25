@@ -371,57 +371,76 @@ def verify_workspace(
     return workspace
 
 
-# A path that is gone: the only failure to read a directory that still
-# says where it was.
+# A name that is not there: the only failure to read a path that still
+# says where the path would be.
 MISSING = (errno.ENOENT, errno.ENOTDIR)
 
 
-def directory_status(path: Path) -> os.stat_result | None:
-    """The directory's status, or None when the path no longer exists.
+def placed_directory(path: str) -> tuple[Path, Path]:
+    """Where a directory is, by the file system's own strict reading.
 
-    Any other failure, such as a parent that cannot be searched or a
-    symlink loop, is raised: the path then says nothing reliable.
+    Returns the directory's place and the part of it that exists. The
+    deepest existing part of ``path`` is resolved strictly: every component
+    and symbolic link on the way is read, and one that cannot be read, or
+    that loops, raises. Nothing is resolved leniently, because a lenient
+    reading skips what it cannot read and can end somewhere else. Only
+    plain names that are absent may follow the existing part. A symbolic
+    link that leads to a missing path, and ``..`` below a missing name,
+    cannot be placed and raise as well (#175).
     """
-    try:
-        return path.stat()
-    except OSError as error:
-        if error.errno in MISSING:
-            return None
-        raise
+    candidate = Path(path)
+    absent: list[str] = []
+    while True:
+        try:
+            existing = Path(os.path.realpath(candidate, strict=True))
+            break
+        except OSError as error:
+            if error.errno not in MISSING:
+                raise
+        try:
+            os.lstat(candidate)
+        except OSError as error:
+            if error.errno not in MISSING:
+                raise
+        else:
+            raise ValueError(f"{candidate} leads to a path that is missing")
+        if candidate.name in ("", ".."):
+            raise ValueError(f"{candidate} is below a path that is missing")
+        absent.append(candidate.name)
+        candidate = candidate.parent
+    return existing.joinpath(*reversed(absent)), existing
 
 
-def directory_in_checkout(path: str, label: str, checkout: Path) -> bool:
+def directory_in_checkout(
+    path: str, label: str, checkout: tuple[Path, Path],
+) -> bool:
     """Whether a directory that Herdr reports is the checkout or lies below
-    it; a directory whose place cannot be established keeps every resource.
+    it; a directory that cannot be placed keeps every resource.
 
-    No lexical prefix is trusted on its own. Resolution without strict
-    checking leaves a component it cannot read unresolved, and it does not
-    correct the spelling on a case-insensitive file system, so an existing
-    ancestor that is the same directory as the checkout also counts.
-    Python 3.11 and 3.12 raise RuntimeError from resolve() for a symlink
-    loop; later versions return the path unresolved, and the status read
-    reports the loop. Only a path that no longer exists is an expected
-    stale entry (#175).
+    ``checkout`` is the checkout's own place from placed_directory(). No
+    path prefix is trusted on its own: a file system that ignores letter
+    case reads another spelling as the same directory and leaves the
+    spelling as given, so the existing part of the directory, or any
+    directory above it, being the same directory as the checkout also
+    counts.
     """
+    home, home_existing = checkout
     try:
-        resolved = Path(path).resolve()
-        present = directory_status(resolved)
-        if resolved.is_relative_to(checkout):
+        place, existing = placed_directory(path)
+        if place.is_relative_to(home):
             return True
-        target = directory_status(checkout)
-        if target is None:
+        if home != home_existing:
+            # The checkout itself is gone; nothing can be that directory.
             return False
-        if present is not None and os.path.samestat(present, target):
-            return True
-        for parent in resolved.parents:
-            status = directory_status(parent)
-            if status is not None and os.path.samestat(status, target):
-                return True
+        target = os.stat(home)
+        return any(
+            os.path.samestat(os.stat(directory), target)
+            for directory in (existing, *existing.parents)
+        )
     except (OSError, RuntimeError, ValueError) as error:
         raise RetainedError(
             f"cannot resolve {label} {path}: {error}"
         ) from None
-    return False
 
 
 def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
@@ -431,8 +450,7 @@ def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
     working directory at or below the checkout (#175).
     """
     try:
-        checkout = worktree.path.resolve()
-        directory_status(checkout)
+        checkout = placed_directory(str(worktree.path))
     except (OSError, RuntimeError, ValueError) as error:
         raise RetainedError(
             f"cannot resolve review worktree {worktree.path}: {error}"

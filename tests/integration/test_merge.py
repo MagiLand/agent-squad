@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from tests._support import FakeClock
-from tests.forge_support import ForgeFixture, is_write
+from tests.forge_support import ForgeFixture
 from agent_squad.github import GitHub
 from agent_squad.initialization import (
     AgentSquadError, RetainedError, git_output, list_worktrees,
@@ -1171,8 +1171,11 @@ class ResumedCleanupTests(unittest.TestCase):
                    for c in self.f.read_model()["calls"])
 
     def writes(self) -> list:
-        # The snapshot read is a GraphQL query sent with POST (#175).
-        return [c for c in self.f.read_model()["calls"] if is_write(c)]
+        return [
+            c for c in self.f.read_model()["calls"]
+            if "--method" in c["arguments"]
+            and c["arguments"][c["arguments"].index("--method") + 1] != "GET"
+        ]
 
     def cleanup(self, expected: int = 0) -> dict:
         merges = self.merge_calls()
@@ -1233,6 +1236,43 @@ class ResumedCleanupTests(unittest.TestCase):
         self.assertEqual(result["fast_forward"]["result"], "up to date")
         self.assert_finished(result)
         self.assertNotIn("pr cleanup", self.merge(expected=4)["error"])
+
+    def assert_recorded_approval(self, result: dict) -> None:
+        self.assertIs(result["merged_outside_pr_merge"], False)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+
+    def test_retry_keeps_the_approval_of_a_review_dismissed_since(
+        self,
+    ) -> None:
+        """#175: the record holds the head pr merge verified as approved;
+        the retry reports it and reads no review."""
+        f = self.f
+        self.stop_at_remote_branch()
+        model = f.read_model()
+        review, = model["prs"]["1"]["reviews"]
+        review["state"] = "DISMISSED"
+        f.save_model(model)
+        result = self.cleanup()
+        self.assert_recorded_approval(result)
+        self.assert_finished(result)
+
+    def test_retry_finishes_while_reviews_cannot_be_read(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        # A page that never advances: any read of the reviews fails.
+        f.settings(page_sizes={"PullRequest.reviews": 0})
+        self.assertEqual(f.run([
+            sys.executable, "-m", "agent_squad", "status", "--pr", "1",
+            "--json",
+        ], cwd=f.repo).returncode, 1)
+        calls = len(f.read_model()["calls"])
+        result = self.cleanup()
+        self.assertFalse(any(
+            "graphql" in c["arguments"] or "/reviews" in c["arguments"][1]
+            for c in f.read_model()["calls"][calls:]))
+        self.assert_recorded_approval(result)
+        self.assert_finished(result)
 
     def test_resumes_after_untracked_file_blocked_the_worktree(self) -> None:
         f = self.f

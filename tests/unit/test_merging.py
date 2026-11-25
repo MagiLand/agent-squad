@@ -320,6 +320,112 @@ class CleanupMarkerTests(unittest.TestCase):
         self.assertEqual(self.markers(parked, self.directory), [])
 
 
+class SavedMarkerPathTests(unittest.TestCase):
+    """#175: the saved marker path is checked as text, when it is read."""
+
+    def setUp(self) -> None:
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.common = Path(temporary.name).resolve()
+        self.repository = SimpleNamespace(common=self.common)
+        self.name = "agent-squad-cleanup-" + "0123456789abcdef" * 2
+        self.slots = f"{self.common}/worktrees"
+
+    def accepted(self, value: object) -> bool:
+        from agent_squad.merging import marker_in_worktree_slot
+
+        return marker_in_worktree_slot(self.repository, value)
+
+    def test_exact_marker_path_is_accepted(self) -> None:
+        for slot in ("issue-1", "issue-11", "a b", "...", "issue-1.lock"):
+            with self.subTest(slot=slot):
+                self.assertTrue(
+                    self.accepted(f"{self.slots}/{slot}/{self.name}"))
+
+    def test_any_other_text_is_refused(self) -> None:
+        slots, name = self.slots, self.name
+        for value in (
+            f"{slots}/./issue-1/{name}", f"{slots}/issue-1/./{name}",
+            f"{slots}/../worktrees/issue-1/{name}",
+            f"{slots}/a/../issue-1/{name}", f"{slots}/../{name}",
+            f"{slots}/./{name}", f"{slots}//{name}", f"{slots}/{name}",
+            f"{slots}//issue-1/{name}", f"{slots}/issue-1//{name}",
+            f"{slots}/issue-1/{name}/", f"{slots}/issue-1/{name}/.",
+            f"{slots}/issue-1/x/{name}", f"{slots}/issue\x00-1/{name}",
+            f"\x00{slots}/issue-1/{name}", f"{slots}/issue-1/{name}\x00",
+            f"{slots}/issue-1/{name}\n", f"{slots}/issue-1/ {name}",
+            f"{slots}/issue-\ud800/{name}", f"{slots}/issue-1/{name[:-1]}",
+            f"{slots}/issue-1/{name}0", f"{slots}/issue-1/{name.upper()}",
+            f"{slots}/issue-1/agent-squad-implementation.json",
+            f"{self.common}/worktrees-2/issue-1/{name}",
+            f"{self.common}/issue-1/{name}", f"worktrees/issue-1/{name}",
+            f"/{slots}/issue-1/{name}", f"{slots}/issue-1", "", None, 1,
+            Path(f"{slots}/issue-1/{name}"), [f"{slots}/issue-1/{name}"],
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(self.accepted(value))
+
+    def test_saved_text_must_be_able_to_name_a_file(self) -> None:
+        from agent_squad.merging import file_name_text
+
+        for value in ("main", "feature/issue-1", "a b", "é"):
+            with self.subTest(value=value):
+                self.assertTrue(file_name_text(value))
+        for value in ("", "a\x00b", "\x00", "x\ud800", None, 1, b"main",
+                      ["main"]):
+            with self.subTest(value=value):
+                self.assertFalse(file_name_text(value))
+
+    def test_marker_is_gone_only_when_its_name_is_absent(self) -> None:
+        from agent_squad.merging import marker_remains
+
+        slot = self.common / "worktrees" / "issue-1"
+        slot.mkdir(parents=True)
+        marker = slot / self.name
+        self.assertFalse(marker_remains(marker))
+        marker.touch()
+        self.assertTrue(marker_remains(marker))
+        marker.unlink()
+        # A marker that is a symlink, even to nothing, is still there.
+        marker.symlink_to(slot / "absent")
+        self.assertTrue(marker_remains(marker))
+        marker.unlink()
+        slot.rmdir()
+        self.assertFalse(marker_remains(marker))
+        # The worktree directory replaced by a file: no marker in it.
+        slot.write_text("x")
+        self.assertFalse(marker_remains(marker))
+        slot.unlink()
+        # A directory that cannot be read says nothing: the step fails.
+        slot.symlink_to(slot.name)
+        with self.assertRaises(OSError):
+            marker_remains(marker)
+
+    def test_unreadable_marker_fails_the_ownership_step(self) -> None:
+        from unittest.mock import Mock
+        from agent_squad.merging import cleanup_merge
+
+        repository = cleanup_repository()
+        repository.common = self.common
+        slot = self.common / "worktrees" / "issue-1"
+        slot.parent.mkdir()
+        slot.symlink_to(slot.name)
+        forge = Mock()
+        with patch("agent_squad.merging.list_worktrees", return_value=[]):
+            steps = cleanup_merge(
+                repository, 2, H, "feature", 1, forge,
+                cleanup_marker=slot / self.name,
+            )
+        self.assertEqual([s["step"] for s in steps],
+                         ["implementation ownership"])
+        self.assertFalse(steps[0]["ok"])
+        self.assertIn("symbolic links", steps[0]["detail"])
+        forge.delete_branch.assert_not_called()
+
+
 class CompleteMergeTests(unittest.TestCase):
     def test_merged_pr_without_merge_commit_is_not_verified(self):
         from types import SimpleNamespace
