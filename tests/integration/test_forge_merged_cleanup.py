@@ -13,6 +13,8 @@ from tests.forge_support import (
 )
 from agent_squad.forge import make_forge
 from agent_squad.initialization import load_initialized_repository
+from agent_squad.conventions import approved_review_head
+from agent_squad.herdr import HerdrError
 from agent_squad.merging import cleanup_pr
 
 COMMAND = "agent-squad pr cleanup --as implementer --pr 1"
@@ -32,6 +34,8 @@ class ForgeMergedCleanup:
     fixture: type[ForgeFixture] = ForgeFixture
     # Forgejo's merge request asks the forge to delete the head branch.
     forge_deletes_branch = False
+    # GitHub reports a dismissed review as DISMISSED (§7.3).
+    dismissed = False
 
     def setUp(self) -> None:
         self.f = self.fixture()
@@ -374,6 +378,101 @@ class ForgeMergedCleanup:
         self.retry_past(self.unrelated_owner(
             self.f.worktree.parent / "issue-9", pr=True))
 
+    def test_reused_git_directory_does_not_block_a_retry(self) -> None:
+        """REV-10: Git gives a new checkout the removed one's directory."""
+        f = self.f
+        target = f.root / "scratch-target"
+        target.mkdir()
+        shutil.rmtree(self.scratch)
+        self.scratch.symlink_to(target)
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        record = (admin / "agent-squad-implementation.json").read_text()
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"], "scratch directory")
+        self.assertFalse(admin.exists())
+        unrelated = f.root / "elsewhere" / f.worktree.name
+        unrelated.parent.mkdir()
+        f.git("worktree", "add", "-b", "elsewhere", str(unrelated))
+        reused = Path(f.git("rev-parse", "--absolute-git-dir", cwd=unrelated))
+        self.assertEqual(reused, admin)
+        (reused / "agent-squad-implementation.json").write_text(record)
+        self.scratch.unlink()
+        second = self.cleanup()
+        self.assertTrue(unrelated.exists())
+        f.git("worktree", "remove", "--force", str(unrelated))
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def edit_review(self, head: str, **values: str) -> None:
+        """Change the one approving review at ``head`` in the fake model."""
+        model = self.f.read_model()
+        reviews = [r for r in model["prs"]["1"]["reviews"]
+                   if r["commit_id"] == head
+                   and "verdict=approved" in r["body"]]
+        self.assertEqual(len(reviews), 1)
+        reviews[0].update(values)
+        self.f.save_model(model)
+
+    def test_approval_tag_without_approved_state_is_not_reported(
+        self,
+    ) -> None:
+        """REV-13: the newer tag sits on a review the forge did not
+        record as an approval."""
+        f = self.f
+        f.review("approved")
+        genuine = self.head
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.review("approved")
+        states = ["COMMENTED"] + (["DISMISSED"] if self.dismissed else [])
+        merge_commit = self.forge_merge("merge")
+        for state in states:
+            with self.subTest(state=state):
+                self.edit_review(self.head, state=state)
+                self.assertIn("forge_state_mismatch", json.dumps(
+                    f.cli("status", "--pr", "1")["diagnostics"]))
+                with patch.dict(os.environ, f.env, clear=True):
+                    repository = load_initialized_repository(f.repo)
+                    forge = make_forge(repository, "implementer")
+                    self.assertEqual(approved_review_head(
+                        forge.snapshot(1), repository.configuration),
+                        genuine)
+        (f.worktree / "untracked.txt").write_text("retain")
+        self.assertEqual(self.cleanup(expected=3)["approved_head"], genuine)
+        self.edit_review(self.head, state="APPROVED")
+        (f.worktree / "untracked.txt").unlink()
+        second = self.cleanup()
+        self.assertEqual(second["approved_head"], self.head)
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def test_invalid_changes_request_does_not_hide_the_approval(
+        self,
+    ) -> None:
+        """REV-14: a changes_requested review with only an optional
+        finding and no NOT FIXED is invalid, so it reserves no ID."""
+        f = self.f
+        f.review("approved", [finding("optional")])
+        first = self.head
+        model = f.read_model()
+        original = next(r for r in model["prs"]["1"]["reviews"]
+                        if r["commit_id"] == first
+                        and "verdict=approved" in r["body"])["body"]
+        self.edit_review(first, body=original.replace(
+            "verdict=approved", "verdict=changes_requested", 1))
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.review("approved")
+        self.edit_review(self.head, body=original.replace(first, self.head))
+        status = f.cli("status", "--pr", "1")
+        self.assertIn("changes_requested has no blocking finding",
+                      json.dumps(status["diagnostics"]))
+        self.assertEqual(
+            [r["head"] for r in status["reviews"]
+             if r["verdict"] == "approved"], [self.head])
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+        self.assert_finished(result, merge_commit)
+
     def test_malformed_newer_approval_is_not_the_approved_head(self) -> None:
         """REV-11: an approval whose Unanchored findings repeat an entry."""
         f = self.f
@@ -448,6 +547,8 @@ class ForgeMergedCleanup:
         self.assertEqual(result["merge_record"]["reason"], "disk full")
         self.assertEqual(self.writes(), writes)
         self.assertFalse(self.record.exists())
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        self.assertEqual(list(admin.glob("agent-squad-cleanup-*")), [])
         self.assert_retained_unrecorded(result)
         self.assert_finished(self.cleanup(), merge_commit)
 
@@ -619,13 +720,16 @@ class ForgeMergedCleanup:
         # Step 5 runs whatever the cleanup's outcome.
         self.assertEqual(first["fast_forward"]["result"], "fast-forwarded")
         admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
-        self.assertEqual(json.loads(self.record.read_text()), {
+        saved = json.loads(self.record.read_text())
+        marker = Path(saved.pop("implementation_record"))
+        self.assertEqual(marker.parent, admin.resolve())
+        self.assertRegex(marker.name, r"^agent-squad-cleanup-[0-9a-f]{32}$")
+        self.assertTrue(marker.is_file())
+        self.assertEqual(saved, {
             "schema_version": 1, "common": str(f.repo / ".git"), "pr": 1,
             "head": self.head, "head_branch": "issue-1",
             "base_branch": "main", "merge_method": "squash",
             "moved_base": False, "issue": 1, "outside_pr_merge": True,
-            "implementation_record": str(
-                admin.resolve() / "agent-squad-implementation.json"),
         })
         (f.worktree / "untracked.txt").unlink()
         second = self.cleanup()
@@ -677,6 +781,7 @@ class ForgeMergedCleanup:
 
 class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
     fixture = ForgeFixture
+    dismissed = True
 
     def test_running_reviewer_is_closed_and_listed(self) -> None:
         f = self.f
@@ -744,6 +849,132 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         second = self.cleanup()
         self.assertFalse(review.exists())
         self.assert_finished(second, merge_commit, "up to date")
+
+    def unregistered_reviewer(self) -> tuple[Path, dict]:
+        f = self.f
+        f.herdr_settings(implementer={"cwd": str(f.worktree)})
+        review = Path(f.cli("reviewer", "launch", "--pr", "1")["worktree"])
+        model = f.herdr_model()
+        workspace = next(w for w in model["workspaces"]
+                         if (w.get("worktree") or {}).get("checkout_path")
+                         == str(review))
+        workspace["worktree"] = None
+        f.save_herdr(model)
+        return review, workspace
+
+    def test_failed_owner_write_after_closure_is_recovered(self) -> None:
+        """REV-12: the ownership rewrite fails after Herdr closed the
+        workspace; the retry confirms the closure and finishes."""
+        f = self.f
+        review, workspace = self.unregistered_reviewer()
+        merge_commit = self.forge_merge("merge")
+        with patch.dict(os.environ, f.env, clear=True), patch(
+            "agent_squad.reviewer.ReviewWorktree.save_owner",
+            side_effect=OSError("disk full"),
+        ):
+            repository = load_initialized_repository(f.repo)
+            first = cleanup_pr(
+                repository, make_forge(repository, "implementer"), 1)
+        failed = first["cleanup"][-1]
+        self.assertEqual(failed["step"], "review worktree")
+        self.assertIn(
+            f"Herdr workspace {workspace['workspace_id']} closed; then"
+            " disk full", failed["detail"])
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+        self.assertTrue(review.exists())
+        second = self.cleanup()
+        closed = [s for s in second["cleanup"]
+                  if s["step"] == "review worktree"]
+        self.assertEqual(closed[0]["detail"]["workspace"], "already closed")
+        self.assertEqual(closed[0]["detail"]["workspace_id"],
+                         workspace["workspace_id"])
+        self.assertFalse(review.exists())
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def test_failed_lookup_keeps_a_listed_workspace(self) -> None:
+        """REV-12: a failed workspace lookup removes the checkout only when
+        a fresh inventory with valid identities no longer lists it."""
+        f = self.f
+        review, workspace = self.unregistered_reviewer()
+        merge_commit = self.forge_merge("merge")
+        stray = {"workspace_id": "", "label": "stray", "tab_count": 0,
+                 "pane_count": 0, "worktree": None}
+        for name, extra in (("still listed", None),
+                            ("invalid identity", stray)):
+            with self.subTest(name):
+                model = f.herdr_model()
+                if extra is not None:
+                    model["workspaces"] = [extra]
+                    f.save_herdr(model)
+                with patch.dict(os.environ, f.env, clear=True), patch(
+                    "agent_squad.herdr.HerdrClient.workspace",
+                    side_effect=HerdrError("lookup failed"),
+                ):
+                    repository = load_initialized_repository(f.repo)
+                    result = cleanup_pr(
+                        repository, make_forge(repository, "implementer"), 1)
+                failed = result["cleanup"][-1]
+                self.assertEqual(failed["step"], "review worktree")
+                self.assertIn("lookup failed", failed["detail"])
+                self.assertTrue(review.exists())
+        model = f.herdr_model()
+        model["workspaces"] = [workspace]
+        f.save_herdr(model)
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def test_pane_in_the_checkout_keeps_it_on_a_retry(self) -> None:
+        """REV-15: an unowned pane works inside the closed Reviewer's
+        checkout, in a workspace with no worktree registration."""
+        f = self.f
+        review, workspace = self.unregistered_reviewer()
+        f.git("worktree", "lock", str(review))
+        merge_commit = self.forge_merge("merge")
+        self.cleanup(expected=3)
+        model = f.herdr_model()
+        self.assertEqual(model["workspaces"], [])
+        model["workspaces"].append({
+            "workspace_id": "w-other", "label": "other", "tab_count": 1,
+            "pane_count": 1, "active_tab_id": "w-other:t1",
+            "worktree": None,
+        })
+        model["tabs"].append(
+            {"workspace_id": "w-other", "tab_id": "w-other:t1"})
+        model["panes"].append({
+            "workspace_id": "w-other", "tab_id": "w-other:t1",
+            "pane_id": "w-other:p1", "terminal_id": "w-other-terminal",
+            "cwd": str(review / "src"), "agent": None,
+            "agent_status": "unknown",
+        })
+        f.save_herdr(model)
+        f.git("worktree", "unlock", str(review))
+        kept = self.cleanup(expected=3)
+        self.assertEqual(kept["cleanup"][-1]["step"], "review worktree")
+        self.assertIn("an unowned Herdr pane still uses this worktree",
+                      kept["cleanup"][-1]["detail"])
+        self.assertTrue(review.exists())
+        model = f.herdr_model()
+        for key in ("workspaces", "tabs", "panes"):
+            model[key] = [x for x in model[key]
+                          if x["workspace_id"] != "w-other"]
+        f.save_herdr(model)
+        self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def test_pr_merge_names_cleanup_despite_failing_branch_rules(
+        self,
+    ) -> None:
+        """REV-16: the merged-PR refusal comes before the rules read."""
+        f = self.f
+        self.forge_merge("merge")
+        f.settings(protection="incomplete branch rule response")
+        calls = len(f.read_model()["calls"])
+        writes = self.writes()
+        refused = self.pr("merge", 4)
+        self.assertIn("merged outside pr merge", refused["error"])
+        self.assertIn(COMMAND, refused["error"])
+        self.assertEqual(self.writes(), writes)
+        self.assertFalse(any(
+            "protection" in call_path(c) or "/rules/" in call_path(c)
+            for c in f.read_model()["calls"][calls:]))
 
     def test_moved_original_checkout_still_blocks_a_retry(self) -> None:
         """REV-10 control: the proved record survives a moved checkout."""
@@ -821,11 +1052,15 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         f.settings(branch_delete_403=False)
         owner = str(self.f.repo / ".git/worktrees/issue-1"
                     / "agent-squad-implementation.json")
+        marker = "agent-squad-cleanup-" + "0" * 32
+        climbing = str(self.f.repo / ".git/worktrees/.." / marker)
         for values in (
             {"outside_pr_merge": "true"}, {"outside_pr_merge": 1},
             {"outside_pr_merge": None},
             {"outside_pr_merge": True},
             {"outside_pr_merge": True, "implementation_record": "x.json"},
+            {"outside_pr_merge": True, "implementation_record": owner},
+            {"outside_pr_merge": True, "implementation_record": climbing},
             {"implementation_record": owner},
         ):
             with self.subTest(values=values):

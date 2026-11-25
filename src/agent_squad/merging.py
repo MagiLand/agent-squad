@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import tempfile
+import uuid
 from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
@@ -29,6 +30,9 @@ from .initialization import (
 from .reviewer import ReviewWorktree, close_reviewer
 
 IMPLEMENTATION_OWNER = "agent-squad-implementation.json"
+# A file in the proved implementation Git directory that names one
+# occurrence of the checkout for a retried cleanup (#175).
+CLEANUP_MARKER = "agent-squad-cleanup-"
 MERGE_RECORD_FIELDS = frozenset({
     "schema_version", "common", "pr", "head", "head_branch", "base_branch",
     "merge_method", "moved_base", "issue", "outside_pr_merge",
@@ -312,12 +316,23 @@ def forge_merged_record(
         "moved_base": False,
         "issue": issue,
         "outside_pr_merge": True,
-        # A retry recognizes the original checkout's record by its place,
-        # since an unrelated copy can have identical content (#175).
-        "implementation_record": str(
-            owner_record.parent.resolve() / IMPLEMENTATION_OWNER
-        ),
+        # The proved checkout's Git directory; complete_merge replaces it
+        # with a marker that only this occurrence of the checkout holds.
+        "implementation_record": str(owner_record.parent.resolve()),
     }
+
+
+def marker_in_worktree_slot(repository: Repository, marker: Path) -> bool:
+    """Whether ``marker`` names a cleanup marker directly in one worktree
+    directory of the common Git directory."""
+    return (
+        marker.is_absolute()
+        and not any(part in (".", "..") for part in marker.parts)
+        and marker.parent.parent == repository.common / "worktrees"
+        and re.fullmatch(
+            rf"{CLEANUP_MARKER}[0-9a-f]{{32}}", marker.name
+        ) is not None
+    )
 
 
 def merge_record_path(repository: Repository, pr: int) -> Path:
@@ -396,10 +411,9 @@ def load_merge_record(repository: Repository, pr: int) -> dict | None:
             record["implementation_record"] is None
             if not record["outside_pr_merge"]
             else isinstance(record["implementation_record"], str)
-            and Path(record["implementation_record"]).parent.parent
-            == repository.common / "worktrees"
-            and Path(record["implementation_record"]).name
-            == IMPLEMENTATION_OWNER
+            and marker_in_worktree_slot(
+                repository, Path(record["implementation_record"])
+            )
         )
         and type(record["schema_version"]) is int
         and record["schema_version"] == 1
@@ -550,13 +564,14 @@ def merged_source(
 
 def cleanup_merge(
     repository: Repository, pr: int, head: str, branch: str, issue: int,
-    forge: Forge, *, owner_record: Path | None = None,
+    forge: Forge, *, cleanup_marker: Path | None = None,
 ) -> list[dict]:
     """Stop on a failed step; preserve unrelated or replaced resources.
 
-    ``owner_record`` is the ownership record proved for a merge made
-    outside pr merge (#175): after the worktree is gone, only that record
-    surviving refuses the step, since others neither block nor authorize
+    ``cleanup_marker`` is the marker left in the proved implementation Git
+    directory for a merge made outside pr merge (#175): after the worktree
+    is gone, only that marker surviving, which means the original checkout
+    was moved, refuses the step; other records neither block nor authorize
     that cleanup. Without it, any record that may be the PR's refuses.
 
     The identities come from the merge record, so a repeated run finishes
@@ -589,10 +604,10 @@ def cleanup_merge(
             for w in list_worktrees(repository.primary)
         ):
             return True
-        if owner_record is None:
+        if cleanup_marker is None:
             survivors = ownership_records(repository, pr)
-        elif owner_record.exists() or owner_record.is_symlink():
-            survivors = [owner_record]
+        elif cleanup_marker.exists() or cleanup_marker.is_symlink():
+            survivors = [cleanup_marker]
         else:
             survivors = []
         if survivors:
@@ -861,13 +876,28 @@ def complete_merge(
     if record["merge_method"] is None:
         method = PROVED_METHODS[result["integration"]]
         result["merge_method"] = method
+        # Git reuses a removed worktree's directory name, and an unrelated
+        # record can have identical content, so a retry recognizes the
+        # original checkout only by this marker in its Git directory (#175).
+        marker = Path(record["implementation_record"]) / (
+            f"{CLEANUP_MARKER}{uuid.uuid4().hex}"
+        )
+        created = False
         try:
+            marker.touch(exist_ok=False)
+            created = True
             record = write_merge_record(
                 repository, pr, record, method, False, outside=True,
-                implementation_record=record["implementation_record"],
+                implementation_record=str(marker),
             )
         except (AgentSquadError, OSError, ValueError) as error:
             result["merge_record"]["reason"] = str(error)
+            if created:
+                # No record names it; leave the Git directory as it was.
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
             return {
                 **result, "exit_code": 1, "cleanup": [],
                 "resources_retained": True,
@@ -878,7 +908,7 @@ def complete_merge(
         result["cleanup"] = cleanup_merge(
             repository, pr, record["head"], record["head_branch"],
             record["issue"], forge,
-            owner_record=(
+            cleanup_marker=(
                 Path(record["implementation_record"])
                 if record["outside_pr_merge"] else None
             ),
@@ -909,17 +939,12 @@ def merge_pr(
     repository: Repository, forge: Forge, pr: int,
     *, accept_moved_base: bool = False, accept_merge_hold: bool = False,
 ) -> dict:
-    snapshot = forge.snapshot(pr)
-    rules = (
-        forge.branch_rules(snapshot.pr.base_branch)
-        if forge.can_read_branch_rules else {"visibility": "not visible"}
-    )
-    # Re-read authority after the potentially slow rules lookup.
-    snapshot = forge.snapshot(pr)
-    if snapshot.pr.merged:
-        # Refused from the merged state and local records alone, before any
-        # read of the PR head, which a merged Forgejo PR may report stale
-        # (E9) so that fetching it fails (#175).
+    def refuse_merged(merged: PullRequest) -> None:
+        if not merged.merged:
+            return
+        # Refused from the merged state and local records alone, before the
+        # branch rules or any read of the PR head, which a merged Forgejo PR
+        # may report stale (E9) so that fetching it fails (#175).
         path = merge_record_path(repository, pr)
         refused = "pr merge refused: PR is not open"
         if path.exists() or path.is_symlink():
@@ -934,6 +959,16 @@ def merge_pr(
                 f" cleanup, run {cleanup_command(pr)}"
             )
         raise GateError(refused)
+
+    snapshot = forge.snapshot(pr)
+    refuse_merged(snapshot.pr)
+    rules = (
+        forge.branch_rules(snapshot.pr.base_branch)
+        if forge.can_read_branch_rules else {"visibility": "not visible"}
+    )
+    # Re-read authority after the potentially slow rules lookup.
+    snapshot = forge.snapshot(pr)
+    refuse_merged(snapshot.pr)
     state = state_for(repository, snapshot)
     moved = check_merge_gate(
         state, accept_moved_base=accept_moved_base,

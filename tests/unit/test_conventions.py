@@ -12,6 +12,7 @@ from agent_squad.conventions import (  # noqa: E402
     MERGE_INSTRUCTION,
     MERGE_WITHDRAWAL,
     allocate_id,
+    approved_review_head,
     closes_issue,
     copied_task,
     decision_record,
@@ -1130,6 +1131,40 @@ class DerivedStateTests(unittest.TestCase):
                 self.assertEqual(state["budget"]["used"], 1)
                 self.assertEqual(
                     state["diagnostics"][0]["kind"], "malformed_review"
+                )
+
+    def test_approved_head_reader_checks_changes_requested_like_derive(
+        self,
+    ) -> None:
+        """#175: a changes_requested review that lists only an optional
+        finding is valid after an in-pass NOT FIXED, and then reserves its
+        ID, so a later approval repeating that ID is not approved_head."""
+        opened = review(
+            10, "changes_requested", findings="REV-1 [blocking] Finding"
+        )
+        optional = review(
+            13, "changes_requested", findings="REV-2 [optional] Finding"
+        )
+        repeated = review(15, findings="REV-2 [optional] Finding")
+        cases = [
+            (reply(12, "NOT FIXED", author="reviewer"), None, 2),
+            (reply(9, "NOT FIXED", author="reviewer"), H, 1),
+            (reply(14, "NOT FIXED", author="reviewer"), H, 1),
+            (reply(12, "NOT FIXED", author="dev"), H, 1),
+        ]
+        for verify, head, valid in cases:
+            with self.subTest(at=verify.evidence.id,
+                              author=verify.evidence.author):
+                s = snapshot(
+                    reviews=(opened, optional, repeated),
+                    comments=(root(), verify),
+                )
+                self.assertEqual(approved_review_head(s, config()), head)
+                state = derive_state(s)
+                self.assertEqual(
+                    [r["id"] for r in state["reviews"]
+                     if r["verdict"] == "changes_requested"],
+                    [10, 13][:valid],
                 )
 
     def test_review_target_and_submission_validity(self) -> None:

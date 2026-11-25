@@ -570,21 +570,58 @@ def checked_review(
     return listed
 
 
+def check_changes_requested(
+    verdict: str, listed: list[dict[str, str]], review: Evidence,
+    prior: Evidence | dict | None, not_fixed: list[Evidence],
+) -> None:
+    """A changes_requested review needs a blocking finding, or a NOT FIXED
+    verification posted since the previous accepted review."""
+    if (
+        verdict == "changes_requested"
+        and not any(f["severity"] == "blocking" for f in listed)
+        and not any(
+            not newer(reply, review) and newer(reply, prior)
+            for reply in not_fixed
+        )
+    ):
+        raise AgentSquadError(
+            "changes_requested has no blocking finding or NOT FIXED in"
+            " this pass"
+        )
+
+
 def approved_review_head(
     snapshot: Snapshot, config: Configuration,
 ) -> str | None:
     """The head the latest tagged approving review names, from evidence only.
 
     It applies derive()'s checks that need no Git object (checked_review,
-    the Unanchored findings section, and an approval listing no blocking
-    finding), in the same evidence order. Its Git ancestry checks, and the
-    thread state that needs them, are left out, so no object is read or
-    fetched. pr cleanup reports this for information after the forge
-    merged (#175).
+    check_changes_requested, the Unanchored findings section, and an
+    approval listing no blocking finding), in the same evidence order, and
+    counts an approval only in the forge's approved state (§7.3). Its Git
+    ancestry checks, and the thread state that needs them, are left out, so
+    no object is read or fetched. pr cleanup reports this for information
+    after the forge merged (#175).
     """
     reviewer = config.reviewer.forge_account.casefold()
     head = None
     seen_ids: set[str] = set()
+    prior: Evidence | None = None
+    not_fixed = []
+    for comment in snapshot.comments:
+        if comment.in_reply_to_id is None:
+            continue
+        try:
+            line = parse_line(first_line(comment.evidence.body))
+        except AgentSquadError:
+            continue
+        if (
+            line is not None
+            and line.kind == "verification"
+            and comment.evidence.author.casefold() == reviewer
+            and line.fields.get("verification") == "NOT FIXED"
+        ):
+            not_fixed.append(comment.evidence)
     for review in sorted(snapshot.reviews, key=lambda r: order(r.evidence)):
         e = review.evidence
         try:
@@ -598,14 +635,18 @@ def approved_review_head(
             listed = checked_review(
                 review, parsed.fields, snapshot.pr.number, seen_ids,
             )
-            approved = parsed.fields["verdict"] == "approved"
+            verdict = parsed.fields["verdict"]
+            approved = verdict == "approved"
             if approved and any(f["severity"] == "blocking" for f in listed):
                 continue
+            check_changes_requested(verdict, listed, e, prior, not_fixed)
             unanchored_text(e.body)
         except (AgentSquadError, ValueError):
             continue
         seen_ids.update(f["finding"] for f in listed)
-        if approved:
+        prior = e
+        # A tag that its forge state does not mirror is not an approval.
+        if approved and review.state == requested_state(verdict):
             head = parsed.fields["head"]
     return head
 
@@ -811,23 +852,15 @@ def derive(
                 raise AgentSquadError(
                     "approved review has unsettled blocking findings"
                 )
-            prior = reviews[-1] if reviews else None
-            not_fixed = any(
-                p.fields.get("verification") == "NOT FIXED"
-                and not newer(reply, e)
-                and newer(reply, prior)
-                for entries in parsed_replies.values()
-                for reply, p in entries
+            check_changes_requested(
+                verdict, listed, e, reviews[-1] if reviews else None,
+                [
+                    reply
+                    for entries in parsed_replies.values()
+                    for reply, p in entries
+                    if p.fields.get("verification") == "NOT FIXED"
+                ],
             )
-            if (
-                verdict == "changes_requested"
-                and not any(f["severity"] == "blocking" for f in listed)
-                and not not_fixed
-            ):
-                raise AgentSquadError(
-                    "changes_requested has no blocking finding or NOT FIXED in"
-                    " this pass"
-                )
             fallback = unanchored_text(e.body)
         except AgentSquadError as error:
             diagnostic("malformed_review", e, str(error))

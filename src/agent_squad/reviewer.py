@@ -370,31 +370,68 @@ def verify_workspace(
     return workspace
 
 
+def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
+    """Remove an owned checkout that no Herdr workspace or pane still uses.
+
+    A workspace counts by its worktree registration, and a pane by a
+    working directory at or below the checkout (#175).
+    """
+    checkout = worktree.path.resolve()
+    for workspace in resource_objects(snapshot, "workspaces"):
+        registration = workspace.get("worktree") or {}
+        if not isinstance(registration, dict):
+            raise RetainedError("Herdr worktree inventory is invalid")
+        if registration.get("checkout_path") == str(worktree.path):
+            raise RetainedError(
+                "an unowned Herdr workspace still uses this worktree"
+            )
+    for pane in resource_objects(snapshot, "panes"):
+        cwd = pane.get("cwd")
+        if isinstance(cwd, str) and Path(cwd).is_absolute() and (
+            Path(cwd).resolve().is_relative_to(checkout)
+        ):
+            raise RetainedError(
+                "an unowned Herdr pane still uses this worktree"
+            )
+    return worktree.remove()
+
+
 def close_reviewer(worktree: ReviewWorktree, client: HerdrClient) -> dict:
     """Remove only an owned checkout and its isolated Herdr workspace."""
     owner = worktree.owner()
     resource = owner["herdr"]
     try:
         if resource is None:
-            for workspace in resource_objects(client.snapshot(), "workspaces"):
-                registration = workspace.get("worktree") or {}
-                if not isinstance(registration, dict):
-                    raise RetainedError("Herdr worktree inventory is invalid")
-                if registration.get("checkout_path") == str(worktree.path):
-                    raise RetainedError(
-                        "an unowned Herdr workspace still uses this worktree"
-                    )
-            return worktree.remove()
-        workspace = verify_workspace(worktree, client, resource)
+            return remove_unused_checkout(worktree, client.snapshot())
+        try:
+            workspace = verify_workspace(worktree, client, resource)
+        except HerdrError:
+            # An earlier run may have closed the unregistered workspace and
+            # then failed before recording it (#175). Only a fresh inventory
+            # without that workspace lets the checkout go, and only while
+            # nothing else uses it.
+            snapshot = client.snapshot()
+            present = [
+                w.get("workspace_id")
+                for w in resource_objects(snapshot, "workspaces")
+            ]
+            if resource["workspace_id"] in present or any(
+                not isinstance(ident, str) or not ident for ident in present
+            ):
+                raise
+            return {
+                **remove_unused_checkout(worktree, snapshot), **resource,
+                "workspace": "already closed",
+            }
         if workspace.get("worktree") is None:
             client.close_workspace(resource["workspace_id"])
             # Record the confirmed closure before removing the checkout: a
             # retry after a failed removal then takes the path above, which
-            # no longer looks up the closed workspace but still refuses an
-            # unowned workspace that uses the checkout (#175).
-            worktree.save_owner({**worktree.identity(), "herdr": None})
+            # no longer looks up the closed workspace but still refuses a
+            # workspace or pane that uses the checkout (#175).
             try:
-                removed = worktree.remove()
+                worktree.save_owner({**worktree.identity(), "herdr": None})
+                removed = remove_unused_checkout(worktree, client.snapshot())
             except (AgentSquadError, OSError, ValueError) as error:
                 raise RetainedError(
                     f"Herdr workspace {resource['workspace_id']} closed;"
