@@ -435,11 +435,13 @@ asking and reports a second failure to you.
 The same command finishes a PR that the forge merged without `pr merge`, for
 example through a merge train. It proves from the implementation ownership
 record that the PR is the loop's own, verifies that the merge commit contains
-the local head (by ancestry, or by tree identity for a squash onto an unmoved
-base), writes a merge record, and runs the same cleanup steps, including
+the local head (by ancestry, or for a squash onto an unmoved base by tree
+identity, the last pushed head, and the merge commit's parent), writes a merge
+record, and runs the same cleanup steps, including
 closing any Reviewer still working on the PR. Its result carries
-`merged_outside_pr_merge: true` and `approved_head`, and the Implementer
-reports to you that the PR was merged outside the loop.
+`merged_outside_pr_merge: true`, `approved_head`, and `merged_head`, and the
+Implementer reports to you that the PR was merged outside the loop and whether
+the merged source was the approved head.
 
 ## What the tool records locally
 

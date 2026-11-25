@@ -7,9 +7,12 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from tests.forge_support import ForgeFixture, ForgejoFixture, is_write
+from tests.forge_support import (
+    ForgeFixture, ForgejoFixture, finding, is_write,
+)
 from agent_squad.forge import make_forge
 from agent_squad.initialization import load_initialized_repository
+from agent_squad.merging import cleanup_pr
 
 COMMAND = "agent-squad pr cleanup --as implementer --pr 1"
 
@@ -48,13 +51,47 @@ class ForgeMergedCleanup:
         config["merge_method"] = method
         path.write_text(json.dumps(config))
 
-    def forge_merge(self, method: str) -> str:
+    def forge_merge(self, method: str, head: str | None = None) -> str:
         """Merge on the forge, as a merge train would, with no pr merge."""
         with patch.dict(os.environ, self.f.env, clear=True):
             repository = load_initialized_repository(self.f.repo)
             merged = make_forge(repository, "implementer").merge(
-                1, self.head, method)
+                1, head or self.head, method)
         return merged["sha"]
+
+    def edit_pr(self, **values: object) -> None:
+        """Change the fake forge's record of PR #1 directly."""
+        model = self.f.read_model()
+        pr = model["prs"]["1"]
+        for key, value in values.items():
+            if key in ("head_sha", "head_ref", "base_ref"):
+                side, field = key.split("_")
+                pr[side]["sha" if field == "sha" else "ref"] = value
+            else:
+                pr[key] = value
+        self.f.save_model(model)
+
+    def clone(self, name: str) -> Path:
+        path = self.f.root / name
+        self.f.git("clone", "--quiet", str(self.f.origin), str(path))
+        return path
+
+    def land_on_main(self, *commits: str) -> str:
+        """Put commits on the remote base as a forge would, then mark PR #1
+        merged at the last one."""
+        f = self.f
+        other = self.clone("lander")
+        for commit in commits:
+            f.git("cherry-pick", "--allow-empty", commit, cwd=other)
+            # A new message keeps each rebased SHA distinct even when the
+            # pick lands within the same second on the same parent.
+            f.git("commit", "--amend", "--allow-empty", "-m",
+                  f"test: rebased {commit}", cwd=other)
+        f.git("push", "--quiet", "origin", "HEAD:refs/heads/main", cwd=other)
+        merge_commit = f.git("rev-parse", "HEAD", cwd=other)
+        self.edit_pr(merged=True, state="closed",
+                     merge_commit_sha=merge_commit)
+        return merge_commit
 
     def merge_requests(self) -> int:
         return sum(call_path(c).endswith("/merge")
@@ -113,13 +150,21 @@ class ForgeMergedCleanup:
         self.assertEqual(f.git("status", "--porcelain"), "")
 
     def assert_retained(self, result: dict) -> None:
+        self.assertFalse(self.record.exists())
+        self.assertIsNone(result["merged_head"])
+        self.assert_retained_unrecorded(result)
+
+    def assert_retained_unrecorded(self, result: dict) -> None:
         f = self.f
+        self.assertEqual(result["exit_code"], 1)
         self.assertEqual(result["cleanup"], [])
         self.assertTrue(result["resources_retained"])
         self.assertEqual(result["cleanup_command"], COMMAND)
         self.assertEqual(result["fast_forward"]["result"], "skipped")
         self.assertEqual(result["merge_record"]["result"], "not written")
-        self.assertFalse(self.record.exists())
+        self.assertNotEqual(
+            f.git("ls-remote", "--heads", "origin", "issue-1")
+            if not self.forge_deletes_branch else "kept", "")
         self.assertTrue(f.worktree.exists())
         self.assertNotEqual(f.git("branch", "--list", "issue-1"), "")
         self.assertTrue(self.scratch.exists())
@@ -164,6 +209,194 @@ class ForgeMergedCleanup:
         self.assertNotEqual(result["approved_head"], result["head"])
         self.assert_finished(result, merge_commit)
 
+    def test_latest_of_several_approvals_is_the_approved_head(self) -> None:
+        f = self.f
+        f.review("approved")
+        second = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.review("approved")
+        self.head = f.push(
+            "value = 1\nsecond = 2\nthird = 3\nmore = 4\nlast = 5\n")
+        f.review("changes_requested", [finding()])
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertEqual(result["approved_head"], second)
+        self.assert_finished(result, merge_commit)
+
+    def test_merged_head_is_the_merge_commit_second_parent(self) -> None:
+        f = self.f
+        f.review("approved")
+        other = self.clone("second-clone")
+        f.git("switch", "issue-1", cwd=other)
+        (other / "unreviewed.txt").write_text("unreviewed\n")
+        f.git("add", "unreviewed.txt", cwd=other)
+        f.git("commit", "-m", "test: push on top", cwd=other)
+        f.git("push", "--quiet", "origin", "issue-1", cwd=other)
+        pushed = f.git("rev-parse", "HEAD", cwd=other)
+        self.forge_merge("merge", head=pushed)
+        if not self.forge_deletes_branch:
+            # Otherwise cleanup keeps the branch, which no longer points at
+            # the local head.
+            f.git("push", "--quiet", "origin", ":refs/heads/issue-1",
+                  cwd=other)
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["head"], self.head)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], pushed)
+        self.assertEqual(result["forge_head_branch"], "issue-1")
+        self.assertIs(result["merged_outside_pr_merge"], True)
+
+    def test_merged_head_after_squash_is_the_head(self) -> None:
+        merge_commit = self.forge_merge("squash")
+        result = self.cleanup()
+        self.assertEqual(result["merged_head"], self.head)
+        self.assert_finished(result, merge_commit)
+
+    def test_merged_head_is_null_when_the_source_is_unknown(self) -> None:
+        # A one-parent merge commit above the head: ancestry holds, but no
+        # commit is proved to be the merged source.
+        f = self.f
+        f.commit("value = 1\nsecond = 2\nthird = 3\nabove = 4\n")
+        above = f.git("rev-parse", "HEAD", cwd=f.worktree)
+        f.git("push", "--quiet", "origin", "HEAD:refs/heads/main",
+              cwd=f.worktree)
+        f.git("reset", "--hard", self.head, cwd=f.worktree)
+        self.edit_pr(merged=True, state="closed", merge_commit_sha=above)
+        merge_commit = above
+        result = self.cleanup()
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertIsNone(result["merged_head"])
+        self.assertEqual(result["merge_commit"], merge_commit)
+        self.assertEqual(result["exit_code"], 0)
+
+    def test_stale_forge_head_changes_no_cleanup(self) -> None:
+        """REV-2: a merged PR reporting a head the remote does not serve."""
+        f = self.f
+        f.review("approved")
+        (f.worktree / "untracked.txt").write_text("retain")
+        merge_commit = self.forge_merge("merge")
+        stale = "0123456789abcdef" * 2 + "01234567"
+        self.edit_pr(head_sha=stale, head_ref="synthetic-pull-ref")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"],
+                         "implementation worktree")
+        self.assertEqual(first["forge_head"], stale)
+        (f.worktree / "untracked.txt").unlink()
+        second = self.cleanup()
+        self.assertEqual(second["forge_head"], stale)
+        self.assertEqual(second["forge_head_branch"], "synthetic-pull-ref")
+        self.assertEqual(second["approved_head"], self.head)
+        self.assertEqual(second["head"], self.head)
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def test_merged_pr_without_merge_commit_or_on_another_base_is_refused(
+        self,
+    ) -> None:
+        f = self.f
+        self.forge_merge("merge")
+        f.git("push", "--quiet", "origin", "main:refs/heads/release")
+        model = f.read_model()
+        original = dict(model["prs"]["1"], base=dict(
+            model["prs"]["1"]["base"]))
+        for case, values, text in (
+            ("no merge commit", {"merge_commit_sha": None},
+             "reports no merge commit"),
+            ("another base", {"base_ref": "release"},
+             "base branch release is not the configured base branch main"),
+        ):
+            with self.subTest(case=case):
+                self.edit_pr(**values)
+                worktrees = f.git("worktree", "list", "--porcelain")
+                writes = self.writes()
+                result = self.cleanup(expected=4)
+                self.assertIn(text, result["error"])
+                self.assertEqual(
+                    f.git("worktree", "list", "--porcelain"), worktrees)
+                self.assertEqual(self.writes(), writes)
+                self.assertFalse(self.record.exists())
+                self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+                model = f.read_model()
+                model["prs"]["1"] = dict(original, base=dict(
+                    original["base"]))
+                f.save_model(model)
+        self.assertEqual(self.cleanup()["exit_code"], 0)
+
+    def test_unwritable_record_retains_everything_until_a_retry(self) -> None:
+        f = self.f
+        merge_commit = self.forge_merge("merge")
+        writes = self.writes()
+        with patch.dict(os.environ, f.env, clear=True):
+            repository = load_initialized_repository(f.repo)
+            with patch("agent_squad.merging.write_merge_record",
+                       side_effect=OSError("disk full")):
+                result = cleanup_pr(
+                    repository, make_forge(repository, "implementer"), 1)
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["merge_record"]["reason"], "disk full")
+        self.assertEqual(self.writes(), writes)
+        self.assertFalse(self.record.exists())
+        self.assert_retained_unrecorded(result)
+        self.assert_finished(self.cleanup(), merge_commit)
+
+    def test_unpushed_file_neutral_commit_after_a_merge_is_retained(
+        self,
+    ) -> None:
+        f = self.f
+        self.forge_merge("merge")
+        f.git("commit", "--allow-empty", "-m", "test: unpushed",
+              cwd=f.worktree)
+        result = self.cleanup(expected=1)
+        self.assertIn("not the last pushed head", result["integration"])
+        self.assert_retained(result)
+
+    def test_squash_after_a_file_neutral_base_advance_is_retained(
+        self,
+    ) -> None:
+        f = self.f
+        advance = self.clone("advance")
+        f.git("commit", "--allow-empty", "-m", "test: advance base",
+              cwd=advance)
+        f.git("push", "--quiet", "origin", "main", cwd=advance)
+        self.forge_merge("squash")
+        result = self.cleanup(expected=1)
+        self.assertIn("parent is not an ancestor", result["integration"])
+        self.assert_retained(result)
+
+    def test_rebase_of_two_commits_onto_an_unmoved_base_is_retained(
+        self,
+    ) -> None:
+        f = self.f
+        first = self.head
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        self.land_on_main(first, self.head)
+        result = self.cleanup(expected=1)
+        self.assertIn("parent is not an ancestor", result["integration"])
+        self.assert_retained(result)
+
+    def test_squash_without_a_remote_tracking_ref_is_retained(self) -> None:
+        f = self.f
+        self.forge_merge("squash")
+        f.git("update-ref", "-d", "refs/remotes/origin/issue-1")
+        result = self.cleanup(expected=1)
+        self.assertIn("not the last pushed head", result["integration"])
+        self.assert_retained(result)
+
+    def test_record_outside_the_worktree_root_is_ignored(self) -> None:
+        f = self.f
+        outside = f.root / "outside-root"
+        f.git("worktree", "add", "-b", "outside", str(outside))
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        record = (admin / "agent-squad-implementation.json").read_text()
+        outside_admin = Path(
+            f.git("rev-parse", "--absolute-git-dir", cwd=outside))
+        (outside_admin / "agent-squad-implementation.json").write_text(record)
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertTrue(outside.exists())
+        self.assertIn(str(outside), f.git("worktree", "list", "--porcelain"))
+        self.assertEqual(result["merge_commit"], merge_commit)
+        self.assertTrue(all(s["ok"] for s in result["cleanup"]))
+
     def test_unproven_ownership_is_refused_without_change(self) -> None:
         f = self.f
 
@@ -195,6 +428,10 @@ class ForgeMergedCleanup:
             owner.write_text(original)
         with self.subTest(case="record names another PR"):
             owner.write_text(json.dumps(dict(json.loads(original), pr=2)))
+            assert_refused("no implementation record names PR #1")
+            owner.write_text(original)
+        with self.subTest(case="record names the PR by a boolean"):
+            owner.write_text(json.dumps(dict(json.loads(original), pr=True)))
             assert_refused("no implementation record names PR #1")
             owner.write_text(original)
         with self.subTest(case="record names another Git directory"):
@@ -331,6 +568,28 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0]["detail"]["removed"], str(review))
         self.assertFalse(review.exists())
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+        self.assert_finished(result, merge_commit)
+
+    def test_reviewer_without_worktree_registration_is_listed(self) -> None:
+        """REV-5: Herdr no longer reports the workspace's worktree."""
+        f = self.f
+        f.herdr_settings(implementer={"cwd": str(f.worktree)})
+        review = Path(f.cli("reviewer", "launch", "--pr", "1")["worktree"])
+        model = f.herdr_model()
+        workspace = next(w for w in model["workspaces"]
+                         if (w.get("worktree") or {}).get("checkout_path")
+                         == str(review))
+        workspace["worktree"] = None
+        f.save_herdr(model)
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        closed = [s for s in result["cleanup"]
+                  if s["step"] == "review worktree"]
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["detail"]["removed"], str(review))
+        self.assertEqual(closed[0]["detail"]["workspace_id"],
+                         workspace["workspace_id"])
         self.assertEqual(f.herdr_model()["workspaces"], [])
         self.assert_finished(result, merge_commit)
 

@@ -388,7 +388,8 @@ def close_reviewer(worktree: ReviewWorktree, client: HerdrClient) -> dict:
         workspace = verify_workspace(worktree, client, resource)
         if workspace.get("worktree") is None:
             client.close_workspace(resource["workspace_id"])
-            return worktree.remove()
+            # Name the closed workspace too (#175 REV-5).
+            return {**worktree.remove(), **resource}
         removed = client.remove_worktree(resource["workspace_id"])
         if (
             removed.get("path") != str(worktree.path)

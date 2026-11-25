@@ -667,14 +667,14 @@ class ForgeMergedCleanupSkillTests(unittest.TestCase):
             "merge it, for example through a merge train, run "
             "`agent-squad pr cleanup --as implementer --pr <PR>` once from "
             "the primary checkout without asking.",
-            "its result carries `merged_outside_pr_merge: true` and "
-            "`approved_head`.",
+            "its result carries `merged_outside_pr_merge: true`, "
+            "`approved_head`, and `merged_head`.",
             "Then report to the Developer that the forge merged the PR "
-            "outside the loop, saying whether `approved_head` equals the "
-            "merged head (`head` in the result), whether a "
-            "review-before-merge item held the PR, and which Reviewer "
-            "workspaces the cleanup closed, since a review may have been "
-            "cut short.",
+            "outside the loop, saying whether `approved_head` equals "
+            "`merged_head`, or, when `merged_head` is null, that the merged "
+            "source could not be established; whether a review-before-merge "
+            "item held the PR; and which Reviewer workspaces the cleanup "
+            "closed, since a review may have been cut short.",
             "If it fails, report the failed step and wait.",
             "The rest of this section then applies as after any merge: the "
             "read of the push run with `pr checks --merge-commit --wait`, "
@@ -690,8 +690,10 @@ class ForgeMergedCleanupSkillTests(unittest.TestCase):
             "When the forge reports the PR merged and `pr merge` did not "
             "merge it, run `pr cleanup` once without asking, then report to "
             "the Developer that the forge merged the PR outside the loop, "
-            "saying whether `approved_head` equals the merged head, whether "
-            "a review-before-merge item held the PR, and which Reviewer "
+            "saying whether `approved_head` equals `merged_head` (or that "
+            "the merged source could not be established when `merged_head` "
+            "is null), whether a review-before-merge item held the PR, and "
+            "which Reviewer "
             "workspaces the cleanup closed, since a review may have been cut "
             "short (#175); the rest of this rule then applies as after any "
             "merge.", self.spec_implementer)
