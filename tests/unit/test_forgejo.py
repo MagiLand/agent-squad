@@ -1514,8 +1514,13 @@ class PagedReadTests(unittest.TestCase):
             with self.subTest(read=name):
                 self.forge.api.reset_mock()
                 self.forge.api.side_effect = [pages[0], pages[0], empty]
-                with self.assertRaisesRegex(ForgeError, "repeated a page"):
+                with self.assertRaisesRegex(
+                    ForgeError, "repeated a page"
+                ) as raised:
                     read()
+                # ChecksUnavailable is a ForgeError; a repeated page is a
+                # failed read, never an unavailable one.
+                self.assertIs(type(raised.exception), ForgeError)
                 self.assertEqual(len(self.paths()), 2)
 
     def test_an_empty_status_list_also_ends_the_checks_read(self):
