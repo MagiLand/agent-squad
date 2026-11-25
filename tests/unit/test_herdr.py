@@ -118,63 +118,82 @@ class HandoffTemplateTests(unittest.TestCase):
                 stopped_message(1, H, reason)
 
 
-def pane_directory(cwd: str) -> Path:
-    from agent_squad.reviewer import resolved_directory
-
-    return resolved_directory(cwd, "Herdr pane directory")
-
-
 class PaneDirectoryTests(unittest.TestCase):
-    """#175: a pane directory that cannot be resolved keeps the checkout."""
+    """#175: a directory Herdr reports either is in the checkout, is not,
+    or cannot be placed, and then the checkout is kept."""
 
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        self.checkout = self.root / "checkout"
+        (self.checkout / "sub").mkdir(parents=True)
+        self.other = self.root / "other"
+        self.other.mkdir()
 
-    def refused(self, cwd: Path) -> str:
+    def inside(self, path: Path) -> bool:
+        from agent_squad.reviewer import directory_in_checkout
+
+        return directory_in_checkout(
+            str(path), "Herdr pane directory", self.checkout)
+
+    def refused(self, path: Path) -> str:
         from agent_squad.initialization import RetainedError
 
         with self.assertRaises(RetainedError) as caught:
-            pane_directory(str(cwd))
+            self.inside(path)
         return str(caught.exception)
 
-    def test_unresolvable_checkout_or_pane_keeps_the_checkout(self) -> None:
-        from unittest.mock import Mock
-        from agent_squad.initialization import RetainedError
-        from agent_squad.reviewer import remove_unused_checkout
-
-        loop = self.root / "loop"
-        loop.symlink_to(loop.name)
-        checkout = self.root / "checkout"
-        checkout.mkdir()
-        pane = {"workspaces": [], "panes": [{"cwd": str(loop)}]}
-        empty = {"workspaces": [], "panes": []}
-        for path, snapshot, label in (
-            (checkout, pane, f"Herdr pane directory {loop}"),
-            (loop, empty, f"review worktree {loop}"),
-        ):
-            with self.subTest(label=label):
-                worktree = Mock(path=path)
-                with self.assertRaises(RetainedError) as caught:
-                    remove_unused_checkout(worktree, snapshot)
-                self.assertIn(f"cannot resolve {label}",
-                              str(caught.exception))
-                worktree.remove.assert_not_called()
-        worktree = Mock(path=checkout)
-        self.assertIs(remove_unused_checkout(worktree, empty),
-                      worktree.remove.return_value)
-
-    def test_resolved_directories_are_returned(self) -> None:
-
-        real = self.root / "real"
-        real.mkdir()
+    def test_directories_are_placed_by_name_and_through_symlinks(
+        self,
+    ) -> None:
         link = self.root / "link"
-        link.symlink_to(real)
-        self.assertEqual(pane_directory(str(link / ".")), real)
-        # A directory that is gone still has a usable path.
-        self.assertEqual(
-            pane_directory(str(link / "gone")), real / "gone")
+        link.symlink_to(self.checkout)
+        for path in (self.checkout, self.checkout / "sub", link,
+                     link / "sub", self.checkout / "sub" / ".."):
+            with self.subTest(path=path.relative_to(self.root)):
+                self.assertTrue(self.inside(path))
+        # A directory that is gone still says where it was.
+        self.assertTrue(self.inside(self.checkout / "gone" / "deeper"))
+        self.assertTrue(self.inside(link / "gone"))
+        for path in (self.other, self.other / "gone", self.root,
+                     self.root / "checkout-2"):
+            with self.subTest(path=path.relative_to(self.root)):
+                self.assertFalse(self.inside(path))
+        # A component that is a file cannot lead into the checkout.
+        (self.other / "file").write_text("x")
+        self.assertFalse(self.inside(self.other / "file" / "below"))
+        # A checkout that is gone is still named by the paths below it.
+        self.checkout.rename(self.root / "moved")
+        self.assertTrue(self.inside(self.checkout))
+        self.assertTrue(self.inside(self.checkout / "sub"))
+        self.assertFalse(self.inside(self.other))
+
+    def test_same_directory_under_another_name_is_inside(self) -> None:
+        """Resolution does not correct the spelling on a case-insensitive
+        file system, and leaves an unreadable component unresolved. The
+        alias here is a symlink that resolve() is kept from following."""
+        alias = self.other / "alias"
+        alias.symlink_to(self.checkout)
+        with patch("pathlib.Path.resolve", lambda self: self):
+            self.assertTrue(self.inside(alias))
+            self.assertTrue(self.inside(alias / "sub"))
+            self.assertTrue(self.inside(alias / "gone" / "deeper"))
+            self.assertFalse(self.inside(self.other))
+            self.assertFalse(self.inside(self.other / "gone"))
+            # A checkout that is gone has no directory to be the same as.
+            self.checkout.rename(self.root / "moved")
+            self.assertFalse(self.inside(self.other))
+
+    def test_wrong_case_spelling_is_inside_where_the_file_system_folds(
+        self,
+    ) -> None:
+        shouted = self.root / "CHECKOUT"
+        if not shouted.exists():
+            self.skipTest("the file system is case-sensitive")
+        self.assertNotEqual(shouted.resolve(), self.checkout)
+        self.assertTrue(self.inside(shouted))
+        self.assertTrue(self.inside(shouted / "sub"))
 
     def test_symlink_loop_is_refused_on_every_python(self) -> None:
         loop = self.root / "loop"
@@ -186,7 +205,40 @@ class PaneDirectoryTests(unittest.TestCase):
             self.assertIn(expected, self.refused(loop))
             self.assertIn(expected, self.refused(loop / "below"))
 
-    def test_other_resolution_failures_are_refused(self) -> None:
+    def test_only_a_missing_path_is_tolerated(self) -> None:
+        """REV-18: a path that cannot be read, such as one below a parent
+        without search permission, says nothing about where it leads."""
+        import errno
+        from agent_squad.reviewer import directory_status
+
+        read = Path.stat
+        target = self.other / "pane"
+
+        def failing(code: int):
+            def stat(path: Path, **options: object):
+                if path == target:
+                    raise OSError(code, os.strerror(code), str(path))
+                return read(path, **options)
+            return stat
+
+        for code in (errno.ENOENT, errno.ENOTDIR):
+            with self.subTest(code=errno.errorcode[code]):
+                with patch("pathlib.Path.stat", failing(code)):
+                    self.assertIsNone(directory_status(target))
+                    self.assertFalse(self.inside(target))
+        for code in (errno.EACCES, errno.EPERM, errno.ELOOP, errno.EIO,
+                     errno.ENAMETOOLONG):
+            with self.subTest(code=errno.errorcode[code]):
+                with patch("pathlib.Path.stat", failing(code)):
+                    self.assertIn(
+                        f"cannot resolve Herdr pane directory {target}: ",
+                        self.refused(target))
+                    # Below it, the unreadable parent is refused as well.
+                    self.assertIn(
+                        "cannot resolve Herdr pane directory",
+                        self.refused(target / "gone"))
+
+    def test_resolution_failures_are_refused(self) -> None:
         for error in (OSError("unreadable"), RuntimeError("loop"),
                       ValueError("embedded null byte")):
             with self.subTest(error=type(error).__name__):
@@ -194,6 +246,64 @@ class PaneDirectoryTests(unittest.TestCase):
                     self.assertIn(
                         "cannot resolve Herdr pane directory /x: "
                         + str(error), self.refused(Path("/x")))
+
+    def unused(self, path: Path, **inventory: list):
+        from unittest.mock import Mock
+        from agent_squad.reviewer import remove_unused_checkout
+
+        worktree = Mock(path=path)
+        return worktree, lambda: remove_unused_checkout(
+            worktree, {"workspaces": [], "panes": [], **inventory})
+
+    def test_checkout_is_removed_only_when_nothing_uses_it(self) -> None:
+        from agent_squad.initialization import RetainedError
+
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        alias = self.other / "alias"
+        alias.symlink_to(self.checkout)
+        cases = {
+            "pane in the checkout": (
+                self.checkout, {"panes": [{"cwd": str(alias / "sub")}]},
+                "an unowned Herdr pane still uses this worktree"),
+            "pane that cannot be placed": (
+                self.checkout, {"panes": [{"cwd": str(loop)}]},
+                f"cannot resolve Herdr pane directory {loop}"),
+            "registration by another name": (
+                self.checkout,
+                {"workspaces": [{"worktree": {"checkout_path": str(alias)}}]},
+                "an unowned Herdr workspace still uses this worktree"),
+            "registration that cannot be placed": (
+                self.checkout,
+                {"workspaces": [{"worktree": {"checkout_path": str(loop)}}]},
+                f"cannot resolve Herdr worktree registration {loop}"),
+            "checkout that cannot be placed": (
+                loop, {}, f"cannot resolve review worktree {loop}"),
+        }
+        for name, (path, inventory, message) in cases.items():
+            with self.subTest(name):
+                worktree, remove = self.unused(path, **inventory)
+                with self.assertRaises(RetainedError) as caught:
+                    remove()
+                self.assertIn(message, str(caught.exception))
+                worktree.remove.assert_not_called()
+        # Python 3.13 and later return a loop unresolved from resolve(),
+        # so the checkout's own status is read as well.
+        worktree, remove = self.unused(loop)
+        with patch("pathlib.Path.resolve", lambda self: self):
+            with self.assertRaises(RetainedError) as caught:
+                remove()
+        self.assertIn(f"cannot resolve review worktree {loop}",
+                      str(caught.exception))
+        worktree.remove.assert_not_called()
+        elsewhere = {
+            "panes": [{"cwd": str(self.other)}, {"cwd": "relative"},
+                      {"cwd": None}, {}],
+            "workspaces": [{"worktree": None}, {},
+                           {"worktree": {"checkout_path": str(self.other)}}],
+        }
+        worktree, remove = self.unused(self.checkout, **elsewhere)
+        self.assertIs(remove(), worktree.remove.return_value)
 
 
 class LaunchGateTests(unittest.TestCase):

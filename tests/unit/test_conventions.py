@@ -1133,6 +1133,11 @@ class DerivedStateTests(unittest.TestCase):
                     state["diagnostics"][0]["kind"], "malformed_review"
                 )
 
+    def approved_ids(self, s: Snapshot) -> list[int]:
+        """The approvals that derive() accepts, as ``status`` reports."""
+        return [r["id"] for r in derive_state(s)["reviews"]
+                if r["verdict"] == "approved"]
+
     def test_approved_head_reader_checks_changes_requested_like_derive(
         self,
     ) -> None:
@@ -1145,7 +1150,9 @@ class DerivedStateTests(unittest.TestCase):
         optional = review(
             13, "changes_requested", findings="REV-2 [optional] Finding"
         )
-        repeated = review(15, findings="REV-2 [optional] Finding")
+        # REV-1 is settled before the approval, so only REV-2 decides.
+        settled = reply(16, "VERIFIED fixed", author="reviewer")
+        repeated = review(20, findings="REV-2 [optional] Finding")
         cases = [
             (reply(12, "NOT FIXED", author="reviewer"), None, 2),
             (reply(9, "NOT FIXED", author="reviewer"), H, 1),
@@ -1157,7 +1164,7 @@ class DerivedStateTests(unittest.TestCase):
                               author=verify.evidence.author):
                 s = snapshot(
                     reviews=(opened, optional, repeated),
-                    comments=(root(), verify),
+                    comments=(root(), verify, settled),
                 )
                 self.assertEqual(approved_review_head(s, config()), head)
                 state = derive_state(s)
@@ -1166,6 +1173,75 @@ class DerivedStateTests(unittest.TestCase):
                      if r["verdict"] == "changes_requested"],
                     [10, 13][:valid],
                 )
+                self.assertEqual(self.approved_ids(s), [20] if head else [])
+
+    def test_approved_head_reader_needs_earlier_blocking_findings_settled(
+        self,
+    ) -> None:
+        """#175: an approval posted while a blocking finding of an earlier
+        accepted review was unsettled is not approved_head, as in status."""
+        opened = review(
+            10, "changes_requested", findings="REV-1 [blocking] Finding"
+        )
+        approval = review(15)
+
+        def verified(ident: int, text: str = "VERIFIED fixed",
+                     author: str = "reviewer") -> Comment:
+            return reply(ident, text, author=author)
+
+        cases = {
+            "unsettled": ((root(),), None),
+            "settled before the approval": ((root(), verified(12)), H),
+            "verified after the approval": ((root(), verified(16)), None),
+            "rejection accepted": (
+                (root(), verified(12, "VERIFIED rejection accepted")), H),
+            "not fixed": ((root(), verified(12, "NOT FIXED")), None),
+            "not fixed after fixed": (
+                (root(), verified(12), verified(13, "NOT FIXED")), None),
+            "fixed after not fixed": (
+                (root(), verified(12, "NOT FIXED"), verified(13)), H),
+            "verification by another author": (
+                (root(), verified(12, author="dev")), None),
+            "no root comment": ((verified(12),), None),
+            "two root comments": (
+                (root(), root(21), verified(12)), None),
+            "root differs from the list": (
+                (root(severity="optional"), verified(12)), None),
+        }
+        for name, (comments, head) in cases.items():
+            with self.subTest(name):
+                s = snapshot(reviews=(opened, approval), comments=comments)
+                self.assertEqual(approved_review_head(s, config()), head)
+                self.assertEqual(self.approved_ids(s), [15] if head else [])
+
+    def test_approved_head_reader_keeps_an_older_valid_approval(
+        self,
+    ) -> None:
+        """#175: a later approval that status rejects does not hide an
+        earlier valid one, and the forge's state still decides."""
+        first = review(5)
+        opened = review(10, "changes_requested", head=J,
+                        findings="REV-1 [blocking] Finding")
+        unsettled = review(15, head=J)
+        s = snapshot(
+            reviews=(first, opened, unsettled), comments=(root(),), head=J,
+        )
+        self.assertEqual(approved_review_head(s, config()), H)
+        self.assertEqual(self.approved_ids(s), [5])
+        commented = replace(first, state=ReviewState.COMMENTED)
+        s = replace(s, reviews=(commented, opened, unsettled))
+        self.assertIsNone(approved_review_head(s, config()))
+        # Git ancestry is the one check the reader leaves out: with no
+        # commit an ancestor of another, derive() rejects the review.
+        s = snapshot(reviews=(first,))
+        self.assertEqual(approved_review_head(s, config()), H)
+        unrelated = derive(
+            s, config(), (), A, lambda a, b: False, base_tip=A,
+        )
+        self.assertEqual(unrelated["reviews"], [])
+        # A decision in the PR conversation decides nothing about a review.
+        s = replace(s, conversation=(decision(30, finding="REV-1"),))
+        self.assertEqual(approved_review_head(s, config()), H)
 
     def test_review_target_and_submission_validity(self) -> None:
         good = review(10)

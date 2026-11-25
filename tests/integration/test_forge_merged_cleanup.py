@@ -1,5 +1,6 @@
 """#175: pr cleanup finishes a PR that the forge merged without pr merge."""
 
+from datetime import datetime, timedelta, timezone
 import json
 import shutil
 import os
@@ -9,15 +10,23 @@ import unittest
 from unittest.mock import patch
 
 from tests.forge_support import (
-    ForgeFixture, ForgejoFixture, finding, is_write,
+    REVIEW, ForgeFixture, ForgejoFixture, finding, is_write,
 )
+from agent_squad import merging
 from agent_squad.forge import ForgeError, make_forge
-from agent_squad.initialization import load_initialized_repository
-from agent_squad.conventions import approved_review_head
+from agent_squad.initialization import (
+    GateError, load_initialized_repository,
+)
+from agent_squad.conventions import approved_review_head, render_line
 from agent_squad.herdr import HerdrError
 from agent_squad.merging import cleanup_pr
 
 COMMAND = "agent-squad pr cleanup --as implementer --pr 1"
+
+
+def open_descriptors() -> int:
+    """How many file descriptors this process holds open."""
+    return len(os.listdir("/dev/fd"))
 
 
 def call_path(call: dict) -> str:
@@ -597,13 +606,159 @@ class ForgeMergedCleanup:
                 type(forge), "graphql", create=True,
                 side_effect=ForgeError("reviews unreadable"),
             ):
+                descriptors = open_descriptors()
                 with self.assertRaisesRegex(ForgeError, "reviews unreadable"):
                     cleanup_pr(repository, forge, 1)
+                # The proved Git directory is not left open.
+                self.assertEqual(open_descriptors(), descriptors)
         self.assertEqual(self.writes(), writes)
         self.assertFalse(self.record.exists())
         self.assertTrue(f.worktree.exists())
         self.assertTrue(self.scratch.exists())
         self.assert_finished(self.cleanup(), merge_commit)
+
+    def recreate_checkout_on(self, target: str):
+        """Patch ``merging.<target>`` so that its first call first removes
+        the implementation worktree and creates it again at the same place,
+        branch, and head, with a copy of its ownership record. Git gives
+        the new worktree the old Git directory's name."""
+        f = self.f
+        directory = Path(
+            f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        owner = directory / "agent-squad-implementation.json"
+        text = owner.read_text()
+        original = directory.stat()
+        real = getattr(merging, target)
+        done = []
+
+        def recreate(*args, **options):
+            if not done and (target != "git_output" or args[1] == "fetch"):
+                done.append(True)
+                self.assertFalse(self.record.exists())
+                f.git("worktree", "remove", str(f.worktree))
+                f.git("worktree", "add", str(f.worktree), "issue-1")
+                self.assertEqual(Path(f.git(
+                    "rev-parse", "--absolute-git-dir", cwd=f.worktree,
+                )), directory)
+                # The command still holds the removed directory open, so
+                # its identity cannot have been given to the new one.
+                self.assertFalse(os.path.samestat(directory.stat(), original))
+                owner.write_text(text)
+            return real(*args, **options)
+
+        return directory, done, patch.object(
+            merging, target, side_effect=recreate)
+
+    def assert_nothing_marked(self, directory: Path, writes: int) -> None:
+        f = self.f
+        self.assertEqual(self.writes(), writes)
+        self.assertFalse(self.record.exists())
+        self.assertEqual(list(directory.glob("agent-squad-cleanup-*")), [])
+        self.assertTrue(f.worktree.exists())
+        self.assertNotEqual(f.git("branch", "--list", "issue-1"), "")
+        self.assertTrue(self.scratch.exists())
+        self.assertTrue(self.issue_scratch.exists())
+        self.assertEqual(f.git("rev-parse", "HEAD"), f.base)
+
+    def test_checkout_replaced_during_the_fetch_is_refused(self) -> None:
+        """REV-20: the worktree is removed and created again between the
+        ownership proof and the marker; the new Git directory has the old
+        name but is not the proved one, and gets neither marker nor record."""
+        f = self.f
+        merge_commit = self.forge_merge("merge")
+        writes, descriptors = self.writes(), open_descriptors()
+        directory, done, recreated = self.recreate_checkout_on("git_output")
+        with patch.dict(os.environ, f.env, clear=True), recreated:
+            repository = load_initialized_repository(f.repo)
+            result = cleanup_pr(
+                repository, make_forge(repository, "implementer"), 1)
+        self.assertTrue(done)
+        self.assertEqual(result["integration"], "verified by ancestry")
+        self.assertEqual(result["merge_record"]["reason"],
+                         "implementation Git directory changed")
+        self.assert_retained_unrecorded(result)
+        self.assert_nothing_marked(directory, writes)
+        self.assertEqual(open_descriptors(), descriptors)
+        # A new run proves the checkout that is there now.
+        self.assert_finished(self.cleanup(), merge_commit)
+
+    def test_checkout_replaced_during_the_ownership_proof_is_refused(
+        self,
+    ) -> None:
+        """REV-20: the proof must be about the directory held open."""
+        f = self.f
+        merge_commit = self.forge_merge("merge")
+        writes, descriptors = self.writes(), open_descriptors()
+        directory, done, recreated = self.recreate_checkout_on(
+            "owned_implementation")
+        with patch.dict(os.environ, f.env, clear=True), recreated:
+            repository = load_initialized_repository(f.repo)
+            with self.assertRaisesRegex(
+                GateError, "no merge record for PR #1; implementation Git"
+                " directory changed",
+            ):
+                cleanup_pr(
+                    repository, make_forge(repository, "implementer"), 1)
+        self.assertTrue(done)
+        self.assert_nothing_marked(directory, writes)
+        self.assertEqual(open_descriptors(), descriptors)
+        self.assert_finished(self.cleanup(), merge_commit)
+
+    def approval_after_a_blocking_finding(self, verified: str) -> None:
+        """REV-21: an approval at the next head after a review with a
+        blocking finding; ``verified`` says when the Reviewer verified the
+        fix: "before" the approval, "after" it, or "never"."""
+        f = self.f
+        f.review("changes_requested", [finding()])
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.reply("REV-1", disposition="fixed", sha=self.head)
+        if verified == "before":
+            f.reply("REV-1", verification="fixed")
+        # Placed in the model directly: review post refuses this approval
+        # while the finding is unsettled, but a forge can hold one.
+        model = f.read_model()
+        reviews = model["prs"]["1"]["reviews"]
+        ident = model["next_id"]
+        model["next_id"] += 1
+        stamp = (datetime(2026, 1, 1, tzinfo=timezone.utc)
+                 + timedelta(seconds=ident)).isoformat().replace(
+                     "+00:00", "Z")
+        reviews.append({
+            **reviews[0], "id": ident, "commit_id": self.head,
+            "state": "APPROVED", "created_at": stamp, "submitted_at": stamp,
+            "body": render_line(
+                "review", pr=1, head=self.head, base=f.base,
+                verdict="approved",
+            ) + "\n\n" + REVIEW,
+        })
+        f.save_model(model)
+        if verified == "after":
+            f.reply("REV-1", verification="fixed")
+        valid = verified == "before"
+        status = f.status()
+        self.assertEqual(any(
+            d["detail"] == "approved review has unsettled blocking findings"
+            for d in status["diagnostics"]), not valid)
+        self.assertEqual(
+            [r["head"] for r in status["reviews"]
+             if r["verdict"] == "approved"], [self.head] if valid else [])
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertEqual(result["approved_head"],
+                         self.head if valid else None)
+        self.assertEqual(result["merged_head"], self.head)
+        self.assert_finished(result, merge_commit)
+
+    def test_approval_with_an_unsettled_blocking_finding_is_not_reported(
+        self,
+    ) -> None:
+        self.approval_after_a_blocking_finding("never")
+
+    def test_approval_after_a_verified_fix_is_reported(self) -> None:
+        self.approval_after_a_blocking_finding("before")
+
+    def test_approval_verified_only_afterwards_is_not_reported(self) -> None:
+        self.approval_after_a_blocking_finding("after")
 
     def edit_review(self, head: str, **values: str) -> None:
         """Change the one approving review at ``head`` in the fake model."""
@@ -1208,17 +1363,17 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.restore_checkout(parked)
         self.assert_finished(self.cleanup(), merge_commit, "up to date")
 
-    def test_unresolvable_pane_directory_keeps_the_checkout(self) -> None:
-        """REV-18: a pane whose directory leads through a symlink loop
-        leaves the checkout's use unknown; the step fails with a report."""
+    def pane_keeps_the_checkout(self, place) -> None:
+        """A retry after the Reviewer was closed keeps its checkout while
+        an unowned pane works in the directory ``place`` makes for it;
+        ``place`` returns that directory and the refusal to expect."""
         f = self.f
         review, workspace = self.unregistered_reviewer()
         f.git("worktree", "lock", str(review))
         merge_commit = self.forge_merge("merge")
         self.cleanup(expected=3)
         f.git("worktree", "unlock", str(review))
-        loop = f.root / "stale-pane-directory"
-        loop.symlink_to(loop.name)
+        cwd, refusal = place(review)
         model = f.herdr_model()
         self.assertEqual(model["workspaces"], [])
         model["workspaces"].append({
@@ -1231,13 +1386,12 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         model["panes"].append({
             "workspace_id": "w-stale", "tab_id": "w-stale:t1",
             "pane_id": "w-stale:p1", "terminal_id": "w-stale-terminal",
-            "cwd": str(loop), "agent": None, "agent_status": "unknown",
+            "cwd": str(cwd), "agent": None, "agent_status": "unknown",
         })
         f.save_herdr(model)
         kept = self.cleanup(expected=3)
         self.assertEqual(kept["cleanup"][-1]["step"], "review worktree")
-        self.assertIn(f"cannot resolve Herdr pane directory {loop}",
-                      kept["cleanup"][-1]["detail"])
+        self.assertIn(refusal, kept["cleanup"][-1]["detail"])
         self.assertTrue(review.exists())
         self.assertTrue(self.record.exists())
         model = f.herdr_model()
@@ -1246,6 +1400,52 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
                           if x["workspace_id"] != "w-stale"]
         f.save_herdr(model)
         self.assert_finished(self.cleanup(), merge_commit, "up to date")
+
+    def test_unresolvable_pane_directory_keeps_the_checkout(self) -> None:
+        """REV-18: a pane whose directory leads through a symlink loop
+        leaves the checkout's use unknown; the step fails with a report."""
+        def place(review: Path) -> tuple[Path, str]:
+            loop = self.f.root / "stale-pane-directory"
+            loop.symlink_to(loop.name)
+            return loop, f"cannot resolve Herdr pane directory {loop}"
+
+        self.pane_keeps_the_checkout(place)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_inaccessible_pane_directory_keeps_the_checkout(self) -> None:
+        """REV-18: the pane's directory is another name for the checkout,
+        below a parent that cannot be searched, so it cannot be placed."""
+        def place(review: Path) -> tuple[Path, str]:
+            blocked = self.f.root / "inaccessible-pane-parent"
+            blocked.mkdir()
+            alias = blocked / "pane-directory"
+            alias.symlink_to(review, target_is_directory=True)
+            self.assertEqual(alias.resolve(strict=True), review.resolve())
+            blocked.chmod(0)
+            self.addCleanup(blocked.chmod, 0o700)
+            with self.assertRaises(PermissionError):
+                alias.resolve(strict=True)
+            return alias, f"cannot resolve Herdr pane directory {alias}"
+
+        # Registered before the fixture's own cleanup, so it runs after
+        # the permissions are restored.
+        self.pane_keeps_the_checkout(place)
+        (self.f.root / "inaccessible-pane-parent").chmod(0o700)
+
+    def test_pane_directory_in_another_case_keeps_the_checkout(self) -> None:
+        """REV-18: on a case-insensitive file system, another spelling of
+        the checkout's name is the same directory."""
+        def place(review: Path) -> tuple[Path, str]:
+            shouted = review.parent / review.name.upper()
+            if not shouted.exists():
+                self.skipTest("the file system is case-sensitive")
+            self.assertNotEqual(shouted.resolve(), review.resolve())
+            # A directory below it that is gone: only an ancestor is the
+            # same directory as the checkout.
+            return (shouted / "gone" / "deeper",
+                    "an unowned Herdr pane still uses this worktree")
+
+        self.pane_keeps_the_checkout(place)
 
     def test_moved_original_checkout_still_blocks_a_retry(self) -> None:
         """REV-10 control: the proved record survives a moved checkout."""

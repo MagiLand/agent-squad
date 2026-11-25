@@ -371,29 +371,57 @@ def verify_workspace(
     return workspace
 
 
-def resolved_directory(path: str, label: str) -> Path:
-    """Resolve a directory named by Herdr or a record, or keep every
-    resource.
+# A path that is gone: the only failure to read a directory that still
+# says where it was.
+MISSING = (errno.ENOENT, errno.ENOTDIR)
 
-    A directory that cannot be resolved, such as one that now leads
-    through a symlink loop, leaves the checkout's use unknown (#175).
+
+def directory_status(path: Path) -> os.stat_result | None:
+    """The directory's status, or None when the path no longer exists.
+
+    Any other failure, such as a parent that cannot be searched or a
+    symlink loop, is raised: the path then says nothing reliable.
+    """
+    try:
+        return path.stat()
+    except OSError as error:
+        if error.errno in MISSING:
+            return None
+        raise
+
+
+def directory_in_checkout(path: str, label: str, checkout: Path) -> bool:
+    """Whether a directory that Herdr reports is the checkout or lies below
+    it; a directory whose place cannot be established keeps every resource.
+
+    No lexical prefix is trusted on its own. Resolution without strict
+    checking leaves a component it cannot read unresolved, and it does not
+    correct the spelling on a case-insensitive file system, so an existing
+    ancestor that is the same directory as the checkout also counts.
+    Python 3.11 and 3.12 raise RuntimeError from resolve() for a symlink
+    loop; later versions return the path unresolved, and the status read
+    reports the loop. Only a path that no longer exists is an expected
+    stale entry (#175).
     """
     try:
         resolved = Path(path).resolve()
-        try:
-            resolved.stat()
-        except OSError as error:
-            # Python 3.11 and 3.12 raise RuntimeError from resolve() for a
-            # symlink loop; later versions return the path unresolved, and
-            # only this read reports the loop. A directory that is merely
-            # gone or unreadable still has a usable resolved path.
-            if error.errno == errno.ELOOP:
-                raise
+        present = directory_status(resolved)
+        if resolved.is_relative_to(checkout):
+            return True
+        target = directory_status(checkout)
+        if target is None:
+            return False
+        if present is not None and os.path.samestat(present, target):
+            return True
+        for parent in resolved.parents:
+            status = directory_status(parent)
+            if status is not None and os.path.samestat(status, target):
+                return True
     except (OSError, RuntimeError, ValueError) as error:
         raise RetainedError(
             f"cannot resolve {label} {path}: {error}"
         ) from None
-    return resolved
+    return False
 
 
 def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
@@ -402,21 +430,32 @@ def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
     A workspace counts by its worktree registration, and a pane by a
     working directory at or below the checkout (#175).
     """
-    checkout = resolved_directory(str(worktree.path), "review worktree")
+    try:
+        checkout = worktree.path.resolve()
+        directory_status(checkout)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RetainedError(
+            f"cannot resolve review worktree {worktree.path}: {error}"
+        ) from None
     for workspace in resource_objects(snapshot, "workspaces"):
         registration = workspace.get("worktree") or {}
         if not isinstance(registration, dict):
             raise RetainedError("Herdr worktree inventory is invalid")
-        if registration.get("checkout_path") == str(worktree.path):
+        registered = registration.get("checkout_path")
+        if registered == str(worktree.path) or (
+            isinstance(registered, str)
+            and Path(registered).is_absolute()
+            and directory_in_checkout(
+                registered, "Herdr worktree registration", checkout
+            )
+        ):
             raise RetainedError(
                 "an unowned Herdr workspace still uses this worktree"
             )
     for pane in resource_objects(snapshot, "panes"):
         cwd = pane.get("cwd")
         if isinstance(cwd, str) and Path(cwd).is_absolute() and (
-            resolved_directory(
-                cwd, "Herdr pane directory"
-            ).is_relative_to(checkout)
+            directory_in_checkout(cwd, "Herdr pane directory", checkout)
         ):
             raise RetainedError(
                 "an unowned Herdr pane still uses this worktree"

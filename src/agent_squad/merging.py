@@ -33,6 +33,12 @@ IMPLEMENTATION_OWNER = "agent-squad-implementation.json"
 # A file in the proved implementation Git directory that names one
 # occurrence of the checkout for a retried cleanup (#175).
 CLEANUP_MARKER = "agent-squad-cleanup-"
+DIRECTORY_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+)
+MARKER_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+)
 MERGE_RECORD_FIELDS = frozenset({
     "schema_version", "common", "pr", "head", "head_branch", "base_branch",
     "merge_method", "moved_base", "issue", "outside_pr_merge",
@@ -259,10 +265,58 @@ def named_implementations(
     return found
 
 
+def same_directory(descriptor: int, path: Path) -> bool:
+    """Whether ``path`` still names the directory ``descriptor`` holds open.
+
+    While the descriptor is open, the file system cannot give that
+    directory's identity to another one, so equal identities mean the same
+    directory, not a later one at the same place.
+    """
+    try:
+        return os.path.samestat(
+            os.fstat(descriptor), os.stat(path, follow_symlinks=False)
+        )
+    except OSError:
+        return False
+
+
+def create_cleanup_marker(descriptor: int | None, directory: Path) -> Path:
+    """Create a new, empty marker in the Git directory that ``descriptor``
+    holds open since its ownership was proved, and return its path.
+
+    A worktree removed and created again at the same place gets a new Git
+    directory under the old name (#175). The marker is therefore created
+    through the descriptor, never by opening the name again, and
+    ``directory`` must name the proved directory before and after: the
+    replacement must neither receive the marker nor be named by a record.
+    """
+    changed = "implementation Git directory changed"
+    if descriptor is None or not same_directory(descriptor, directory):
+        raise RetainedError(changed)
+    name = f"{CLEANUP_MARKER}{uuid.uuid4().hex}"
+    os.close(os.open(name, MARKER_FLAGS, 0o600, dir_fd=descriptor))
+    if not same_directory(descriptor, directory):
+        remove_cleanup_marker(descriptor, name)
+        raise RetainedError(changed)
+    return directory / name
+
+
+def remove_cleanup_marker(descriptor: int, name: str) -> None:
+    """Take back a marker that no merge record names."""
+    try:
+        os.unlink(name, dir_fd=descriptor)
+    except OSError:
+        pass
+
+
 def forge_merged_record(
     repository: Repository, pr: int, merged: PullRequest,
-) -> dict:
+) -> tuple[dict, int]:
     """Prove that a PR the forge merged without pr merge is the loop's own.
+
+    Returns the record and an open descriptor of the proved implementation
+    Git directory. The caller keeps it open until the cleanup marker is
+    created and then closes it.
 
     The implementation record supplies the issue and head branch, and the
     worktree's HEAD is the head. The forge's head and head branch are not
@@ -291,7 +345,12 @@ def forge_merged_record(
             " exactly one names it"
         )
     worktree, owner, owner_record = candidates[0]
+    directory = owner_record.parent
+    descriptor = None
     try:
+        # Opened before the proof and compared after it, so the proof is
+        # about the directory that the descriptor holds.
+        descriptor = os.open(directory, DIRECTORY_FLAGS)
         branch = owner.get("branch")
         if not isinstance(branch, str) or not branch:
             raise RetainedError(
@@ -303,7 +362,13 @@ def forge_merged_record(
         )
         if path != worktree.root:
             raise RetainedError("implementation branch or HEAD changed")
+        if linked_record(repository, path).parent != directory or (
+            not same_directory(descriptor, directory)
+        ):
+            raise RetainedError("implementation Git directory changed")
     except (AgentSquadError, OSError, ValueError) as error:
+        if descriptor is not None:
+            os.close(descriptor)
         raise GateError(f"{refused}; {error}") from None
     return {
         "schema_version": 1,
@@ -318,8 +383,8 @@ def forge_merged_record(
         "outside_pr_merge": True,
         # The proved checkout's Git directory; complete_merge replaces it
         # with a marker that only this occurrence of the checkout holds.
-        "implementation_record": str(owner_record.parent.resolve()),
-    }
+        "implementation_record": str(directory.resolve()),
+    }, descriptor
 
 
 def marker_in_worktree_slot(repository: Repository, marker: Path) -> bool:
@@ -850,6 +915,7 @@ def fast_forward_primary(
 def complete_merge(
     repository: Repository, forge: Forge, record: dict,
     merge_commit: str | None, result: dict,
+    *, implementation: int | None = None,
 ) -> dict:
     """Run steps 3-5 of §7.10 from the merge record, then delete it.
 
@@ -894,25 +960,22 @@ def complete_merge(
         # Git reuses a removed worktree's directory name, and an unrelated
         # record can have identical content, so a retry recognizes the
         # original checkout only by this marker in its Git directory (#175).
-        marker = Path(record["implementation_record"]) / (
-            f"{CLEANUP_MARKER}{uuid.uuid4().hex}"
-        )
-        created = False
+        # ``implementation`` holds that directory open since its ownership
+        # was proved; a directory put in its place meanwhile is refused.
+        marker = None
         try:
-            marker.touch(exist_ok=False)
-            created = True
+            marker = create_cleanup_marker(
+                implementation, Path(record["implementation_record"])
+            )
             record = write_merge_record(
                 repository, pr, record, method, False, outside=True,
                 implementation_record=str(marker),
             )
         except (AgentSquadError, OSError, ValueError) as error:
             result["merge_record"]["reason"] = str(error)
-            if created:
+            if marker is not None:
                 # No record names it; leave the Git directory as it was.
-                try:
-                    marker.unlink()
-                except OSError:
-                    pass
+                remove_cleanup_marker(implementation, marker.name)
             return {
                 **result, "exit_code": 1, "cleanup": [],
                 "resources_retained": True,
@@ -984,8 +1047,14 @@ def merge_pr(
         forge.branch_rules(opened.base_branch)
         if forge.can_read_branch_rules else {"visibility": "not visible"}
     )
-    # Read authority after the potentially slow rules lookup.
-    snapshot = forge.snapshot(pr)
+    # Read authority after the potentially slow rules lookup. If that read
+    # fails, the PR alone is read once more: the forge may have merged it
+    # meanwhile, and then the refusal with its command is the answer.
+    try:
+        snapshot = forge.snapshot(pr)
+    except ForgeError:
+        refuse_merged(forge.pr(pr))
+        raise
     refuse_merged(snapshot.pr)
     state = state_for(repository, snapshot)
     moved = check_merge_gate(
@@ -1083,8 +1152,27 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
             f" {merge_record_path(repository, pr)}"
         )
     written = record is not None
+    implementation = None
     if record is None:
-        record = forge_merged_record(repository, pr, merged)
+        record, implementation = forge_merged_record(repository, pr, merged)
+    try:
+        return finish_cleanup(
+            repository, forge, pr, record, merged, written, implementation
+        )
+    finally:
+        if implementation is not None:
+            os.close(implementation)
+
+
+def finish_cleanup(
+    repository: Repository, forge: Forge, pr: int, record: dict,
+    merged: PullRequest, written: bool, implementation: int | None,
+) -> dict:
+    """The reads and steps of pr cleanup once the record is in hand.
+
+    ``implementation`` is the open descriptor of the implementation Git
+    directory that a first run proved, or None on a run from a saved record.
+    """
     # Read on every run, before any change, so the Implementer can report
     # whether the merged head was the approved one. It is read from review
     # evidence alone: fetching the PR head or the commits of earlier reviews
@@ -1118,4 +1206,4 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
         "merged_head": None,
         "forge_head": merged.head,
         "forge_head_branch": merged.head_branch,
-    })
+    }, implementation=implementation)

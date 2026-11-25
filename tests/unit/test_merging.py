@@ -218,6 +218,108 @@ class TrackingCleanupTests(unittest.TestCase):
         forge.delete_branch.assert_not_called()
 
 
+class CleanupMarkerTests(unittest.TestCase):
+    """#175: the marker goes into the proved Git directory, held open."""
+
+    def setUp(self) -> None:
+        import os
+        from tempfile import TemporaryDirectory
+        from agent_squad.merging import DIRECTORY_FLAGS
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.directory = self.root / "worktrees" / "issue-1"
+        self.directory.mkdir(parents=True)
+        self.descriptor = os.open(self.directory, DIRECTORY_FLAGS)
+        self.addCleanup(os.close, self.descriptor)
+
+    def markers(self, *directories: Path) -> list[Path]:
+        return [m for d in directories or (self.directory,)
+                for m in d.glob("agent-squad-cleanup-*")]
+
+    def refused(self, descriptor: int | None = -1) -> None:
+        from agent_squad.initialization import RetainedError
+        from agent_squad.merging import create_cleanup_marker
+
+        with self.assertRaisesRegex(
+            RetainedError, "^implementation Git directory changed$",
+        ):
+            create_cleanup_marker(
+                self.descriptor if descriptor == -1 else descriptor,
+                self.directory,
+            )
+
+    def test_marker_is_created_in_the_directory_held_open(self) -> None:
+        from agent_squad.merging import (
+            create_cleanup_marker, remove_cleanup_marker, same_directory,
+        )
+
+        self.assertTrue(same_directory(self.descriptor, self.directory))
+        marker = create_cleanup_marker(self.descriptor, self.directory)
+        self.assertEqual(self.markers(), [marker])
+        self.assertRegex(marker.name, r"^agent-squad-cleanup-[0-9a-f]{32}$")
+        self.assertTrue(marker.is_file() and not marker.is_symlink())
+        self.assertEqual(marker.read_bytes(), b"")
+        self.assertNotEqual(
+            create_cleanup_marker(self.descriptor, self.directory), marker)
+        remove_cleanup_marker(self.descriptor, marker.name)
+        self.assertFalse(marker.exists())
+        # Taking back a marker that is already gone is not an error.
+        remove_cleanup_marker(self.descriptor, marker.name)
+
+    def test_directory_put_in_its_place_gets_no_marker(self) -> None:
+        from agent_squad.merging import same_directory
+
+        parked = self.root / "parked"
+        self.directory.rename(parked)
+        self.assertFalse(same_directory(self.descriptor, self.directory))
+        self.refused()
+        self.directory.mkdir()
+        self.assertFalse(same_directory(self.descriptor, self.directory))
+        self.refused()
+        # A symlink to the proved directory is not that directory.
+        self.directory.rmdir()
+        self.directory.symlink_to(parked)
+        self.assertFalse(same_directory(self.descriptor, self.directory))
+        self.refused()
+        self.assertEqual(self.markers(parked), [])
+        self.refused(None)
+
+    def test_removed_directory_gets_no_marker(self) -> None:
+        self.directory.rmdir()
+        self.refused()
+
+    def test_marker_is_taken_back_when_the_directory_changes_meanwhile(
+        self,
+    ) -> None:
+        """Replaced between the check and the creation: the marker goes
+        into the directory held open, never into the one now at the path,
+        and is removed again."""
+        from agent_squad import merging
+
+        parked = self.root / "parked"
+        real = merging.same_directory
+        seen = []
+
+        def replaced_after_the_check(descriptor: int, path: Path) -> bool:
+            same = real(descriptor, path)
+            if not seen:
+                self.directory.rename(parked)
+                self.directory.mkdir()
+            seen.append((same, len(self.markers(parked)),
+                         len(self.markers(self.directory))))
+            return same
+
+        with patch("agent_squad.merging.same_directory",
+                   side_effect=replaced_after_the_check):
+            self.refused()
+        # Checked: the same directory. Rechecked: not the same, with the
+        # marker in the directory held open and none in its replacement.
+        self.assertEqual(seen, [(True, 0, 0), (False, 1, 0)])
+        self.assertEqual(self.markers(parked, self.directory), [])
+
+
 class CompleteMergeTests(unittest.TestCase):
     def test_merged_pr_without_merge_commit_is_not_verified(self):
         from types import SimpleNamespace
@@ -280,6 +382,7 @@ class MergeRecordRefusalTests(unittest.TestCase):
     def merge(
         self, *, merged: bool, error: Exception | None = None,
         snapshot_error: Exception | None = None,
+        pr_reads: list | None = None,
     ):
         from tempfile import TemporaryDirectory
         from types import SimpleNamespace
@@ -303,6 +406,8 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge.pr.return_value.merged = merged
         forge.snapshot.return_value.pr.merged = merged
         forge.snapshot.side_effect = snapshot_error
+        if pr_reads is not None:
+            forge.pr.side_effect = pr_reads
         self.forge = forge
         state = {"pr": {"merged": merged}, "target": {"head": H},
                  "closes_issue": True, "reviews": []}
@@ -360,6 +465,33 @@ class MergeRecordRefusalTests(unittest.TestCase):
         forge.branch_rules.assert_called_once()
         forge.snapshot.assert_called_once_with(1)
         forge.merge.assert_not_called()
+
+    def test_failed_evidence_read_looks_at_the_pr_again(self):
+        """#175: the forge merged the PR after the first read, and the read
+        of its reviews and conversation then fails: the PR alone is read
+        once more, and the refusal names the command."""
+        from types import SimpleNamespace
+        from agent_squad.forge import ForgeError
+
+        unreadable = ForgeError("conversation unreadable")
+        opened = SimpleNamespace(merged=False, base_branch="main")
+        merged = SimpleNamespace(merged=True, base_branch="main")
+        with self.assertRaises(GateError) as caught:
+            self.merge(merged=False, snapshot_error=unreadable,
+                       pr_reads=[opened, merged])
+        self.assertIn("PR is not open", str(caught.exception))
+        self.assertIn("pr cleanup --as implementer --pr 1",
+                      str(caught.exception))
+        self.assertEqual(self.forge.pr.call_count, 2)
+        self.forge.snapshot.assert_called_once_with(1)
+        self.forge.merge.assert_not_called()
+        # Still open: the failed read is the answer.
+        with self.assertRaises(ForgeError) as caught:
+            self.merge(merged=False, snapshot_error=unreadable,
+                       pr_reads=[opened, opened])
+        self.assertIs(caught.exception, unreadable)
+        self.assertEqual(self.forge.pr.call_count, 2)
+        self.forge.merge.assert_not_called()
 
     def test_refusal_names_pr_cleanup_only_for_a_merged_pr(self):
         for merged in (True, False):
