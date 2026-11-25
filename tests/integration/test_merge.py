@@ -1219,6 +1219,7 @@ class ResumedCleanupTests(unittest.TestCase):
             "head": self.head, "head_branch": "issue-1",
             "base_branch": "main", "merge_method": "merge",
             "moved_base": False, "issue": 1, "outside_pr_merge": False,
+            "implementation_record": None,
         })
         refused = self.merge(expected=4)
         self.assertIn("PR is not open", refused["error"])

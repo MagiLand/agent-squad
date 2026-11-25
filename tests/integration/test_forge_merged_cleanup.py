@@ -1,6 +1,7 @@
 """#175: pr cleanup finishes a PR that the forge merged without pr merge."""
 
 import json
+import shutil
 import os
 from pathlib import Path
 import sys
@@ -332,6 +333,75 @@ class ForgeMergedCleanup:
         self.assertNotIn("pr cleanup", refused["error"])
         self.assertEqual(self.merge_requests(), requests)
 
+    def retry_past(self, unrelated: Path) -> None:
+        """A first run stops after removing the worktree; the retry finishes
+        although ``unrelated`` holds a record that names the PR."""
+        f = self.f
+        target = f.root / "scratch-target"
+        target.mkdir()
+        scratch = self.scratch
+        shutil.rmtree(scratch)
+        scratch.symlink_to(target)
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"], "scratch directory")
+        self.assertFalse(f.worktree.exists())
+        scratch.unlink()
+        second = self.cleanup()
+        # The unrelated checkout is kept; with it gone, all else is done.
+        self.assertTrue(unrelated.exists())
+        self.assertIn(str(unrelated), f.git("worktree", "list"))
+        f.git("worktree", "remove", "--force", str(unrelated))
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def unrelated_owner(self, path: Path, **values: object) -> Path:
+        f = self.f
+        f.git("worktree", "add", "-b", path.name, str(path))
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
+        record = json.loads(
+            (admin / "agent-squad-implementation.json").read_text())
+        other = Path(f.git("rev-parse", "--absolute-git-dir", cwd=path))
+        (other / "agent-squad-implementation.json").write_text(
+            json.dumps(dict(record, **values)))
+        return path
+
+    def test_record_outside_the_root_does_not_block_a_retry(self) -> None:
+        """REV-10: an exact copy outside worktree_root."""
+        self.retry_past(self.unrelated_owner(self.f.root / "outside-root"))
+
+    def test_boolean_record_does_not_block_a_retry(self) -> None:
+        """REV-10: a record under worktree_root naming the PR by true."""
+        self.retry_past(self.unrelated_owner(
+            self.f.worktree.parent / "issue-9", pr=True))
+
+    def test_malformed_newer_approval_is_not_the_approved_head(self) -> None:
+        """REV-11: an approval whose Unanchored findings repeat an entry."""
+        f = self.f
+        f.review("approved")
+        valid = self.head
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.review("approved", [finding("optional")])
+        status = f.cli("status", "--pr", "1")
+        root = status["findings"][-1]["root"]["body"]
+        entry = root.splitlines()[0]
+        model = f.read_model()
+        newer = [r for r in model["prs"]["1"]["reviews"]
+                 if r["commit_id"] == self.head
+                 and "verdict=approved" in r["body"]]
+        self.assertEqual(len(newer), 1)
+        body = newer[0]["body"].rstrip("\n")
+        if "\n## Unanchored findings\n" not in body:
+            # On Forgejo the section already carries the entry once.
+            body += f"\n\n## Unanchored findings\n\n{entry}\n\nOne."
+        newer[0]["body"] = body + f"\n\n{entry}\n\nTwo.\n"
+        f.save_model(model)
+        self.assertIn("duplicate Unanchored findings entry", json.dumps(
+            f.cli("status", "--pr", "1")["diagnostics"]))
+        merge_commit = self.forge_merge("merge")
+        result = self.cleanup()
+        self.assertEqual(result["approved_head"], valid)
+        self.assert_finished(result, merge_commit)
+
     def test_merged_pr_without_merge_commit_or_on_another_base_is_refused(
         self,
     ) -> None:
@@ -645,6 +715,52 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.assertEqual(f.herdr_model()["workspaces"], [])
         self.assert_finished(result, merge_commit)
 
+    def test_closed_reviewer_workspace_does_not_block_a_retry(self) -> None:
+        """REV-12: Git refuses the checkout after Herdr closed its
+        workspace; the retry finishes once Git allows it."""
+        f = self.f
+        f.herdr_settings(implementer={"cwd": str(f.worktree)})
+        review = Path(f.cli("reviewer", "launch", "--pr", "1")["worktree"])
+        model = f.herdr_model()
+        workspace = next(w for w in model["workspaces"]
+                         if (w.get("worktree") or {}).get("checkout_path")
+                         == str(review))
+        workspace["worktree"] = None
+        f.save_herdr(model)
+        f.git("worktree", "lock", str(review))
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        failed = first["cleanup"][-1]
+        self.assertEqual(failed["step"], "review worktree")
+        self.assertIn(
+            f"Herdr workspace {workspace['workspace_id']} closed",
+            failed["detail"])
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+        self.assertTrue(review.exists())
+        f.git("worktree", "unlock", str(review))
+        second = self.cleanup()
+        self.assertFalse(review.exists())
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def test_moved_original_checkout_still_blocks_a_retry(self) -> None:
+        """REV-10 control: the proved record survives a moved checkout."""
+        f = self.f
+        f.settings(branch_delete_403=True)
+        self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["cleanup"][-1]["step"], "remote branch")
+        moved = f.root / "moved-implementation"
+        f.git("worktree", "move", str(f.worktree), str(moved))
+        f.git("switch", "--detach", cwd=moved)
+        f.settings(branch_delete_403=False)
+        second = self.cleanup(expected=3)
+        self.assertEqual(second["cleanup"][-1]["step"],
+                         "implementation ownership")
+        self.assertIn("ownership record remains",
+                      second["cleanup"][-1]["detail"])
+        self.assertTrue(moved.exists())
+        self.assertTrue(self.record.exists())
+
     def test_pr_merge_names_cleanup_only_while_cleanup_can_run(self) -> None:
         self.f.review("approved")
         merge_commit = self.forge_merge("merge")
@@ -685,6 +801,7 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.assertIs(stopped["merged_outside_pr_merge"], False)
         record = json.loads(self.record.read_text())
         self.assertIs(record.pop("outside_pr_merge"), False)
+        self.assertIsNone(record.pop("implementation_record"))
         self.record.write_text(json.dumps(record))
         f.settings(branch_delete_403=False)
         result = self.cleanup()
@@ -699,10 +816,17 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.pr("merge", 3)
         record = json.loads(self.record.read_text())
         f.settings(branch_delete_403=False)
-        for value in ("true", 1, None):
-            with self.subTest(value=value):
-                self.record.write_text(
-                    json.dumps(dict(record, outside_pr_merge=value)))
+        owner = str(self.f.repo / ".git/worktrees/issue-1"
+                    / "agent-squad-implementation.json")
+        for values in (
+            {"outside_pr_merge": "true"}, {"outside_pr_merge": 1},
+            {"outside_pr_merge": None},
+            {"outside_pr_merge": True},
+            {"outside_pr_merge": True, "implementation_record": "x.json"},
+            {"implementation_record": owner},
+        ):
+            with self.subTest(values=values):
+                self.record.write_text(json.dumps(dict(record, **values)))
                 calls = len(f.read_model()["calls"])
                 result = self.cleanup(expected=1)
                 self.assertIn("malformed merge record", result["error"])

@@ -388,8 +388,20 @@ def close_reviewer(worktree: ReviewWorktree, client: HerdrClient) -> dict:
         workspace = verify_workspace(worktree, client, resource)
         if workspace.get("worktree") is None:
             client.close_workspace(resource["workspace_id"])
-            # Name the closed workspace too (#175 REV-5).
-            return {**worktree.remove(), **resource}
+            # Record the confirmed closure before removing the checkout: a
+            # retry after a failed removal then takes the path above, which
+            # no longer looks up the closed workspace but still refuses an
+            # unowned workspace that uses the checkout (#175).
+            worktree.save_owner({**worktree.identity(), "herdr": None})
+            try:
+                removed = worktree.remove()
+            except (AgentSquadError, OSError, ValueError) as error:
+                raise RetainedError(
+                    f"Herdr workspace {resource['workspace_id']} closed;"
+                    f" then {error}"
+                ) from None
+            # Name the closed workspace too (#175).
+            return {**removed, **resource}
         removed = client.remove_worktree(resource["workspace_id"])
         if (
             removed.get("path") != str(worktree.path)

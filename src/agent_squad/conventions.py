@@ -8,7 +8,7 @@ import re
 from typing import Callable
 
 from .forge import (
-    Comment, Evidence, ReviewState, Snapshot, requested_state,
+    Comment, Evidence, Review, ReviewState, Snapshot, requested_state,
 )
 from .initialization import AgentSquadError, Configuration, Worktree
 
@@ -549,17 +549,42 @@ def evidence_dict(evidence: Evidence) -> dict:
     return asdict(evidence)
 
 
+def checked_review(
+    review: Review, fields: dict[str, str], pr: int, seen_ids: set[str],
+) -> list[dict[str, str]]:
+    """The review checks that need no Git object, shared by derive() and
+    approved_review_head(); returns the listed findings."""
+    listed = validate_review_body(review.evidence.body)
+    if (
+        int(fields["pr"]) != pr
+        or fields["head"] != review.commit_id
+        or review.state == ReviewState.PENDING
+    ):
+        raise AgentSquadError(
+            "review target, commit, base ancestry, or submission is invalid"
+        )
+    if any(f["finding"] in seen_ids for f in listed):
+        raise AgentSquadError(
+            "finding ID is listed by more than one tagged review"
+        )
+    return listed
+
+
 def approved_review_head(
     snapshot: Snapshot, config: Configuration,
 ) -> str | None:
     """The head the latest tagged approving review names, from evidence only.
 
-    The tag, author, PR, submission, commit and body checks match derive();
-    its Git ancestry checks are left out, so no object is read or fetched.
-    pr cleanup reports this for information after the forge merged (#175).
+    It applies derive()'s checks that need no Git object (checked_review,
+    the Unanchored findings section, and an approval listing no blocking
+    finding), in the same evidence order. Its Git ancestry checks, and the
+    thread state that needs them, are left out, so no object is read or
+    fetched. pr cleanup reports this for information after the forge
+    merged (#175).
     """
     reviewer = config.reviewer.forge_account.casefold()
     head = None
+    seen_ids: set[str] = set()
     for review in sorted(snapshot.reviews, key=lambda r: order(r.evidence)):
         e = review.evidence
         try:
@@ -568,17 +593,19 @@ def approved_review_head(
                 parsed is None
                 or parsed.kind != "review"
                 or e.author.casefold() != reviewer
-                or int(parsed.fields["pr"]) != snapshot.pr.number
-                or parsed.fields["head"] != review.commit_id
-                or review.state == ReviewState.PENDING
             ):
                 continue
-            listed = validate_review_body(e.body)
+            listed = checked_review(
+                review, parsed.fields, snapshot.pr.number, seen_ids,
+            )
+            approved = parsed.fields["verdict"] == "approved"
+            if approved and any(f["severity"] == "blocking" for f in listed):
+                continue
+            unanchored_text(e.body)
         except (AgentSquadError, ValueError):
             continue
-        if parsed.fields["verdict"] == "approved" and not any(
-            f["severity"] == "blocking" for f in listed
-        ):
+        seen_ids.update(f["finding"] for f in listed)
+        if approved:
             head = parsed.fields["head"]
     return head
 
@@ -763,21 +790,14 @@ def derive(
             continue
         fields = parsed.fields
         try:
-            listed = validate_review_body(e.body)
+            listed = checked_review(review, fields, pr.number, seen_ids)
             if (
-                int(fields["pr"]) != pr.number
-                or fields["head"] != review.commit_id
-                or review.state == ReviewState.PENDING
-                or not ancestor(fields["base"], fields["head"])
+                not ancestor(fields["base"], fields["head"])
                 or not ancestor(fields["base"], base_tip)
             ):
                 raise AgentSquadError(
                     "review target, commit, base ancestry, or submission is"
                     " invalid"
-                )
-            if any(f["finding"] in seen_ids for f in listed):
-                raise AgentSquadError(
-                    "finding ID is listed by more than one tagged review"
                 )
             verdict = fields["verdict"]
             if verdict == "approved" and (

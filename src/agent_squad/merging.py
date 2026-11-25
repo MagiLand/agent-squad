@@ -32,9 +32,13 @@ IMPLEMENTATION_OWNER = "agent-squad-implementation.json"
 MERGE_RECORD_FIELDS = frozenset({
     "schema_version", "common", "pr", "head", "head_branch", "base_branch",
     "merge_method", "moved_base", "issue", "outside_pr_merge",
+    "implementation_record",
 })
-# An earlier version wrote no outside_pr_merge; it reads as false (#175).
-EARLIER_MERGE_RECORD_FIELDS = MERGE_RECORD_FIELDS - {"outside_pr_merge"}
+# An earlier version wrote neither field; the record reads as one pr merge
+# wrote (#175).
+EARLIER_MERGE_RECORD_FIELDS = MERGE_RECORD_FIELDS - {
+    "outside_pr_merge", "implementation_record",
+}
 # The method each integration check proves when no method is known (#175).
 PROVED_METHODS = {
     "verified by ancestry": "merge",
@@ -220,7 +224,7 @@ def ownership_records(repository: Repository, pr: int) -> list[Path]:
 
 def named_implementations(
     repository: Repository, pr: int,
-) -> list[tuple[Worktree, dict]]:
+) -> list[tuple[Worktree, dict, Path]]:
     """Registered linked worktrees under ``worktree_root`` whose
     implementation record names ``pr`` by an integer (#175).
 
@@ -247,7 +251,7 @@ def named_implementations(
             and type(owner.get("pr")) is int
             and owner["pr"] == pr
         ):
-            found.append((worktree, owner))
+            found.append((worktree, owner, record))
     return found
 
 
@@ -282,7 +286,7 @@ def forge_merged_record(
             " pr cleanup finishes a merge made outside pr merge only when"
             " exactly one names it"
         )
-    worktree, owner = candidates[0]
+    worktree, owner, owner_record = candidates[0]
     try:
         branch = owner.get("branch")
         if not isinstance(branch, str) or not branch:
@@ -308,6 +312,11 @@ def forge_merged_record(
         "moved_base": False,
         "issue": issue,
         "outside_pr_merge": True,
+        # A retry recognizes the original checkout's record by its place,
+        # since an unrelated copy can have identical content (#175).
+        "implementation_record": str(
+            owner_record.parent.resolve() / IMPLEMENTATION_OWNER
+        ),
     }
 
 
@@ -318,13 +327,15 @@ def merge_record_path(repository: Repository, pr: int) -> Path:
 
 def write_merge_record(
     repository: Repository, pr: int, target: dict, method: str, moved: bool,
-    *, outside: bool = False,
+    *, outside: bool = False, implementation_record: str | None = None,
 ) -> dict:
     """Save the identities a later pr cleanup needs (#121).
 
     Only a validated ownership record supplies the issue number, and the
     implementation worktree that holds it is removed during cleanup.
-    ``outside`` marks a merge the forge made without pr merge (#175).
+    ``outside`` marks a merge the forge made without pr merge, and
+    ``implementation_record`` names the ownership record proved then
+    (#175).
     """
     _, issue = owned_implementation(
         repository, pr, target["head_branch"], target["head"]
@@ -340,6 +351,7 @@ def write_merge_record(
         "moved_base": moved,
         "issue": issue,
         "outside_pr_merge": outside,
+        "implementation_record": implementation_record,
     }
     path = merge_record_path(repository, pr)
     descriptor, temporary = tempfile.mkstemp(
@@ -372,11 +384,23 @@ def load_merge_record(repository: Repository, pr: int) -> dict | None:
             f"pr cleanup refused: unreadable merge record: {path}: {error}"
         ) from None
     if isinstance(record, dict) and set(record) == EARLIER_MERGE_RECORD_FIELDS:
-        record = {**record, "outside_pr_merge": False}
+        record = {
+            **record, "outside_pr_merge": False,
+            "implementation_record": None,
+        }
     if not (
         isinstance(record, dict)
         and set(record) == MERGE_RECORD_FIELDS
         and type(record["outside_pr_merge"]) is bool
+        and (
+            record["implementation_record"] is None
+            if not record["outside_pr_merge"]
+            else isinstance(record["implementation_record"], str)
+            and Path(record["implementation_record"]).parent.parent
+            == repository.common / "worktrees"
+            and Path(record["implementation_record"]).name
+            == IMPLEMENTATION_OWNER
+        )
         and type(record["schema_version"]) is int
         and record["schema_version"] == 1
         and type(record["pr"]) is int
@@ -526,9 +550,14 @@ def merged_source(
 
 def cleanup_merge(
     repository: Repository, pr: int, head: str, branch: str, issue: int,
-    forge: Forge,
+    forge: Forge, *, owner_record: Path | None = None,
 ) -> list[dict]:
     """Stop on a failed step; preserve unrelated or replaced resources.
+
+    ``owner_record`` is the ownership record proved for a merge made
+    outside pr merge (#175): after the worktree is gone, only that record
+    surviving refuses the step, since others neither block nor authorize
+    that cleanup. Without it, any record that may be the PR's refuses.
 
     The identities come from the merge record, so a repeated run finishes
     after an earlier one removed the implementation worktree and its
@@ -560,7 +589,12 @@ def cleanup_merge(
             for w in list_worktrees(repository.primary)
         ):
             return True
-        survivors = ownership_records(repository, pr)
+        if owner_record is None:
+            survivors = ownership_records(repository, pr)
+        elif owner_record.exists() or owner_record.is_symlink():
+            survivors = [owner_record]
+        else:
+            survivors = []
         if survivors:
             raise RetainedError(
                 "implementation worktree moved or changed; its ownership"
@@ -830,6 +864,7 @@ def complete_merge(
         try:
             record = write_merge_record(
                 repository, pr, record, method, False, outside=True,
+                implementation_record=record["implementation_record"],
             )
         except (AgentSquadError, OSError, ValueError) as error:
             result["merge_record"]["reason"] = str(error)
@@ -843,6 +878,10 @@ def complete_merge(
         result["cleanup"] = cleanup_merge(
             repository, pr, record["head"], record["head_branch"],
             record["issue"], forge,
+            owner_record=(
+                Path(record["implementation_record"])
+                if record["outside_pr_merge"] else None
+            ),
         )
     except (AgentSquadError, OSError, ValueError) as error:
         result["cleanup"] = [{
