@@ -640,6 +640,7 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(result["merged"])
         self.assertEqual(result["integration"],
                          "integration not verifiable by tree identity")
+        self.assertIsNone(result["merged_head"])
         self.assertEqual(result["cleanup"], [])
         self.assertEqual(result["fast_forward"]["result"], "skipped")
         self.assertIn("not been verified", result["fast_forward"]["reason"])

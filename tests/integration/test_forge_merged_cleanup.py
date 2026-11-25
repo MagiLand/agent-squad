@@ -611,6 +611,19 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         result = self.pr("merge", 0)
         self.assertIs(result["merged_outside_pr_merge"], False)
         self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+        self.assertEqual(result["forge_head"], self.head)
+        self.assertEqual(result["forge_head_branch"], "issue-1")
+
+    def test_pr_merge_by_squash_reports_the_head_as_merged(self) -> None:
+        self.configure("squash")
+        self.f.review("approved")
+        result = self.pr("merge", 0)
+        self.assertEqual(result["integration"], "verified by tree identity")
+        self.assertIs(result["merged_outside_pr_merge"], False)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+        self.assertEqual(result["forge_head"], self.head)
 
     def test_record_from_an_earlier_version_loads_as_pr_merge(self) -> None:
         f = self.f
