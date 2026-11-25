@@ -213,12 +213,12 @@ def ownership_records(repository: Repository, pr: int) -> list[Path]:
     by a valid number is left out; any other record may be this PR's.
     """
     admin = repository.common / "worktrees"
-    if not admin.is_dir():
+    if not entry_remains(admin):
         return []
     records = []
     for directory in sorted(admin.iterdir()):
         record = directory / IMPLEMENTATION_OWNER
-        if not (record.exists() or record.is_symlink()):
+        if not entry_remains(record):
             continue
         try:
             owner = (
@@ -422,12 +422,13 @@ def marker_in_worktree_slot(repository: Repository, marker: object) -> bool:
     )
 
 
-def marker_remains(marker: Path) -> bool:
-    """Whether the cleanup marker is still there. Only a name that is
-    absent means that it is gone; any other failure to read it raises, so
-    that the step fails instead of taking the checkout for removed."""
+def entry_remains(path: Path) -> bool:
+    """Whether a cleanup marker, an ownership record, or the directory
+    that holds them is still there. Only a name that is absent means that
+    it is gone; any other failure to read it raises, so that the step
+    fails instead of taking the checkout for removed (#175)."""
     try:
-        os.lstat(marker)
+        os.lstat(path)
     except OSError as error:
         if error.errno in (errno.ENOENT, errno.ENOTDIR):
             return False
@@ -707,7 +708,7 @@ def cleanup_merge(
             return True
         if cleanup_marker is None:
             survivors = ownership_records(repository, pr)
-        elif marker_remains(cleanup_marker):
+        elif entry_remains(cleanup_marker):
             survivors = [cleanup_marker]
         else:
             survivors = []

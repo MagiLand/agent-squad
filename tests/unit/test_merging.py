@@ -380,29 +380,29 @@ class SavedMarkerPathTests(unittest.TestCase):
                 self.assertFalse(file_name_text(value))
 
     def test_marker_is_gone_only_when_its_name_is_absent(self) -> None:
-        from agent_squad.merging import marker_remains
+        from agent_squad.merging import entry_remains
 
         slot = self.common / "worktrees" / "issue-1"
         slot.mkdir(parents=True)
         marker = slot / self.name
-        self.assertFalse(marker_remains(marker))
+        self.assertFalse(entry_remains(marker))
         marker.touch()
-        self.assertTrue(marker_remains(marker))
+        self.assertTrue(entry_remains(marker))
         marker.unlink()
         # A marker that is a symlink, even to nothing, is still there.
         marker.symlink_to(slot / "absent")
-        self.assertTrue(marker_remains(marker))
+        self.assertTrue(entry_remains(marker))
         marker.unlink()
         slot.rmdir()
-        self.assertFalse(marker_remains(marker))
+        self.assertFalse(entry_remains(marker))
         # The worktree directory replaced by a file: no marker in it.
         slot.write_text("x")
-        self.assertFalse(marker_remains(marker))
+        self.assertFalse(entry_remains(marker))
         slot.unlink()
         # A directory that cannot be read says nothing: the step fails.
         slot.symlink_to(slot.name)
         with self.assertRaises(OSError):
-            marker_remains(marker)
+            entry_remains(marker)
 
     def test_unreadable_marker_fails_the_ownership_step(self) -> None:
         from unittest.mock import Mock
@@ -686,3 +686,64 @@ class SurvivingOwnerTests(unittest.TestCase):
             "step": "implementation ownership", "ok": True,
             "detail": "already removed",
         })
+
+    def scan(self, arrange) -> dict:
+        """The ownership step for a pr merge record, with no worktree
+        registered, after ``arrange`` set up ``<common>/worktrees``."""
+        from tempfile import TemporaryDirectory
+        from unittest.mock import Mock
+        from agent_squad.merging import cleanup_merge
+
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repository = cleanup_repository()
+        repository.common = Path(temporary.name).resolve()
+        arrange(repository.common / "worktrees")
+        forge = Mock()
+        forge.branch_head.return_value = H
+        with patch("agent_squad.merging.list_worktrees", return_value=[]):
+            steps = cleanup_merge(repository, 2, H, "feature", 1, forge)
+        if not steps[0]["ok"]:
+            self.assertEqual(len(steps), 1)
+            forge.delete_branch.assert_not_called()
+        return steps[0]
+
+    def test_only_an_absent_record_counts_as_gone(self):
+        """#175: a record, or a directory holding records, that cannot be
+        read is not a record that is gone; the step fails."""
+        def loop(path: Path) -> None:
+            path.symlink_to(path.name)
+
+        def no_directory(slots: Path) -> None:
+            pass
+
+        def no_record(slots: Path) -> None:
+            (slots / "other").mkdir(parents=True)
+
+        def stray_file(slots: Path) -> None:
+            slots.mkdir()
+            (slots / "stray").write_text("x")
+
+        def dangling_record(slots: Path) -> None:
+            (slots / "moved").mkdir(parents=True)
+            (slots / "moved/agent-squad-implementation.json").symlink_to(
+                slots / "absent")
+
+        def looping_entry(slots: Path) -> None:
+            slots.mkdir()
+            loop(slots / "moved")
+
+        for arrange in (no_directory, no_record, stray_file):
+            with self.subTest(arrange.__name__):
+                self.assertEqual(self.scan(arrange), {
+                    "step": "implementation ownership", "ok": True,
+                    "detail": "already removed",
+                })
+        step = self.scan(dangling_record)
+        self.assertFalse(step["ok"])
+        self.assertIn("ownership record remains", step["detail"])
+        for arrange in (looping_entry, loop):
+            with self.subTest(arrange.__name__):
+                step = self.scan(arrange)
+                self.assertFalse(step["ok"])
+                self.assertIn("symbolic links", step["detail"])
