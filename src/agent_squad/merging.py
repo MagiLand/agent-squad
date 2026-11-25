@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ import tempfile
 from typing import Callable, Literal, TypedDict
 
 from .commands import is_ancestor, state_for
-from .conventions import SHA, closes_issue
+from .conventions import SHA, approved_review_head, closes_issue
 from .forge import ForgeError, Forge, MergeRefused, PullRequest
 from .herdr import HerdrClient, HerdrError
 from .initialization import (
@@ -56,14 +55,26 @@ def implementation_metadata(
 ) -> Path:
     """Prove a linked checkout's branch and Git directory identity."""
     worktrees = list_worktrees(repository.primary)
+    if branch == repository.configuration.base_branch or not any(
+        w.root == path and w.branch == f"refs/heads/{branch}"
+        for w in worktrees
+    ):
+        raise RetainedError(f"not the implementation linked worktree: {path}")
+    return linked_record(repository, path, worktrees)
+
+
+def linked_record(
+    repository: Repository, path: Path,
+    worktrees: tuple[Worktree, ...] | None = None,
+) -> Path:
+    """Prove a registered linked checkout's Git directory identity, whatever
+    it has checked out, and name its implementation record path."""
+    if worktrees is None:
+        worktrees = list_worktrees(repository.primary)
     if (
         path == repository.primary
         or path.is_symlink()
-        or branch == repository.configuration.base_branch
-        or not any(
-            w.root == path and w.branch == f"refs/heads/{branch}"
-            for w in worktrees
-        )
+        or not any(w.root == path for w in worktrees)
     ):
         raise RetainedError(f"not the implementation linked worktree: {path}")
     admin = Path(git_output(path, "rev-parse", "--absolute-git-dir"))
@@ -213,19 +224,19 @@ def named_implementations(
     """Registered linked worktrees under ``worktree_root`` whose
     implementation record names ``pr`` by an integer (#175).
 
-    A worktree whose Git identity cannot be proved, or whose record is a
-    symlink, unreadable, or names another PR, is not a candidate.
+    A worktree counts whatever it has checked out, a detached HEAD included:
+    the branch is checked only for the single candidate. A worktree whose
+    Git identity cannot be proved, or whose record is a symlink,
+    unreadable, or names another PR, is not a candidate.
     """
     root = repository.resolve_root(repository.configuration.worktree_root)
+    worktrees = list_worktrees(repository.primary)
     found = []
-    for worktree in list_worktrees(repository.primary):
-        if worktree.root.parent != root or worktree.branch is None:
+    for worktree in worktrees:
+        if worktree.root.parent != root:
             continue
         try:
-            record = implementation_metadata(
-                repository, worktree.root,
-                worktree.branch.removeprefix("refs/heads/"),
-            )
+            record = linked_record(repository, worktree.root, worktrees)
             if record.is_symlink() or not record.exists():
                 continue
             owner = decode_json(record.read_text())
@@ -866,26 +877,29 @@ def merge_pr(
     )
     # Re-read authority after the potentially slow rules lookup.
     snapshot = forge.snapshot(pr)
-    state = state_for(repository, snapshot)
-    try:
-        moved = check_merge_gate(
-            state, accept_moved_base=accept_moved_base,
-            accept_merge_hold=accept_merge_hold,
-        )
-    except GateError as error:
+    if snapshot.pr.merged:
+        # Refused from the merged state and local records alone, before any
+        # read of the PR head, which a merged Forgejo PR may report stale
+        # (E9) so that fetching it fails (#175).
         path = merge_record_path(repository, pr)
-        if state["pr"]["merged"] and (path.exists() or path.is_symlink()):
-            raise GateError(
-                f"{error}; to finish the merge pr merge started, run"
+        refused = "pr merge refused: PR is not open"
+        if path.exists() or path.is_symlink():
+            refused += (
+                "; to finish the merge pr merge started, run"
                 f" {cleanup_command(pr)}"
-            ) from None
+            )
         # Named only while pr cleanup can still find the PR's resources.
-        if state["pr"]["merged"] and named_implementations(repository, pr):
-            raise GateError(
-                f"{error}; the PR was merged outside pr merge; to finish"
-                f" its cleanup, run {cleanup_command(pr)}"
-            ) from None
-        raise
+        elif named_implementations(repository, pr):
+            refused += (
+                "; the PR was merged outside pr merge; to finish its"
+                f" cleanup, run {cleanup_command(pr)}"
+            )
+        raise GateError(refused)
+    state = state_for(repository, snapshot)
+    moved = check_merge_gate(
+        state, accept_moved_base=accept_moved_base,
+        accept_merge_hold=accept_merge_hold,
+    )
     target = state["target"]
     method = repository.configuration.merge_method
     result = {
@@ -980,15 +994,11 @@ def cleanup_pr(repository: Repository, forge: Forge, pr: int) -> dict:
     if record is None:
         record = forge_merged_record(repository, pr, merged)
     # Read on every run, before any change, so the Implementer can report
-    # whether the merged head was the approved one. The derivation uses the
-    # proved local head: a merged Forgejo PR can report a stale head that
-    # the remote no longer serves (E9).
-    snapshot = forge.snapshot(pr)
-    local = replace(
-        snapshot.pr, head=record["head"], head_branch=record["head_branch"],
-    )
-    approved = approved_head(
-        state_for(repository, replace(snapshot, pr=local))
+    # whether the merged head was the approved one. It is read from review
+    # evidence alone: fetching the PR head or the commits of earlier reviews
+    # can fail after a merge (E9) and must not strand the cleanup.
+    approved = approved_review_head(
+        forge.snapshot(pr), repository.configuration
     )
     # Only the merge commit comes from the forge: a merged Forgejo PR can
     # report a synthetic head branch and an older head (E9).

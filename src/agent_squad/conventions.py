@@ -549,6 +549,40 @@ def evidence_dict(evidence: Evidence) -> dict:
     return asdict(evidence)
 
 
+def approved_review_head(
+    snapshot: Snapshot, config: Configuration,
+) -> str | None:
+    """The head the latest tagged approving review names, from evidence only.
+
+    The tag, author, PR, submission, commit and body checks match derive();
+    its Git ancestry checks are left out, so no object is read or fetched.
+    pr cleanup reports this for information after the forge merged (#175).
+    """
+    reviewer = config.reviewer.forge_account.casefold()
+    head = None
+    for review in sorted(snapshot.reviews, key=lambda r: order(r.evidence)):
+        e = review.evidence
+        try:
+            parsed = parse_line(first_line(e.body))
+            if (
+                parsed is None
+                or parsed.kind != "review"
+                or e.author.casefold() != reviewer
+                or int(parsed.fields["pr"]) != snapshot.pr.number
+                or parsed.fields["head"] != review.commit_id
+                or review.state == ReviewState.PENDING
+            ):
+                continue
+            listed = validate_review_body(e.body)
+        except (AgentSquadError, ValueError):
+            continue
+        if parsed.fields["verdict"] == "approved" and not any(
+            f["severity"] == "blocking" for f in listed
+        ):
+            head = parsed.fields["head"]
+    return head
+
+
 def derive(
     snapshot: Snapshot,
     config: Configuration,

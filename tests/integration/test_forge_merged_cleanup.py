@@ -289,6 +289,49 @@ class ForgeMergedCleanup:
         self.assertEqual(second["head"], self.head)
         self.assert_finished(second, merge_commit, "up to date")
 
+    def test_unavailable_earlier_review_head_changes_no_cleanup(self) -> None:
+        """REV-8: an earlier approval names a commit Git cannot fetch."""
+        f = self.f
+        f.review("approved")
+        replaced = self.head
+        self.head = f.push("value = 1\nsecond = 2\nthird = 3\nmore = 4\n")
+        f.review("approved")
+        missing = "ab" * 20
+        model = f.read_model()
+        earlier = [r for r in model["prs"]["1"]["reviews"]
+                   if r["commit_id"] == replaced
+                   and "verdict=approved" in r["body"]]
+        self.assertEqual(len(earlier), 1)
+        earlier[0]["commit_id"] = missing
+        earlier[0]["body"] = earlier[0]["body"].replace(replaced, missing)
+        f.save_model(model)
+        (f.worktree / "untracked.txt").write_text("retain")
+        merge_commit = self.forge_merge("merge")
+        first = self.cleanup(expected=3)
+        self.assertEqual(first["approved_head"], self.head)
+        self.assertEqual(first["cleanup"][-1]["step"],
+                         "implementation worktree")
+        (f.worktree / "untracked.txt").unlink()
+        second = self.cleanup()
+        self.assertEqual(second["approved_head"], self.head)
+        self.assert_finished(second, merge_commit, "up to date")
+
+    def test_pr_merge_names_cleanup_despite_a_stale_forge_head(self) -> None:
+        """REV-9: the refusal needs no read of the reported head."""
+        merge_commit = self.forge_merge("merge")
+        self.edit_pr(head_sha="0123456789abcdef" * 2 + "01234567",
+                     head_ref="synthetic-pull-ref")
+        requests = self.merge_requests()
+        refused = self.pr("merge", 4)
+        self.assertIn("PR is not open", refused["error"])
+        self.assertIn("merged outside pr merge", refused["error"])
+        self.assertIn(COMMAND, refused["error"])
+        self.assert_finished(self.cleanup(), merge_commit)
+        refused = self.pr("merge", 4)
+        self.assertIn("PR is not open", refused["error"])
+        self.assertNotIn("pr cleanup", refused["error"])
+        self.assertEqual(self.merge_requests(), requests)
+
     def test_merged_pr_without_merge_commit_or_on_another_base_is_refused(
         self,
     ) -> None:
@@ -447,6 +490,15 @@ class ForgeMergedCleanup:
         with self.subTest(case="two records name the PR"):
             other = f.worktree.parent / "issue-2"
             f.git("worktree", "add", "-b", "issue-2", str(other))
+            other_admin = Path(
+                f.git("rev-parse", "--absolute-git-dir", cwd=other))
+            (other_admin / "agent-squad-implementation.json").write_text(
+                original)
+            assert_refused("2 implementation records name PR #1")
+            f.git("worktree", "remove", "--force", str(other))
+        with self.subTest(case="a detached checkout also names the PR"):
+            other = f.worktree.parent / "issue-3"
+            f.git("worktree", "add", "--detach", str(other))
             other_admin = Path(
                 f.git("rev-parse", "--absolute-git-dir", cwd=other))
             (other_admin / "agent-squad-implementation.json").write_text(
