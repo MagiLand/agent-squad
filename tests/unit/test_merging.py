@@ -247,7 +247,8 @@ class CompleteMergeTests(unittest.TestCase):
         record = {
             "pr": 1, "base_branch": "main", "merge_method": "merge",
             "head": H, "head_branch": "feature", "moved_base": False,
-            "issue": 1,
+            "issue": 1, "outside_pr_merge": False,
+            "implementation_record": None,
         }
         path = Mock()
         path.unlink.side_effect = OSError("record busy")

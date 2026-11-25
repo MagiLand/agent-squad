@@ -618,11 +618,14 @@ class ForgeMergedCleanup:
         self.assertEqual(first["cleanup_command"], COMMAND)
         # Step 5 runs whatever the cleanup's outcome.
         self.assertEqual(first["fast_forward"]["result"], "fast-forwarded")
+        admin = Path(f.git("rev-parse", "--absolute-git-dir", cwd=f.worktree))
         self.assertEqual(json.loads(self.record.read_text()), {
             "schema_version": 1, "common": str(f.repo / ".git"), "pr": 1,
             "head": self.head, "head_branch": "issue-1",
             "base_branch": "main", "merge_method": "squash",
             "moved_base": False, "issue": 1, "outside_pr_merge": True,
+            "implementation_record": str(
+                admin.resolve() / "agent-squad-implementation.json"),
         })
         (f.worktree / "untracked.txt").unlink()
         second = self.cleanup()

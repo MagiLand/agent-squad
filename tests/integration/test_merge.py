@@ -833,8 +833,8 @@ class MergeTests(unittest.TestCase):
     ) -> None:
         f = self.f
 
-        def move_tracking_ref(*args):
-            steps = cleanup_merge(*args)
+        def move_tracking_ref(*args, **kwargs):
+            steps = cleanup_merge(*args, **kwargs)
             f.git("update-ref", "refs/remotes/origin/main", f.base)
             return steps
 
@@ -861,9 +861,9 @@ class MergeTests(unittest.TestCase):
             tips.append(self.advance_base())
             return merged
 
-        def record_head(*args):
+        def record_head(*args, **kwargs):
             heads.append(f.git("rev-parse", "HEAD"))
-            return cleanup_merge(*args)
+            return cleanup_merge(*args, **kwargs)
 
         with patch.dict(os.environ, f.env, clear=True):
             repository = load_initialized_repository(f.repo)
