@@ -572,7 +572,7 @@ class Forgejo:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 content = response.read()
-                kind = response.headers.get_content_type()
+                kind = response.headers.get_content_type() if text else None
         except HTTPError as error:
             detail = f"HTTP {error.code}"
             try:
@@ -596,7 +596,7 @@ class Forgejo:
                 "forge request failed or timed out; re-read the PR before"
                 " repeating a mutation"
             ) from None
-        if text:
+        if kind is not None:
             if not kind.startswith("text/"):
                 raise ForgeError(f"forge answered {kind}, not text")
             return content.decode("utf-8", errors="replace")
