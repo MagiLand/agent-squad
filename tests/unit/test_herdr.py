@@ -355,7 +355,8 @@ class PaneDirectoryTests(unittest.TestCase):
 
         worktree = Mock(path=path)
         return worktree, lambda: remove_unused_checkout(
-            worktree, {"workspaces": [], "panes": [], **inventory})
+            worktree,
+            {"workspaces": [], "panes": [], "agents": [], **inventory})
 
     def test_checkout_is_removed_only_when_nothing_uses_it(self) -> None:
         from agent_squad.initialization import RetainedError
@@ -371,6 +372,41 @@ class PaneDirectoryTests(unittest.TestCase):
             "pane that cannot be placed": (
                 self.checkout, {"panes": [{"cwd": str(loop)}]},
                 f"cannot resolve Herdr pane directory {loop}"),
+            # REV-25: each directory the inventory reports is placed, not
+            # the pane's own working directory alone.
+            "foreground process in the checkout": (
+                self.checkout,
+                {"panes": [{"cwd": str(self.other),
+                            "foreground_cwd": str(alias / "deep")}]},
+                "an unowned Herdr pane still uses this worktree"),
+            "foreground process that cannot be placed": (
+                self.checkout,
+                {"panes": [{"cwd": str(self.other),
+                            "foreground_cwd": str(loop)}]},
+                f"cannot resolve Herdr pane directory {loop}"),
+            "agent in the checkout": (
+                self.checkout, {"agents": [{"cwd": str(alias)}]},
+                "an unowned Herdr agent still uses this worktree"),
+            "agent's foreground process in the checkout": (
+                self.checkout,
+                {"agents": [{"cwd": None,
+                             "foreground_cwd": str(self.checkout / "gone")}]},
+                "an unowned Herdr agent still uses this worktree"),
+            "agent that cannot be placed": (
+                self.checkout, {"agents": [{"cwd": str(loop)}]},
+                f"cannot resolve Herdr agent directory {loop}"),
+            "registration's repository in the checkout": (
+                self.checkout,
+                {"workspaces": [{"worktree": {
+                    "checkout_path": str(self.other),
+                    "repo_root": str(alias / "deep")}}]},
+                "an unowned Herdr workspace still uses this worktree"),
+            "registration's repository that cannot be placed": (
+                self.checkout,
+                {"workspaces": [{"worktree": {
+                    "checkout_path": str(self.other),
+                    "repo_root": str(loop)}}]},
+                f"cannot resolve Herdr worktree registration {loop}"),
             "registration by another name": (
                 self.checkout,
                 {"workspaces": [{"worktree": {"checkout_path": str(alias)}}]},
@@ -392,14 +428,31 @@ class PaneDirectoryTests(unittest.TestCase):
                     remove()
                 self.assertIn(message, str(caught.exception))
                 worktree.remove.assert_not_called()
+        outside = {"cwd": str(self.other), "foreground_cwd": str(self.root)}
         elsewhere = {
-            "panes": [{"cwd": str(self.other)}, {"cwd": "relative"},
-                      {"cwd": None}, {}],
+            "panes": [outside, {"cwd": "relative"},
+                      {"cwd": None, "foreground_cwd": None}, {}],
+            "agents": [outside, {"foreground_cwd": "relative"}, {}],
             "workspaces": [{"worktree": None}, {},
-                           {"worktree": {"checkout_path": str(self.other)}}],
+                           {"worktree": {"checkout_path": str(self.other),
+                                         "repo_root": str(self.root)}}],
         }
         worktree, remove = self.unused(self.checkout, **elsewhere)
         self.assertIs(remove(), worktree.remove.return_value)
+
+    def test_incomplete_inventory_removes_nothing(self) -> None:
+        from agent_squad.herdr import HerdrError
+        from agent_squad.reviewer import remove_unused_checkout
+        from unittest.mock import Mock
+
+        complete = {"workspaces": [], "panes": [], "agents": []}
+        for missing in complete:
+            with self.subTest(missing=missing):
+                worktree = Mock(path=self.checkout)
+                partial = {k: v for k, v in complete.items() if k != missing}
+                with self.assertRaises(HerdrError):
+                    remove_unused_checkout(worktree, partial)
+                worktree.remove.assert_not_called()
 
 
 class LaunchGateTests(unittest.TestCase):

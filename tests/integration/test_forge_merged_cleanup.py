@@ -1419,43 +1419,109 @@ class GitHubForgeMergedCleanupTests(ForgeMergedCleanup, unittest.TestCase):
         self.restore_checkout(parked)
         self.assert_finished(self.cleanup(), merge_commit, "up to date")
 
-    def pane_keeps_the_checkout(self, place) -> None:
+    def pane_keeps_the_checkout(self, place, reported: str = "cwd") -> None:
         """A retry after the Reviewer was closed keeps its checkout while
         an unowned pane works in the directory ``place`` makes for it;
-        ``place`` returns that directory and the refusal to expect."""
+        ``place`` returns that directory and the refusal to expect.
+
+        ``reported`` is where the inventory reports that directory: as the
+        pane's ``cwd`` or ``foreground_cwd``, as an ``agent``'s
+        ``foreground_cwd``, or as the ``repo_root`` or ``checkout_path``
+        of the workspace's worktree registration. Every other directory
+        of the workspace is the primary checkout. The retry finishes once
+        that one directory is the primary checkout too, with the workspace
+        still listed."""
         f = self.f
         review, workspace = self.unregistered_reviewer()
         f.git("worktree", "lock", str(review))
         merge_commit = self.forge_merge("merge")
         self.cleanup(expected=3)
         f.git("worktree", "unlock", str(review))
-        cwd, refusal = place(review)
-        model = f.herdr_model()
-        self.assertEqual(model["workspaces"], [])
-        model["workspaces"].append({
-            "workspace_id": "w-stale", "label": "stale", "tab_count": 1,
-            "pane_count": 1, "active_tab_id": "w-stale:t1",
-            "worktree": None,
-        })
-        model["tabs"].append(
-            {"workspace_id": "w-stale", "tab_id": "w-stale:t1"})
-        model["panes"].append({
-            "workspace_id": "w-stale", "tab_id": "w-stale:t1",
-            "pane_id": "w-stale:p1", "terminal_id": "w-stale-terminal",
-            "cwd": str(cwd), "agent": None, "agent_status": "unknown",
-        })
-        f.save_herdr(model)
+        directory, refusal = place(review)
+
+        def stale(directory: Path) -> dict:
+            model = f.herdr_model()
+            for key in ("workspaces", "tabs", "panes", "agents"):
+                model[key] = [x for x in model[key]
+                              if x["workspace_id"] != "w-stale"]
+            place = {"workspace_id": "w-stale", "tab_id": "w-stale:t1"}
+            pane = {
+                **place, "pane_id": "w-stale:p1",
+                "terminal_id": "w-stale-terminal", "cwd": str(f.repo),
+                "foreground_cwd": str(f.repo), "agent": None,
+                "agent_status": "unknown",
+            }
+            registration = None
+            if reported in ("cwd", "foreground_cwd"):
+                pane[reported] = str(directory)
+            elif reported == "agent":
+                model["agents"].append({
+                    **pane, "name": "stale-agent", "agent": "codex",
+                    "foreground_cwd": str(directory),
+                })
+            else:
+                registration = {
+                    "repo_key": "stale", "repo_name": "stale",
+                    "repo_root": str(f.repo), "checkout_path": str(f.repo),
+                    "is_linked_worktree": False, reported: str(directory),
+                }
+            model["workspaces"].append({
+                "workspace_id": "w-stale", "label": "stale", "tab_count": 1,
+                "pane_count": 1, "active_tab_id": "w-stale:t1",
+                "worktree": registration,
+            })
+            model["tabs"].append(place)
+            model["panes"].append(pane)
+            return model
+
+        self.assertEqual(f.herdr_model()["workspaces"], [])
+        f.save_herdr(stale(directory))
         kept = self.cleanup(expected=3)
         self.assertEqual(kept["cleanup"][-1]["step"], "review worktree")
         self.assertIn(refusal, kept["cleanup"][-1]["detail"])
         self.assertTrue(review.exists())
         self.assertTrue(self.record.exists())
-        model = f.herdr_model()
-        for key in ("workspaces", "tabs", "panes"):
-            model[key] = [x for x in model[key]
-                          if x["workspace_id"] != "w-stale"]
-        f.save_herdr(model)
+        f.save_herdr(stale(f.repo))
         self.assert_finished(self.cleanup(), merge_commit, "up to date")
+        self.assertEqual(
+            [w["workspace_id"] for w in f.herdr_model()["workspaces"]],
+            ["w-stale"])
+
+    def reported_in_the_checkout(self, reported: str, occupant: str) -> None:
+        """REV-25: Herdr reports a pane's own working directory and that
+        of its foreground process, the same two for an agent, and a
+        registration's repository root. Any one of them in the checkout
+        keeps it, while every other directory is elsewhere."""
+        self.pane_keeps_the_checkout(lambda review: (
+            review, f"an unowned Herdr {occupant} still uses this worktree",
+        ), reported)
+
+    def test_foreground_directory_in_the_checkout_keeps_it(self) -> None:
+        self.reported_in_the_checkout("foreground_cwd", "pane")
+
+    def test_agent_directory_in_the_checkout_keeps_it(self) -> None:
+        self.reported_in_the_checkout("agent", "agent")
+
+    def test_registered_repository_in_the_checkout_keeps_it(self) -> None:
+        self.reported_in_the_checkout("repo_root", "workspace")
+
+    def test_registered_checkout_below_the_checkout_keeps_it(self) -> None:
+        self.pane_keeps_the_checkout(lambda review: (
+            review / "below",
+            "an unowned Herdr workspace still uses this worktree",
+        ), "checkout_path")
+
+    def test_unresolvable_foreground_directory_keeps_the_checkout(
+        self,
+    ) -> None:
+        """REV-25: the foreground process's directory is placed like the
+        pane's own, so one that cannot be placed keeps the checkout."""
+        def place(review: Path) -> tuple[Path, str]:
+            loop = self.f.root / "stale-foreground-directory"
+            loop.symlink_to(loop.name)
+            return loop, f"cannot resolve Herdr pane directory {loop}"
+
+        self.pane_keeps_the_checkout(place, "foreground_cwd")
 
     def test_unresolvable_pane_directory_keeps_the_checkout(self) -> None:
         """REV-18: a pane whose directory leads through a symlink loop

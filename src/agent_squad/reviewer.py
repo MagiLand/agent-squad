@@ -449,10 +449,12 @@ def directory_in_checkout(
 
 
 def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
-    """Remove an owned checkout that no Herdr workspace or pane still uses.
+    """Remove an owned checkout that nothing in the Herdr inventory uses.
 
-    A workspace counts by its worktree registration, and a pane by a
-    working directory at or below the checkout (#175).
+    Every directory the inventory reports counts when it is the checkout
+    or lies below it: the checkout and the repository root of a workspace's
+    worktree registration, and the working directory of a pane or an
+    agent, both its own and that of its foreground process (#175).
     """
     try:
         checkout = placed_directory(str(worktree.path))
@@ -460,29 +462,35 @@ def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
         raise RetainedError(
             f"cannot resolve review worktree {worktree.path}: {error}"
         ) from None
+
+    def inside(entry: dict, fields: tuple[str, ...], label: str) -> bool:
+        return any(
+            isinstance(entry.get(field), str)
+            and Path(entry[field]).is_absolute()
+            and directory_in_checkout(entry[field], label, checkout)
+            for field in fields
+        )
+
     for workspace in resource_objects(snapshot, "workspaces"):
         registration = workspace.get("worktree") or {}
         if not isinstance(registration, dict):
             raise RetainedError("Herdr worktree inventory is invalid")
-        registered = registration.get("checkout_path")
-        if registered == str(worktree.path) or (
-            isinstance(registered, str)
-            and Path(registered).is_absolute()
-            and directory_in_checkout(
-                registered, "Herdr worktree registration", checkout
-            )
+        if registration.get("checkout_path") == str(worktree.path) or inside(
+            registration, ("checkout_path", "repo_root"),
+            "Herdr worktree registration",
         ):
             raise RetainedError(
                 "an unowned Herdr workspace still uses this worktree"
             )
-    for pane in resource_objects(snapshot, "panes"):
-        cwd = pane.get("cwd")
-        if isinstance(cwd, str) and Path(cwd).is_absolute() and (
-            directory_in_checkout(cwd, "Herdr pane directory", checkout)
-        ):
-            raise RetainedError(
-                "an unowned Herdr pane still uses this worktree"
-            )
+    for key, occupant in (("panes", "pane"), ("agents", "agent")):
+        for entry in resource_objects(snapshot, key):
+            if inside(
+                entry, ("cwd", "foreground_cwd"),
+                f"Herdr {occupant} directory",
+            ):
+                raise RetainedError(
+                    f"an unowned Herdr {occupant} still uses this worktree"
+                )
     return worktree.remove()
 
 
