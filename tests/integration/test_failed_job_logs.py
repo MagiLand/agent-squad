@@ -697,12 +697,21 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
             ("log_status", {"21": 403}, "HTTP 403"),
             ("log_status", {"21": 500}, "HTTP 500"),
             ("actions_denied", ["developer"], "HTTP 404"),
-            ("log_content_type", "application/zip", "application/zip"),
+            ("log_content_type", "application/zip", "not one text type"),
             # No header, or one that names no text type, is not a log
             # (REV-12 of PR #181).
             ("log_content_type", "", "no content type"),
-            ("log_content_type", "unsupported", "unsupported, not text"),
-            ("log_content_type", "text/", "text/, not text"),
+            ("log_content_type", "unsupported", "not one text type"),
+            ("log_content_type", "text/", "not one text type"),
+            # One field holding several types, or a broken parameter
+            # (REV-12, review 7).
+            ("log_content_type", "text/plain; charset=utf-8, application/zip",
+             "not one text type"),
+            ("log_content_type", "text/plain, application/zip",
+             "not one text type"),
+            ("log_content_type", 'text/plain; charset="utf-8',
+             "not one text type"),
+            ("log_content_type", "text/plain; charset", "not one text type"),
             # Content-Type is a single field: two are refused in either
             # order (REV-12, review 6).
             ("log_content_type", ["text/plain", "application/zip"],
@@ -724,11 +733,27 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 self.f.save_model(model)
 
     def test_text_type_in_any_case_with_parameters_is_a_log(self) -> None:
+        for media in ("Text/Plain; charset=utf-8",
+                      'text/plain;charset="utf-8, x";format=fixed',
+                      'text/x-log ; a="b\\"c" ;'):
+            with self.subTest(media=media):
+                self.seed(*self.statuses())
+                self.f.settings(log_content_type=media)
+                check = self.by_name(self.failed_logs())[
+                    "Tests / unit (pull_request)"]
+                self.assertEqual(check["log"]["job_id"], 21)
+
+    def test_refused_content_type_is_not_in_the_reason(self) -> None:
+        # REV-14: the field is the server's text, not a diagnostic.
         self.seed(*self.statuses())
-        self.f.settings(log_content_type="Text/Plain; charset=utf-8")
+        self.f.settings(log_content_type="application/x-secret-7f3a")
         check = self.by_name(self.failed_logs())[
             "Tests / unit (pull_request)"]
-        self.assertEqual(check["log"]["job_id"], 21)
+        self.assertIsNone(check["log"])
+        self.assertEqual(
+            check["log_reason"],
+            "forge answered a content type that is not one text type",
+        )
 
     def test_failed_log_read_reason_never_holds_its_body(self) -> None:
         # REV-12: a failed text read's body may be the log itself.

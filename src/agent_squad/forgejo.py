@@ -84,6 +84,18 @@ TIMESTAMP = re.compile(
 )
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
 FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
+# A whole Content-Type field naming one text media type (RFC 9110 §8.3.1,
+# §5.6): a comma outside a quoted value means several types (REV-12).
+_TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+_QUOTED = (
+    r'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]'
+    r'|\\[\t \x21-\x7e\x80-\xff])*"'
+)
+TEXT_MEDIA_TYPE = re.compile(
+    rf"(?i:text)/{_TOKEN}"
+    rf"(?:[ \t]*;[ \t]*(?:{_TOKEN}=(?:{_TOKEN}|{_QUOTED}))?)*",
+    re.ASCII,
+)
 # The page size of the one blocks read (#144): F16 FormInt parses the limit
 # with strconv.Atoi, and this is the largest value every platform's int
 # holds, above any number of issues one issue can block.
@@ -610,10 +622,13 @@ class Forgejo:
                 raise ForgeError(
                     f"forge answered {len(media)} content types, not text"
                 )
-            kind = "".join(media).split(";", 1)[0].strip().lower()
-            if not re.fullmatch(r"text/[a-z0-9][a-z0-9!#$&^_.+-]*", kind):
+            if not media:
+                raise ForgeError("forge answered no content type, not text")
+            # The field is the server's text, so the reason never holds it
+            # (REV-14).
+            if TEXT_MEDIA_TYPE.fullmatch(media[0].strip(" \t")) is None:
                 raise ForgeError(
-                    f"forge answered {kind or 'no content type'}, not text"
+                    "forge answered a content type that is not one text type"
                 )
             return content.decode("utf-8", errors="replace")
         try:
