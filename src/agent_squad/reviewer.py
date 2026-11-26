@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import time
 import uuid
@@ -370,25 +371,172 @@ def verify_workspace(
     return workspace
 
 
+def placed_directory(path: str) -> tuple[os.stat_result, str, tuple[str, ...]]:
+    """Where a directory is, as the operating system reads its spelling.
+
+    Returns the identity of the deepest directory on ``path`` that exists,
+    the spelling that names it, and the names below it that do not exist.
+    Every question is put to the operating system on the spelling as
+    reported; no path is resolved or normalized here, because a reading
+    worked out in this process can skip what the system would refuse and
+    end somewhere else.
+
+    Only a final name is ever set aside, and only when the system reports
+    that name itself as absent: the directory that would hold it is then
+    the spelling without it. Everything else raises: any other error, a
+    path that exists and is not a directory, a symbolic link that leads to
+    a missing path, and ``.`` or ``..`` below a missing name (#175).
+    """
+    spelling = path
+    absent: list[str] = []
+    while True:
+        try:
+            status = os.stat(spelling)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISDIR(status.st_mode):
+                raise ValueError(f"{spelling} is not a directory")
+            return status, spelling, tuple(reversed(absent))
+        # A trailing separator would make the system follow a final link.
+        entry = spelling.rstrip("/")
+        above, name = os.path.split(entry)
+        if name in ("", ".", ".."):
+            raise ValueError(f"{spelling} is below a path that is missing")
+        try:
+            os.lstat(entry)
+        except FileNotFoundError:
+            absent.append(name)
+            spelling = above
+        else:
+            raise ValueError(f"{entry} leads to a path that is missing")
+
+
+def directory_in_checkout(
+    path: str, label: str,
+    checkout: tuple[os.stat_result, str, tuple[str, ...]],
+) -> bool:
+    """Whether a directory that Herdr reports is the checkout or lies below
+    it; a directory that cannot be placed keeps every resource.
+
+    ``checkout`` is the checkout's own place from placed_directory(). The
+    directory is inside when it, or a directory above it, is the same
+    directory as the checkout. The directories above it are read from the
+    operating system as ``<spelling>/..``, ``<spelling>/../..`` and so on
+    until the root answers for its own parent, so neither a symbolic link,
+    a ``..`` nor another letter case in the spelling is interpreted here.
+    Under a checkout that is gone, the directory is inside when it lies in
+    the same existing directory under the checkout's missing names (#175).
+    """
+    home, _, home_absent = checkout
+    try:
+        current, spelling, absent = placed_directory(path)
+        if home_absent:
+            return os.path.samestat(current, home) and (
+                absent[:len(home_absent)] == home_absent
+            )
+        while not os.path.samestat(current, home):
+            spelling = f"{spelling}/.."
+            above = os.stat(spelling)
+            if os.path.samestat(above, current):
+                return False
+            current = above
+        return True
+    except (OSError, ValueError) as error:
+        raise RetainedError(
+            f"cannot resolve {label} {path}: {error}"
+        ) from None
+
+
+def remove_unused_checkout(worktree: ReviewWorktree, snapshot: dict) -> dict:
+    """Remove an owned checkout that nothing in the Herdr inventory uses.
+
+    Every directory the inventory reports counts when it is the checkout
+    or lies below it: the checkout and the repository root of a workspace's
+    worktree registration, and the working directory of a pane or an
+    agent, both its own and that of its foreground process (#175).
+    """
+    try:
+        checkout = placed_directory(str(worktree.path))
+    except (OSError, ValueError) as error:
+        raise RetainedError(
+            f"cannot resolve review worktree {worktree.path}: {error}"
+        ) from None
+
+    def inside(entry: dict, fields: tuple[str, ...], label: str) -> bool:
+        return any(
+            isinstance(entry.get(field), str)
+            and Path(entry[field]).is_absolute()
+            and directory_in_checkout(entry[field], label, checkout)
+            for field in fields
+        )
+
+    for workspace in resource_objects(snapshot, "workspaces"):
+        registration = workspace.get("worktree") or {}
+        if not isinstance(registration, dict):
+            raise RetainedError("Herdr worktree inventory is invalid")
+        if registration.get("checkout_path") == str(worktree.path) or inside(
+            registration, ("checkout_path", "repo_root"),
+            "Herdr worktree registration",
+        ):
+            raise RetainedError(
+                "an unowned Herdr workspace still uses this worktree"
+            )
+    for key, occupant in (("panes", "pane"), ("agents", "agent")):
+        for entry in resource_objects(snapshot, key):
+            if inside(
+                entry, ("cwd", "foreground_cwd"),
+                f"Herdr {occupant} directory",
+            ):
+                raise RetainedError(
+                    f"an unowned Herdr {occupant} still uses this worktree"
+                )
+    return worktree.remove()
+
+
 def close_reviewer(worktree: ReviewWorktree, client: HerdrClient) -> dict:
     """Remove only an owned checkout and its isolated Herdr workspace."""
     owner = worktree.owner()
     resource = owner["herdr"]
     try:
         if resource is None:
-            for workspace in resource_objects(client.snapshot(), "workspaces"):
-                registration = workspace.get("worktree") or {}
-                if not isinstance(registration, dict):
-                    raise RetainedError("Herdr worktree inventory is invalid")
-                if registration.get("checkout_path") == str(worktree.path):
-                    raise RetainedError(
-                        "an unowned Herdr workspace still uses this worktree"
-                    )
-            return worktree.remove()
-        workspace = verify_workspace(worktree, client, resource)
+            return remove_unused_checkout(worktree, client.snapshot())
+        try:
+            workspace = verify_workspace(worktree, client, resource)
+        except HerdrError:
+            # An earlier run may have closed the unregistered workspace and
+            # then failed before recording it (#175). Only a fresh inventory
+            # without that workspace lets the checkout go, and only while
+            # nothing else uses it.
+            snapshot = client.snapshot()
+            present = [
+                w.get("workspace_id")
+                for w in resource_objects(snapshot, "workspaces")
+            ]
+            if resource["workspace_id"] in present or any(
+                not isinstance(ident, str) or not ident for ident in present
+            ):
+                raise
+            return {
+                **remove_unused_checkout(worktree, snapshot), **resource,
+                "workspace": "already closed",
+            }
         if workspace.get("worktree") is None:
             client.close_workspace(resource["workspace_id"])
-            return worktree.remove()
+            # Record the confirmed closure before removing the checkout: a
+            # retry after a failed removal then takes the path above, which
+            # no longer looks up the closed workspace but still refuses a
+            # workspace or pane that uses the checkout (#175).
+            try:
+                worktree.save_owner({**worktree.identity(), "herdr": None})
+                removed = remove_unused_checkout(worktree, client.snapshot())
+            except (AgentSquadError, OSError, ValueError) as error:
+                raise RetainedError(
+                    f"Herdr workspace {resource['workspace_id']} closed;"
+                    f" then {error}"
+                ) from None
+            # Name the closed workspace too (#175).
+            return {**removed, **resource}
         removed = client.remove_worktree(resource["workspace_id"])
         if (
             removed.get("path") != str(worktree.path)

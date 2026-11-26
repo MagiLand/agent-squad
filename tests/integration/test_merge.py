@@ -640,6 +640,7 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(result["merged"])
         self.assertEqual(result["integration"],
                          "integration not verifiable by tree identity")
+        self.assertIsNone(result["merged_head"])
         self.assertEqual(result["cleanup"], [])
         self.assertEqual(result["fast_forward"]["result"], "skipped")
         self.assertIn("not been verified", result["fast_forward"]["reason"])
@@ -832,8 +833,8 @@ class MergeTests(unittest.TestCase):
     ) -> None:
         f = self.f
 
-        def move_tracking_ref(*args):
-            steps = cleanup_merge(*args)
+        def move_tracking_ref(*args, **kwargs):
+            steps = cleanup_merge(*args, **kwargs)
             f.git("update-ref", "refs/remotes/origin/main", f.base)
             return steps
 
@@ -860,9 +861,9 @@ class MergeTests(unittest.TestCase):
             tips.append(self.advance_base())
             return merged
 
-        def record_head(*args):
+        def record_head(*args, **kwargs):
             heads.append(f.git("rev-parse", "HEAD"))
-            return cleanup_merge(*args)
+            return cleanup_merge(*args, **kwargs)
 
         with patch.dict(os.environ, f.env, clear=True):
             repository = load_initialized_repository(f.repo)
@@ -1220,7 +1221,8 @@ class ResumedCleanupTests(unittest.TestCase):
             "schema_version": 1, "common": str(f.repo / ".git"), "pr": 1,
             "head": self.head, "head_branch": "issue-1",
             "base_branch": "main", "merge_method": "merge",
-            "moved_base": False, "issue": 1,
+            "moved_base": False, "issue": 1, "outside_pr_merge": False,
+            "implementation_record": None,
         })
         refused = self.merge(expected=4)
         self.assertIn("PR is not open", refused["error"])
@@ -1234,6 +1236,43 @@ class ResumedCleanupTests(unittest.TestCase):
         self.assertEqual(result["fast_forward"]["result"], "up to date")
         self.assert_finished(result)
         self.assertNotIn("pr cleanup", self.merge(expected=4)["error"])
+
+    def assert_recorded_approval(self, result: dict) -> None:
+        self.assertIs(result["merged_outside_pr_merge"], False)
+        self.assertEqual(result["approved_head"], self.head)
+        self.assertEqual(result["merged_head"], self.head)
+
+    def test_retry_keeps_the_approval_of_a_review_dismissed_since(
+        self,
+    ) -> None:
+        """#175: the record holds the head pr merge verified as approved;
+        the retry reports it and reads no review."""
+        f = self.f
+        self.stop_at_remote_branch()
+        model = f.read_model()
+        review, = model["prs"]["1"]["reviews"]
+        review["state"] = "DISMISSED"
+        f.save_model(model)
+        result = self.cleanup()
+        self.assert_recorded_approval(result)
+        self.assert_finished(result)
+
+    def test_retry_finishes_while_reviews_cannot_be_read(self) -> None:
+        f = self.f
+        self.stop_at_remote_branch()
+        # A page that never advances: any read of the reviews fails.
+        f.settings(page_sizes={"PullRequest.reviews": 0})
+        self.assertEqual(f.run([
+            sys.executable, "-m", "agent_squad", "status", "--pr", "1",
+            "--json",
+        ], cwd=f.repo).returncode, 1)
+        calls = len(f.read_model()["calls"])
+        result = self.cleanup()
+        self.assertFalse(any(
+            "graphql" in c["arguments"] or "/reviews" in c["arguments"][1]
+            for c in f.read_model()["calls"][calls:]))
+        self.assert_recorded_approval(result)
+        self.assert_finished(result)
 
     def test_resumes_after_untracked_file_blocked_the_worktree(self) -> None:
         f = self.f

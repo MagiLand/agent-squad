@@ -911,8 +911,12 @@ class Forgejo:
             tuple(threads),
         )
 
-    def snapshot(self, number: int, *, with_checks: bool = False) -> Snapshot:
-        # Checks are a separate read here: head_checks stays null.
+    def snapshot(
+        self, number: int, *, with_checks: bool = False,
+        conversation: bool = True,
+    ) -> Snapshot:
+        # Checks are a separate read here: head_checks stays null. Without
+        # ``conversation`` the issue comments are not read (#175).
         pr = self.pr(number)
         reviews = self.reviews(number)
         comments, threads = self._comments(number, reviews)
@@ -920,7 +924,7 @@ class Forgejo:
             pr,
             reviews,
             comments,
-            self._conversation(number),
+            self._conversation(number) if conversation else (),
             threads,
             self.can_resolve_threads,
             self.can_read_thread_resolution,

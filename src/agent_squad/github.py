@@ -292,14 +292,19 @@ class Connection:
     arguments: str = ""
 
 
-def selection(connection: Connection, *, after: bool = False) -> str:
+def selection(
+    connection: Connection, *, after: bool = False, include: str = "",
+) -> str:
+    """The list's selection; ``include`` names a Boolean variable that
+    decides whether the list is read at all."""
     arguments = ", ".join(filter(None, (
         f"first:{PAGE_SIZE}", "after:$cursor" if after else "",
         connection.arguments,
     )))
     nodes = " ".join((connection.nodes, *map(selection, connection.nested)))
+    directive = f" @include(if:{include})" if include else ""
     return (
-        f"{connection.field}({arguments}) {{ nodes {{ {nodes} }}"
+        f"{connection.field}({arguments}){directive} {{ nodes {{ {nodes} }}"
         " pageInfo { hasNextPage endCursor } }"
     )
 
@@ -343,7 +348,8 @@ COMMIT = (
     " targetUrl creator { __typename login } } }"
 )
 SNAPSHOT_QUERY = f"""query SquadSnapshot(
-  $owner:String!, $repo:String!, $pr:Int!, $head:String!, $checks:Boolean!
+  $owner:String!, $repo:String!, $pr:Int!, $head:String!, $checks:Boolean!,
+  $conversation:Boolean!
 ) {{
   repository(owner:$owner, name:$repo) {{
     pullRequest(number:$pr) {{
@@ -352,7 +358,7 @@ SNAPSHOT_QUERY = f"""query SquadSnapshot(
       mergeCommit {{ oid }} potentialMergeCommit {{ oid }} mergeStateStatus
       {selection(REVIEWS)}
       {selection(THREADS)}
-      {selection(CONVERSATION)}
+      {selection(CONVERSATION, include="$conversation")}
     }}
     head: object(expression:$head) @include(if:$checks) {{
       ... on Commit {{ {COMMIT} }}
@@ -1028,18 +1034,23 @@ class GitHub:
             for r in self.listing(f"{self.prefix}/pulls/{number}/reviews")
         )
 
-    def snapshot(self, number: int, *, with_checks: bool = False) -> Snapshot:
+    def snapshot(
+        self, number: int, *, with_checks: bool = False,
+        conversation: bool = True,
+    ) -> Snapshot:
         """Read the PR and every list behind ``status`` in one query (#149).
 
         With ``with_checks`` the query also reads the checks at the PR's
         head ref; ``head_checks`` stays null when that commit is not the
         head or its checks could not be read, and ``checks`` reads them.
+        Without ``conversation`` the query leaves out the PR's ordinary
+        conversation, and no page of it is read (#175).
         """
         config = self.repository.configuration
         data = self.graphql(SNAPSHOT_QUERY, {
             "owner": config.forge.owner, "repo": config.forge.repo,
             "pr": number, "head": f"refs/pull/{number}/head",
-            "checks": with_checks,
+            "checks": with_checks, "conversation": conversation,
         }, optional="head")
         repository = object_value(data.get("repository"), "repository")
         node = object_value(repository.get("pullRequest"), "pullRequest")
@@ -1047,7 +1058,9 @@ class GitHub:
             connection.field: self.complete(
                 node.get(connection.field), connection, node.get("id")
             )
-            for connection in (REVIEWS, THREADS, CONVERSATION)
+            for connection in (
+                REVIEWS, THREADS, *((CONVERSATION,) if conversation else ()),
+            )
         }
         pr = parse_pullrequest(rest_pullrequest(node))
         reviews = tuple(parse_review(rest_review(r)) for r in lists["reviews"])
@@ -1080,7 +1093,7 @@ class GitHub:
             tuple(comments.values()),
             tuple(
                 parse_evidence(rest_evidence(c, "comment"))
-                for c in lists["comments"]
+                for c in lists.get("comments", ())
             ),
             tuple(threads) if self.can_read_thread_resolution else (),
             self.can_resolve_threads,

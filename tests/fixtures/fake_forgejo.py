@@ -395,6 +395,10 @@ class Handler(BaseHTTPRequestHandler):
             issue = model.get("issues", {}).get(number)
             pr = prs.get(number)
             if parts[5:] == ["comments"]:
+                if (self.command == "GET"
+                        and settings.get("conversation_read_status")):
+                    return settings["conversation_read_status"], {
+                        "message": "synthetic conversation read failure"}
                 # Decisions and stops on a shared number reach the PR; an
                 # issue note there is refused rather than written to the PR.
                 target = pr or issue

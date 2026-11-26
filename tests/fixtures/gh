@@ -528,6 +528,9 @@ if endpoint == "graphql":
             }])
         pr = refresh(prs_model()[number])
         repository = {"pullRequest": gql_pull(number, pr)}
+        # @include(if:$conversation): the list is absent when not asked for.
+        if not variables["conversation"]:
+            del repository["pullRequest"]["comments"]
         if variables["checks"]:
             if account in settings.get("checks_denied", []):
                 repository["head"] = None

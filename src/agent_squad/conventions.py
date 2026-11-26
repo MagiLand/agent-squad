@@ -549,6 +549,38 @@ def evidence_dict(evidence: Evidence) -> dict:
     return asdict(evidence)
 
 
+def approved_review_head(
+    snapshot: Snapshot, config: Configuration,
+) -> str | None:
+    """The head that the latest valid tagged approving review names.
+
+    The reviews are the ones derive() accepts, by its own checks and in its
+    own order, so an approval that ``status`` rejects is not reported: one
+    that lists a blocking finding, or follows a blocking finding that no
+    verification had settled when it was posted, among the rest. Only two
+    things differ. derive()'s Git ancestry checks are answered as passing,
+    so no Git object is read or fetched, and the snapshot may hold no PR
+    conversation, which decides nothing about a review. An approval counts
+    only in the forge's approved state (§7.3). pr cleanup reports this for
+    information after the forge merged (#175).
+    """
+    state = derive(
+        snapshot, config, (), snapshot.pr.base,
+        lambda commit, descendant: True, base_tip=snapshot.pr.base,
+    )
+    approving = {
+        review.evidence.id for review in snapshot.reviews
+        if review.state == requested_state("approved")
+    }
+    return next(
+        (
+            review["head"] for review in reversed(state["reviews"])
+            if review["verdict"] == "approved" and review["id"] in approving
+        ),
+        None,
+    )
+
+
 def derive(
     snapshot: Snapshot,
     config: Configuration,

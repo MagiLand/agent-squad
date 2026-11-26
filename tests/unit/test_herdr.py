@@ -1,5 +1,6 @@
 """Exact handoff strings and installed Herdr contracts."""
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -116,6 +117,342 @@ class HandoffTemplateTests(unittest.TestCase):
         for reason in ("other", "Budget", "budget extra", "budget\n"):
             with self.assertRaises(AgentSquadError):
                 stopped_message(1, H, reason)
+
+
+class PaneDirectoryTests(unittest.TestCase):
+    """#175: a directory Herdr reports either is in the checkout, is not,
+    or cannot be placed, and then the checkout is kept. Every case reads a
+    real tree; nothing about the file system is patched."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.checkout = self.root / "checkout"
+        (self.checkout / "deep" / "deeper").mkdir(parents=True)
+        self.other = self.root / "other"
+        self.other.mkdir()
+
+    def inside(self, path: Path | str) -> bool:
+        from agent_squad.reviewer import (
+            directory_in_checkout, placed_directory,
+        )
+
+        return directory_in_checkout(
+            str(path), "Herdr pane directory",
+            placed_directory(str(self.checkout)))
+
+    def refused(self, path: Path | str) -> str:
+        from agent_squad.initialization import RetainedError
+
+        with self.assertRaises(RetainedError) as caught:
+            self.inside(path)
+        self.assertIn(f"cannot resolve Herdr pane directory {path}: ",
+                      str(caught.exception))
+        return str(caught.exception)
+
+    def unreadable(self, directory: Path) -> None:
+        """Take away the right to search ``directory`` until cleanup."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads every directory")
+        directory.chmod(0)
+        self.addCleanup(directory.chmod, 0o700)
+
+    def test_directories_are_placed_by_name_and_through_symlinks(
+        self,
+    ) -> None:
+        from agent_squad.reviewer import placed_directory
+
+        link = self.root / "link"
+        link.symlink_to(self.checkout)
+        for path in (self.checkout, self.checkout / "deep", link,
+                     link / "deep", self.checkout / "deep" / "..",
+                     link / "deep" / "deeper" / ".." / ".."):
+            with self.subTest(path=path.relative_to(self.root)):
+                self.assertTrue(self.inside(path))
+        # Absent names below an existing directory say where they would be.
+        self.assertTrue(self.inside(self.checkout / "gone" / "deeper"))
+        self.assertTrue(self.inside(link / "gone"))
+        status, spelling, absent = placed_directory(
+            str(link / "gone" / "deeper"))
+        self.assertTrue(os.path.samestat(status, os.stat(self.checkout)))
+        self.assertEqual((spelling, absent), (str(link), ("gone", "deeper")))
+        # A name in the checkout that leads out of it is where it leads.
+        out = self.checkout / "out"
+        out.symlink_to(self.other)
+        for path in (self.other, self.other / "gone", self.root,
+                     self.root / "checkout-2", self.checkout / "..",
+                     out, out / "gone"):
+            with self.subTest(path=path.relative_to(self.root)):
+                self.assertFalse(self.inside(path))
+        # The spelling is read as reported: separators and "." included.
+        for text in (f"{link}/", f"{link}//deep/.", f"{link}/gone/"):
+            with self.subTest(text=text):
+                self.assertTrue(self.inside(text))
+        self.assertFalse(self.inside(f"{self.other}/gone//"))
+        # A checkout that is gone is still named by the paths below it.
+        self.checkout.rename(self.root / "moved")
+        self.assertTrue(self.inside(self.checkout))
+        self.assertTrue(self.inside(self.checkout / "deep"))
+        self.assertTrue(self.inside(
+            self.other / ".." / "checkout" / "deep"))
+        self.assertFalse(self.inside(self.other))
+        self.assertFalse(self.inside(self.root / "moved"))
+        self.assertFalse(self.inside(self.root / "checkout-2" / "deep"))
+        # The same missing names under another directory are elsewhere.
+        self.assertFalse(self.inside(self.other / "checkout" / "deep"))
+
+    def test_wrong_case_spelling_is_inside_where_the_file_system_folds(
+        self,
+    ) -> None:
+        shouted = self.root / "CHECKOUT"
+        if not shouted.exists():
+            self.skipTest("the file system is case-sensitive")
+        self.assertTrue(self.inside(shouted))
+        self.assertTrue(self.inside(shouted / "deep"))
+        self.assertTrue(self.inside(shouted / "gone" / "deeper"))
+        self.assertFalse(self.inside(self.root / "OTHER"))
+
+    def changes(self) -> dict:
+        """What the name ``hop``, a link into the checkout, can become so
+        that the path through it no longer leads anywhere readable."""
+        def unsearchable(hop: Path) -> None:
+            hop.mkdir()
+            self.unreadable(hop)
+
+        def loop(hop: Path) -> None:
+            hop.symlink_to(hop.name)
+
+        def dangling(hop: Path) -> None:
+            hop.symlink_to(hop.parent / "absent")
+
+        return {
+            "a directory that cannot be searched": unsearchable,
+            "a file": Path.touch,
+            "a loop": loop,
+            "a link to nowhere": dangling,
+        }
+
+    def test_path_that_led_into_the_checkout_is_never_placed_outside(
+        self,
+    ) -> None:
+        """REV-18: every path here named a directory in the checkout
+        through the link ``hop`` before ``hop`` became something that the
+        operating system does not read through. Each must then be refused,
+        and so keep the checkout; none may read as outside. A reading that
+        works the path out itself ends at the readable decoys instead."""
+        # Where ``hop`` sits: the reported spelling, and the link that the
+        # spelling's last name is, if it is one.
+        places = {
+            "the final name": ("hop", None),
+            "the final name, with a separator": ("hop/", None),
+            "inside the spelling": ("hop/deeper", None),
+            "before .. in the spelling": ("hop/../deep", None),
+            "inside a link target": ("alias", "hop/deeper"),
+            "before .. in a link target": ("alias", "hop/../deep"),
+            "before .. in an absolute link target": (
+                "alias", "{case}/hop/../deep"),
+            "below a link target": ("alias/deeper", "hop"),
+            "behind two links": ("alias", "second"),
+        }
+        number = 0
+        for place, (reported, target) in places.items():
+            for change, become in self.changes().items():
+                number += 1
+                case = self.root / f"case-{number}"
+                # Decoys: what "hop/../deep" and the like name when ".."
+                # is taken off the text instead of read from the system.
+                (case / "deep" / "deeper").mkdir(parents=True)
+                (case / "deeper").mkdir()
+                hop = case / "hop"
+                hop.symlink_to(self.checkout / "deep")
+                if target is not None:
+                    (case / "alias").symlink_to(target.format(case=case))
+                    (case / "second").symlink_to("hop/../deep")
+                path = f"{case}/{reported}"
+                with self.subTest(place=place, change=change):
+                    self.assertTrue(self.inside(path))
+                    hop.unlink()
+                    become(hop)
+                    with self.assertRaises(OSError):
+                        os.stat(os.path.join(path, "."))
+                    self.refused(path)
+                    # Below it nothing can be placed either.
+                    self.refused(f"{path}/gone")
+
+    def test_changed_link_target_is_never_placed_outside(self) -> None:
+        """REV-18: the link stays and what it names changes. A link whose
+        target is no longer a directory is refused rather than set aside
+        as a missing name, which would place the pane beside the link."""
+        target = self.checkout / "target"
+        target.mkdir()
+        alias = self.other / "alias"
+        alias.symlink_to(target)
+        self.assertTrue(self.inside(alias))
+        target.rmdir()
+        for path in (alias, alias / "below", f"{alias}/"):
+            with self.subTest("removed", path=path):
+                self.assertIn(
+                    f"{alias} leads to a path that is missing",
+                    self.refused(path))
+        self.refused(f"{alias}/.")
+        target.touch()
+        for path in (alias, alias / "below", f"{alias}/", f"{alias}/."):
+            with self.subTest("a file", path=path):
+                self.refused(path)
+        self.assertIn(f"{alias} is not a directory", self.refused(alias))
+
+    def test_path_that_is_not_a_directory_is_refused(self) -> None:
+        """A working directory cannot be a file, so a path that names one
+        says nothing about where the pane is."""
+        file = self.other / "file"
+        file.touch()
+        self.assertIn(f"{file} is not a directory", self.refused(file))
+        self.refused(file / "below")
+        self.refused(self.checkout / ".." / "other" / "file")
+
+    def test_directory_that_cannot_be_searched_is_refused(self) -> None:
+        """The directories above one that cannot be searched cannot be
+        read from the operating system, so it is not placed. The checkout
+        itself needs nothing above it."""
+        closed = self.other / "closed"
+        closed.mkdir()
+        self.unreadable(closed)
+        self.refused(closed)
+        self.refused(closed / "below")
+        self.unreadable(self.checkout)
+        self.assertTrue(self.inside(self.checkout))
+        self.refused(self.checkout / "deep")
+        self.assertFalse(self.inside(self.other))
+
+    def test_path_that_cannot_be_placed_is_refused(self) -> None:
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        self.assertIn(os.strerror(errno.ELOOP), self.refused(loop))
+        self.refused(loop / "below")
+        self.refused(self.root / "nul\x00")
+        self.refused(self.root / ("long" * 100) / ("name" * 100))
+        # Names that climb out of a directory that is gone: where they
+        # would lead depends on what that directory was.
+        self.assertIn("is below a path that is missing", self.refused(
+            self.checkout / "gone" / ".." / ".." / "other"))
+        self.assertIn("is below a path that is missing", self.refused(
+            f"{self.checkout}/gone/."))
+        self.assertIn("leads to a path that is missing", self.refused(
+            self.dangling()))
+        self.assertIn("leads to a path that is missing", self.refused(
+            f"{self.dangling()}/"))
+
+    def dangling(self) -> Path:
+        link = self.root / "nowhere"
+        if not link.is_symlink():
+            link.symlink_to(self.root / "absent")
+        return link
+
+    def unused(self, path: Path, **inventory: list):
+        from unittest.mock import Mock
+        from agent_squad.reviewer import remove_unused_checkout
+
+        worktree = Mock(path=path)
+        return worktree, lambda: remove_unused_checkout(
+            worktree,
+            {"workspaces": [], "panes": [], "agents": [], **inventory})
+
+    def test_checkout_is_removed_only_when_nothing_uses_it(self) -> None:
+        from agent_squad.initialization import RetainedError
+
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        alias = self.other / "alias"
+        alias.symlink_to(self.checkout)
+        cases = {
+            "pane in the checkout": (
+                self.checkout, {"panes": [{"cwd": str(alias / "deep")}]},
+                "an unowned Herdr pane still uses this worktree"),
+            "pane that cannot be placed": (
+                self.checkout, {"panes": [{"cwd": str(loop)}]},
+                f"cannot resolve Herdr pane directory {loop}"),
+            # REV-25: each directory the inventory reports is placed, not
+            # the pane's own working directory alone.
+            "foreground process in the checkout": (
+                self.checkout,
+                {"panes": [{"cwd": str(self.other),
+                            "foreground_cwd": str(alias / "deep")}]},
+                "an unowned Herdr pane still uses this worktree"),
+            "foreground process that cannot be placed": (
+                self.checkout,
+                {"panes": [{"cwd": str(self.other),
+                            "foreground_cwd": str(loop)}]},
+                f"cannot resolve Herdr pane directory {loop}"),
+            "agent in the checkout": (
+                self.checkout, {"agents": [{"cwd": str(alias)}]},
+                "an unowned Herdr agent still uses this worktree"),
+            "agent's foreground process in the checkout": (
+                self.checkout,
+                {"agents": [{"cwd": None,
+                             "foreground_cwd": str(self.checkout / "gone")}]},
+                "an unowned Herdr agent still uses this worktree"),
+            "agent that cannot be placed": (
+                self.checkout, {"agents": [{"cwd": str(loop)}]},
+                f"cannot resolve Herdr agent directory {loop}"),
+            "registration's repository in the checkout": (
+                self.checkout,
+                {"workspaces": [{"worktree": {
+                    "checkout_path": str(self.other),
+                    "repo_root": str(alias / "deep")}}]},
+                "an unowned Herdr workspace still uses this worktree"),
+            "registration's repository that cannot be placed": (
+                self.checkout,
+                {"workspaces": [{"worktree": {
+                    "checkout_path": str(self.other),
+                    "repo_root": str(loop)}}]},
+                f"cannot resolve Herdr worktree registration {loop}"),
+            "registration by another name": (
+                self.checkout,
+                {"workspaces": [{"worktree": {"checkout_path": str(alias)}}]},
+                "an unowned Herdr workspace still uses this worktree"),
+            "registration that cannot be placed": (
+                self.checkout,
+                {"workspaces": [{"worktree": {"checkout_path": str(loop)}}]},
+                f"cannot resolve Herdr worktree registration {loop}"),
+            "checkout that cannot be placed": (
+                loop, {}, f"cannot resolve review worktree {loop}"),
+            "checkout by another name": (
+                alias, {"panes": [{"cwd": str(self.checkout / "deep")}]},
+                "an unowned Herdr pane still uses this worktree"),
+        }
+        for name, (path, inventory, message) in cases.items():
+            with self.subTest(name):
+                worktree, remove = self.unused(path, **inventory)
+                with self.assertRaises(RetainedError) as caught:
+                    remove()
+                self.assertIn(message, str(caught.exception))
+                worktree.remove.assert_not_called()
+        outside = {"cwd": str(self.other), "foreground_cwd": str(self.root)}
+        elsewhere = {
+            "panes": [outside, {"cwd": "relative"},
+                      {"cwd": None, "foreground_cwd": None}, {}],
+            "agents": [outside, {"foreground_cwd": "relative"}, {}],
+            "workspaces": [{"worktree": None}, {},
+                           {"worktree": {"checkout_path": str(self.other),
+                                         "repo_root": str(self.root)}}],
+        }
+        worktree, remove = self.unused(self.checkout, **elsewhere)
+        self.assertIs(remove(), worktree.remove.return_value)
+
+    def test_incomplete_inventory_removes_nothing(self) -> None:
+        from agent_squad.herdr import HerdrError
+        from agent_squad.reviewer import remove_unused_checkout
+        from unittest.mock import Mock
+
+        complete = {"workspaces": [], "panes": [], "agents": []}
+        for missing in complete:
+            with self.subTest(missing=missing):
+                worktree = Mock(path=self.checkout)
+                partial = {k: v for k, v in complete.items() if k != missing}
+                with self.assertRaises(HerdrError):
+                    remove_unused_checkout(worktree, partial)
+                worktree.remove.assert_not_called()
 
 
 class LaunchGateTests(unittest.TestCase):

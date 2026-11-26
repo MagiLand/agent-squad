@@ -358,7 +358,7 @@ shipped command path.
 | `issue view`, `issue list`, `issue comment`, `issue create`, `issue label` | Read the governing issue, comments, labels, milestone, dependencies, and configured paths; list a milestone's issues, issues with given labels, or issues in a state, each closed issue with the merged pull requests the forge links to it as closing it; post a marked Implementer note, such as a root cause, on an open issue; file follow-up work as a new issue labelled `needs-triage`; add or remove existing labels on an issue to apply a closing rule the repository documents, never removing `needs-triage`, `needs-info`, `ready-for-human`, or `wontfix`. |
 | `pr create`, `pr report` | Publish the Task and implementation report, ending with `Closes #<issue>`, or with `Ref #<issue>` under `pr create --partial --task <file>` for a PR that delivers part of an issue and leaves it open; update the report on an open PR, keeping that footer. |
 | `pr head`, `pr reviews`, `pr checks`, `status` | Read exact revision identities, reviews, CI results at the PR head or a merged PR's merge commit, and derived workflow state. |
-| `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete. |
+| `pr merge`, `pr cleanup` | Merge an approved revision and verify integration and owned cleanup; finish a merge that `pr merge` started but could not complete, or one the forge made without `pr merge`. |
 | `review-worktree create`, `review-worktree remove` | Manage the detached checkout for one exact revision. |
 | `reviewer launch`, `reviewer adopt`, `reviewer close` | Start a fresh Reviewer, adopt after a human startup answer, or close owned resources. |
 | `review post` | Publish or resume the formal review and findings. |
@@ -430,8 +430,18 @@ It never merges again. It verifies integration against the recorded head,
 runs the remaining cleanup steps with the same guards (a resource that is
 already gone counts as done), fast-forwards the primary checkout, and deletes
 the record once every step succeeded. The Implementer runs it once without
-asking and reports a second failure to you. A PR merged outside `pr merge` has
-no record; `doctor` reports its leftover resources.
+asking and reports a second failure to you.
+
+The same command finishes a PR that the forge merged without `pr merge`, for
+example through a merge train. It proves from the implementation ownership
+record that the PR is the loop's own, verifies that the merge commit contains
+the local head (by ancestry, or for a squash onto an unmoved base by tree
+identity, the last pushed head, and the merge commit's parent), writes a merge
+record, and runs the same cleanup steps, including
+closing any Reviewer still working on the PR. Its result carries
+`merged_outside_pr_merge: true`, `approved_head`, and `merged_head`, and the
+Implementer reports to you that the PR was merged outside the loop and whether
+the merged source was the approved head.
 
 ## What the tool records locally
 

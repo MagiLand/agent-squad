@@ -650,6 +650,55 @@ class HoldLabelSkillTests(unittest.TestCase):
                 self.assertIn(outline, self.spec_implementer)
 
 
+class ForgeMergedCleanupSkillTests(unittest.TestCase):
+    """The Implementer finishes a PR the forge merged outside the loop."""
+
+    def setUp(self) -> None:
+        self.implementer = flat(packaged_skill("squad-implementer").decode())
+        spec = flat((PROJECT_ROOT / "docs/agent-squad-spec.md").read_text())
+        self.spec_implementer = section(
+            spec, "### 12.2 `squad-implementer`: mandatory rules",
+            "### 12.3")
+
+    def test_forge_merge_is_cleaned_up_once_and_reported(self) -> None:
+        finishing = section(self.implementer, "## 8. Approval", "## 9.")
+        steps = (
+            "When the forge reports the PR merged and `pr merge` did not "
+            "merge it, for example through a merge train, run "
+            "`agent-squad pr cleanup --as implementer --pr <PR>` once from "
+            "the primary checkout without asking.",
+            "its result carries `merged_outside_pr_merge: true`, "
+            "`approved_head`, and `merged_head`.",
+            "Then report to the Developer that the forge merged the PR "
+            "outside the loop, saying whether `approved_head` equals "
+            "`merged_head`, or, when `merged_head` is null, that the merged "
+            "source could not be established; whether a review-before-merge "
+            "item held the PR; and which Reviewer workspaces the cleanup "
+            "closed, since a review may have been cut short.",
+            "If it fails, report the failed step and wait.",
+            "The rest of this section then applies as after any merge: the "
+            "read of the push run with `pr checks --merge-commit --wait`, "
+            "`closes_issue`, and the issue-closing rule.",
+        )
+        positions = []
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, finishing)
+                positions.append(finishing.index(step))
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(
+            "When the forge reports the PR merged and `pr merge` did not "
+            "merge it, run `pr cleanup` once without asking, then report to "
+            "the Developer that the forge merged the PR outside the loop, "
+            "saying whether `approved_head` equals `merged_head` (or that "
+            "the merged source could not be established when `merged_head` "
+            "is null), whether a review-before-merge item held the PR, and "
+            "which Reviewer "
+            "workspaces the cleanup closed, since a review may have been cut "
+            "short (#175); the rest of this rule then applies as after any "
+            "merge.", self.spec_implementer)
+
+
 class IssueClosingRuleSkillTests(unittest.TestCase):
     """The Implementer applies a documented issue-closing rule (#144)."""
 
