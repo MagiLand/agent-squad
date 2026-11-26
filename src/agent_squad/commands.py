@@ -81,6 +81,7 @@ PROTECTED_LABELS = (TRIAGE_LABEL, "needs-info", "ready-for-human", "wontfix")
 CHECK_POLL_INTERVAL = 10.0
 # How many lines of a failed job's log ``pr checks --failed-logs`` returns.
 FAILED_LOG_LINES = 100
+LOG_REASON_LENGTH = 200
 
 
 def read_file(path: str) -> str:
@@ -307,10 +308,7 @@ def failed_log(forge: Forge, check: Check, sha: str) -> dict:
     try:
         found = forge.job_log(check, sha)
     except ForgeError as error:
-        reason = str(error)
-        if error.status is not None and f"HTTP {error.status}" not in reason:
-            reason += f" (HTTP {error.status})"
-        return {"log": None, "log_reason": reason}
+        return {"log": None, "log_reason": log_reason(error)}
     return {
         "log": {
             "job_id": found.job_id,
@@ -318,6 +316,20 @@ def failed_log(forge: Forge, check: Check, sha: str) -> dict:
         },
         "log_reason": None,
     }
+
+
+def log_reason(error: ForgeError) -> str:
+    """One short, nonempty line saying why a check has no log (REV-9).
+
+    The reason may echo forge text, such as a long URL, so it is cut to
+    ``LOG_REASON_LENGTH`` characters; the HTTP status is always kept.
+    """
+    reason = " ".join(str(error).split()) or type(error).__name__
+    if len(reason) > LOG_REASON_LENGTH:
+        reason = reason[:LOG_REASON_LENGTH - 3] + "..."
+    if error.status is not None and f"HTTP {error.status}" not in reason:
+        reason += f" (HTTP {error.status})"
+    return reason
 
 
 def log_excerpt(text: str, end_marker: str | None) -> dict:

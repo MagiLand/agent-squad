@@ -12,11 +12,11 @@ from tests.unit.test_conventions import H, config
 add_src_to_path()
 
 from agent_squad.commands import (  # noqa: E402
-    CHECK_POLL_INTERVAL, FAILED_LOG_LINES, ci_record, log_excerpt,
-    pr_checks, summarize_checks,
+    CHECK_POLL_INTERVAL, FAILED_LOG_LINES, LOG_REASON_LENGTH, ci_record,
+    log_excerpt, log_reason, pr_checks, summarize_checks,
 )
 from agent_squad.forge import (  # noqa: E402
-    Check, ChecksUnavailable, ForgeError, visible,
+    Check, ChecksUnavailable, ForgeError, NoJobLog, visible,
 )
 from agent_squad.forgejo import (  # noqa: E402
     Forgejo, names_job, parse_status,
@@ -525,10 +525,6 @@ class RecordTests(unittest.TestCase):
         })
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LogExcerptTests(unittest.TestCase):
     """The excerpt ``pr checks --failed-logs`` gives a failed job (#176)."""
 
@@ -586,3 +582,20 @@ class LogExcerptTests(unittest.TestCase):
         ):
             with self.subTest(context=context, name=name):
                 self.assertIs(names_job(context, name), expected)
+
+
+class LogReasonTests(unittest.TestCase):
+    """The reason a failed check has no log (REV-9 of PR #181)."""
+
+    def test_reason_is_one_short_nonempty_line(self) -> None:
+        self.assertEqual(log_reason(NoJobLog("a\n  b\r\nc")), "a b c")
+        self.assertEqual(log_reason(NoJobLog("")), "NoJobLog")
+        long = log_reason(ForgeError("x" * 5000, 404))
+        self.assertEqual(
+            long, "x" * (LOG_REASON_LENGTH - 3) + "... (HTTP 404)")
+        self.assertEqual(log_reason(ForgeError("refused (HTTP 403)", 403)),
+                         "refused (HTTP 403)")
+
+
+if __name__ == "__main__":
+    unittest.main()

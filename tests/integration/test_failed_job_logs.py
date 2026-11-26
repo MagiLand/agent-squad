@@ -10,7 +10,11 @@ from tests.forge_support import ForgeFixture, ForgejoFixture
 
 add_src_to_path()
 
-from agent_squad.commands import FAILED_LOG_LINES, pr_checks  # noqa: E402
+from agent_squad.commands import (  # noqa: E402
+    FAILED_LOG_LINES,
+    LOG_REASON_LENGTH,
+    pr_checks,
+)
 from agent_squad.forge import make_forge  # noqa: E402
 from agent_squad.initialization import (  # noqa: E402
     load_initialized_repository,
@@ -276,6 +280,45 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
                     self.assertIn(reason, check["log_reason"])
                     self.assertEqual(self.job_reads()[start:], [])
 
+    def test_unusable_check_run_id_leaves_the_checks_read_whole(
+        self,
+    ) -> None:
+        # REV-8 of PR #181: the ID serves only the log lookup.
+        for read in ("graphql", "rest"):
+            self.f.settings(checks_graphql_fails=read == "rest")
+            for value in (0, "12", None):
+                with self.subTest(read=read, id=value):
+                    self.seed(dict(github_run("test"), id=value),
+                              github_run("lint", "success", job=11))
+                    plain = self.f.cli("pr", "checks", "--pr", "1")
+                    self.assertEqual(
+                        {c["name"]: c["result"] for c in plain["checks"]},
+                        {"test": "failed", "lint": "passed"})
+                    start = len(self.job_reads())
+                    checks = self.by_name(self.failed_logs())
+                    self.assertEqual(checks["test"]["log_reason"],
+                                     "the check run has no usable ID")
+                    self.assertNotIn("log", checks["lint"])
+                    self.assertEqual(self.job_reads()[start:], [])
+
+    def test_failed_reads_give_short_reasons_without_log_text(self) -> None:
+        # REV-9 of PR #181: each failure stays with its check, as one
+        # short, nonempty line that never carries the log's own text.
+        self.seed(github_run("test"))
+        self.f.settings(log_cut_off=["12"])
+        reason = self.failed_logs()["checks"][0]["log_reason"]
+        self.assertEqual(reason, "gh exited with status 1")
+        self.f.settings(log_cut_off=[], job_bytes={"12": "7bff22"})
+        reason = self.failed_logs()["checks"][0]["log_reason"]
+        self.assertEqual(reason, "gh answered bytes that are not UTF-8")
+        self.f.settings(job_bytes={})
+        url = "https://github.com/MagiLand/trial/actions/runs/{}/job/12"
+        self.seed(dict(github_run("test"), html_url=url.format("9" * 5000)))
+        reason = self.failed_logs()["checks"][0]["log_reason"]
+        self.assertEqual(len(reason), LOG_REASON_LENGTH)
+        self.assertTrue(reason.startswith("the check run's URL is not"))
+        self.assertTrue(reason.endswith("..."))
+
     def test_owner_and_repository_fold_case(self) -> None:
         for read in ("graphql", "rest"):
             self.f.settings(checks_graphql_fails=read == "rest")
@@ -455,6 +498,10 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                               self.actions_reads()[start]["path"])
 
     def test_mismatches_never_return_another_jobs_log(self) -> None:
+        def ambiguous(actions: dict) -> dict:
+            ambiguous_names(actions)
+            return actions
+
         def changed(edit) -> dict:
             actions = self.actions(html_url=True)
             edit(actions)
@@ -480,6 +527,10 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
         def other_run_id(actions: dict) -> None:
             actions["jobs"]["7"][1]["run_id"] = 3
 
+        def ambiguous_names(actions: dict) -> None:
+            # "Tests / build / unit" names "build / unit" and "unit".
+            actions["jobs"]["7"][0]["name"] = "build / unit"
+
         def malformed_html_url(actions: dict) -> None:
             actions["jobs"]["7"][1]["html_url"] = (
                 "http://[::1/MagiLand/trial/actions/runs/3/jobs/1"
@@ -501,6 +552,14 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 forgejo_status("unit", "failure", 1), changed(two_runs)),
             "job of another run": (
                 forgejo_status("unit", "failure", 1), changed(other_run_id)),
+            "a context naming two jobs": (
+                dict(forgejo_status("unit", "failure", 1),
+                     context="Tests / build / unit (pull_request)"),
+                changed(ambiguous_names)),
+            "a context naming two jobs, 16.x": (
+                dict(forgejo_status("unit", "failure", 1),
+                     context="Tests / build / unit (pull_request)"),
+                ambiguous(self.actions())),
             "html_url that does not parse": (
                 forgejo_status("unit", "failure", 1),
                 changed(malformed_html_url)),
@@ -519,6 +578,15 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 self.assertIsNone(check["log"])
                 self.assertTrue(check["log_reason"])
                 self.assertEqual(self.log_reads()[start:], [])
+
+    def test_job_name_holding_the_separator_alone_is_found(self) -> None:
+        # REV-10: "build / unit" is found when no other job is named too.
+        actions = self.actions()
+        actions["jobs"]["7"][1]["name"] = "build / unit"
+        self.seed(dict(forgejo_status("unit", "failure", 1),
+                       context="Tests / build / unit (pull_request)"),
+                  actions=actions)
+        self.assertEqual(self.failed_logs()["checks"][0]["log"]["job_id"], 21)
 
     def test_status_url_must_be_one_of_the_exact_forms(self) -> None:
         # REV-1 of PR #181: the path, optionally after the configured

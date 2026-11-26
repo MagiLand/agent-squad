@@ -244,8 +244,10 @@ def parse_check_run(value: object, events: dict[int, str]) -> Check:
         timestamps["started_at"],
         timestamps["completed_at"],
         check_run=True,
-        check_run_id=(None if data.get("id") is None
-                      else positive(data["id"], "check_run.id")),
+        # Only the log lookup uses the ID, so one it cannot use leaves that
+        # check without a log instead of failing the read (REV-8).
+        check_run_id=(data["id"] if type(data.get("id")) is int
+                      and data["id"] > 0 else None),
     )
 
 
@@ -655,6 +657,8 @@ class GitHub:
             ) from None
         except OSError as error:
             raise ForgeError(f"could not execute gh: {error}") from None
+        except UnicodeDecodeError:
+            raise ForgeError("gh answered bytes that are not UTF-8") from None
         if raw:
             result.stdout = result.stdout.decode("utf-8", "replace")
             result.stderr = result.stderr.decode("utf-8", "replace")
@@ -665,7 +669,11 @@ class GitHub:
                 raise ForgeError(
                     f"cannot resolve token for configured {self.role} account"
                 )
-            detail = (result.stderr or result.stdout).strip()
+            # A raw answer's output is the answer itself, such as part of a
+            # log, so only gh's own message describes the failure.
+            detail = (
+                result.stderr if raw else result.stderr or result.stdout
+            ).strip() or f"gh exited with status {result.returncode}"
             if self._token:
                 detail = detail.replace(self._token, "[redacted]")
             status = re.search(r"HTTP (\d{3})", detail)
@@ -1255,6 +1263,8 @@ class GitHub:
             raise NoJobLog(
                 f"not a GitHub Actions job (source {check.source})"
             )
+        if check.check_run_id is None:
+            raise NoJobLog("the check run has no usable ID")
         config = self.repository.configuration.forge
         # The origin, owner and repository fold case; the route does not.
         # An ID is at most 18 digits, which ``int`` always converts.

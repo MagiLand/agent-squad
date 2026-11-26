@@ -1097,6 +1097,22 @@ class Forgejo:
                 f"the job at position {index} of run {number} is {name!r},"
                 " which the status does not name"
             )
+        # A job name may itself hold " / ", so "Tests / build / unit (push)"
+        # names both "build / unit" and "unit": refuse it (REV-10).
+        named = {
+            other for other in (
+                text_value(
+                    object_value(row, "job").get("name"), "job.name"
+                )
+                for row in jobs
+            )
+            if names_job(check.name, other)
+        }
+        if len(named) > 1:
+            raise NoJobLog(
+                f"the status names more than one job of run {number}:"
+                f" {', '.join(sorted(map(repr, named)))}"
+            )
         if positive(job.get("run_id"), "job.run_id") != run_id:
             raise NoJobLog(f"job {job.get('id')} belongs to another run")
         job_id = positive(job.get("id"), "job.id")
