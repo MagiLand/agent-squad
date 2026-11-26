@@ -281,10 +281,9 @@ def with_failed_logs(forge: Forge, record: dict) -> dict:
 
     Logs are read once, after any wait, at the commit the checks were read
     at. A check with no matching Actions job, or a log read that fails,
-    gets a reason instead of a log; it never ends the command.
+    gets a reason instead of a log; it never ends the command. An
+    ``unavailable`` read has no check records, so it reads no log.
     """
-    if record["summary"] == "unavailable":
-        return record
     return {**record, "checks": [
         {**row, **failed_log(forge, Check(**row), record["head"])}
         if row["result"] == "failed" else row
