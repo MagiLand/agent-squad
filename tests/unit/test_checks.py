@@ -86,7 +86,15 @@ class GitHubClassificationTests(unittest.TestCase):
             "html_url": None, "started_at": None, "completed_at": None,
         }, {})
         self.assertTrue(run.check_run)
-        # The mark stays out of the public check record.
+        self.assertIsNone(run.check_run_id)
+        # REST gives a check run's ID as ``id``; GraphQL's ``databaseId``
+        # is rewritten into it (REV-7 of PR #181).
+        self.assertEqual(parse_check_run({
+            "id": 12, "name": "test", "status": "completed",
+            "conclusion": "failure", "check_suite": None, "app": None,
+            "html_url": None, "started_at": None, "completed_at": None,
+        }, {}).check_run_id, 12)
+        # The mark and the ID stay out of the public check record.
         self.assertNotIn("check_run", run.record())
         self.assertEqual(set(run.record()), {
             "name", "event", "state", "result", "source", "url",

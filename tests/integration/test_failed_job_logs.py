@@ -41,9 +41,11 @@ def github_run(
 ) -> dict:
     """One GitHub check run whose URL names Actions job ``job``.
 
-    Each app has its own check suite, as on GitHub.
+    Each app has its own check suite, as on GitHub. An Actions check run's
+    ID is its job's ID.
     """
     return {
+        "id": job,
         "name": name,
         "status": "completed",
         "conclusion": conclusion,
@@ -206,8 +208,12 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
                               "/runs/5/job/12",
             }]},
         }
-        for case, checks in cases.items():
-            with self.subTest(case=case):
+        for read, (case, checks) in (
+            (read, item) for read in ("graphql", "rest")
+            for item in cases.items()
+        ):
+            self.f.settings(checks_graphql_fails=read == "rest")
+            with self.subTest(read=read, case=case):
                 self.store(checks=checks, actions={
                     "jobs": {"12": {"id": 12, "run_id": 5,
                                     "head_sha": self.head}},
@@ -237,6 +243,48 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
                     [c["arguments"][1] for c in self.job_reads()[start:]],
                     ["/repos/MagiLand/trial/actions/jobs/12"],
                 )
+
+    def test_check_run_urls_must_name_the_check_run_itself(self) -> None:
+        # REV-6 and REV-7 of PR #181, through the GraphQL read and the REST
+        # read: each refusal is the check's reason, and no job is read,
+        # although job 12 ran in run 5 at the head.
+        url = "https://github.com/MagiLand/trial/actions/runs/{}/job/{}"
+        cases = {
+            # Job 12 ran in run 5 at the head, but check run 13 is another.
+            "a sibling job's URL": (
+                dict(github_run("test", job=13), html_url=url.format(5, 12)),
+                "names job 12, but the check run is 13"),
+            "a run ID past any integer field": (
+                dict(github_run("test"), html_url=url.format("9" * 5000, 12)),
+                "not an Actions job"),
+            "a job ID past any integer field": (
+                dict(github_run("test"), html_url=url.format(5, "9" * 5000)),
+                "not an Actions job"),
+            "the route in another case": (
+                dict(github_run("test"), html_url=url.format(5, 12).replace(
+                    "/actions/runs/", "/Actions/Runs/")),
+                "not an Actions job"),
+        }
+        for read in ("graphql", "rest"):
+            self.f.settings(checks_graphql_fails=read == "rest")
+            for case, (run, reason) in cases.items():
+                with self.subTest(read=read, case=case):
+                    self.seed(run)
+                    start = len(self.job_reads())
+                    check = self.failed_logs()["checks"][0]
+                    self.assertIsNone(check["log"])
+                    self.assertIn(reason, check["log_reason"])
+                    self.assertEqual(self.job_reads()[start:], [])
+
+    def test_owner_and_repository_fold_case(self) -> None:
+        for read in ("graphql", "rest"):
+            self.f.settings(checks_graphql_fails=read == "rest")
+            with self.subTest(read=read):
+                self.seed(dict(github_run("test"), html_url=(
+                    "HTTPS://GitHub.com/magiland/TRIAL/actions/runs/5/job/12"
+                )))
+                check = self.failed_logs()["checks"][0]
+                self.assertEqual(check["log"]["job_id"], 12)
 
     def test_failed_log_read_gives_a_reason_and_exits_zero(self) -> None:
         self.seed(github_run("test"))
@@ -480,7 +528,10 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
         accepted = {
             "path": path,
             "configured origin": base + path,
+            "configured origin in another case": base.upper() + path,
             "attempt": path + "/attempt/2",
+            "owner and repository in another case": path.replace(
+                "/MagiLand/trial/", "/magiland/TRIAL/"),
         }
         refused = {
             "another origin": "https://other.example" + path,
@@ -488,6 +539,10 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
             "a fragment": path + "#log",
             "an origin without the path's slash": base + path[1:],
             "a URL that does not parse": "http://[::1" + path,
+            "the route in another case": (
+                path.replace("/actions/", "/Actions/")),
+            "the route in another case after the origin": (
+                base + path.replace("/runs/", "/RUNS/")),
             "a run number past any integer field": (
                 "/MagiLand/trial/actions/runs/" + "9" * 5000 + "/jobs/1"),
         }
@@ -588,6 +643,30 @@ class ForgejoSubPathFailedLogTests(LogFixtureMixin, unittest.TestCase):
         )
         check = self.failed_logs()["checks"][0]
         self.assertEqual(check["log"]["job_id"], 21)
+
+    def test_sub_path_is_compared_exactly(self) -> None:
+        # REV-1 of PR #181: only origin, owner and repository fold case.
+        path = "/forge/MagiLand/trial/actions/runs/3/jobs/0"
+        for case, url in {
+            "relative": "/FORGE" + path[len("/forge"):],
+            "after the origin": (self.f.server.base_url.replace(
+                "/forge", "/Forge") + path[len("/forge"):]),
+        }.items():
+            with self.subTest(case=case):
+                self.store(
+                    checks=[dict(forgejo_status("unit", "failure", 0),
+                                 target_url=url)],
+                    actions={
+                        "runs": [{"id": 7, "index_in_repo": 3,
+                                  "commit_sha": self.head}],
+                        "jobs": {"7": [{"id": 21, "run_id": 7,
+                                        "name": "unit"}]},
+                        "logs": {"21": FORGEJO_LOG},
+                    },
+                )
+                check = self.failed_logs()["checks"][0]
+                self.assertIsNone(check["log"])
+                self.assertIn("not an Actions job", check["log_reason"])
 
     def test_target_url_without_the_sub_path_is_refused(self) -> None:
         self.store(

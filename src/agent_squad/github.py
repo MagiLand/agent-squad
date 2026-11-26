@@ -244,6 +244,8 @@ def parse_check_run(value: object, events: dict[int, str]) -> Check:
         timestamps["started_at"],
         timestamps["completed_at"],
         check_run=True,
+        check_run_id=(None if data.get("id") is None
+                      else positive(data["id"], "check_run.id")),
     )
 
 
@@ -545,6 +547,7 @@ def rest_comment(node: dict, thread: dict | None) -> dict[str, object]:
 
 def rest_check_run(node: dict, suite: int, app: object) -> dict[str, object]:
     return {
+        "id": node.get("databaseId"),
         "name": node.get("name"),
         "status": lower(node.get("status")),
         "conclusion": lower(node.get("conclusion")),
@@ -1243,7 +1246,8 @@ class GitHub:
         """Read the log of the Actions job behind a failed check run (#176).
 
         An Actions check run's ID is its job ID, and its URL names the run
-        and the job. The job record must name the same run and ``sha``.
+        and the job, which must be the check run itself. The job record
+        must name the same run and ``sha``.
         """
         if not check.check_run:
             raise NoJobLog("a commit status, not a GitHub Actions job")
@@ -1252,10 +1256,13 @@ class GitHub:
                 f"not a GitHub Actions job (source {check.source})"
             )
         config = self.repository.configuration.forge
+        # The origin, owner and repository fold case; the route does not.
+        # An ID is at most 18 digits, which ``int`` always converts.
         match = re.fullmatch(
-            rf"https://github\.com/{re.escape(config.owner)}"
-            rf"/{re.escape(config.repo)}/actions/runs/([0-9]+)/job/([0-9]+)",
-            check.url or "", re.IGNORECASE,
+            rf"(?i:https://github\.com)/(?i:{re.escape(config.owner)})"
+            rf"/(?i:{re.escape(config.repo)})"
+            r"/actions/runs/([0-9]{1,18})/job/([0-9]{1,18})",
+            check.url or "",
         )
         if match is None:
             raise NoJobLog(
@@ -1263,6 +1270,11 @@ class GitHub:
                 f" repository: {check.url}"
             )
         run, job = int(match[1]), int(match[2])
+        if job != check.check_run_id:
+            raise NoJobLog(
+                f"the check run's URL names job {job}, but the check run is"
+                f" {check.check_run_id}"
+            )
         data = object_value(
             self.api(f"{self.prefix}/actions/jobs/{job}"), "job"
         )

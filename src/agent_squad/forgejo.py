@@ -1014,7 +1014,8 @@ class Forgejo:
 
         A status URL must be exactly that path, optionally after the
         configured origin and optionally with the attempt: no other origin,
-        query, or fragment. A job's ``html_url`` is compared by its path
+        query, or fragment, and only the origin, owner, and repository may
+        differ in case. A job's ``html_url`` is compared by its path
         alone, because it carries the instance's ROOT_URL, which may differ
         from the configured ``base_url``. Anything else, a URL that does not
         parse included, names no job.
@@ -1024,14 +1025,17 @@ class Forgejo:
             base = urlsplit(self.base_url)
             if not status:
                 url = urlsplit(url or "").path
+            # Origin, owner and repository fold case; the instance's
+            # sub-path and the Actions route are compared exactly.
             match = re.fullmatch(
-                (rf"(?:{re.escape(f'{base.scheme}://{base.netloc}')})?"
+                (rf"(?i:{re.escape(f'{base.scheme}://{base.netloc}')})?"
                  if status else "")
                 + rf"{re.escape(base.path)}"
-                rf"/{re.escape(config.owner)}/{re.escape(config.repo)}"
+                rf"/(?i:{re.escape(config.owner)})"
+                rf"/(?i:{re.escape(config.repo)})"
                 r"/actions/runs/([0-9]{1,18})/jobs/([0-9]{1,18})"
-                r"(?:/attempt/[0-9]+)?",
-                url or "", re.IGNORECASE,
+                r"(?:/attempt/[0-9]{1,18})?",
+                url or "",
             )
         except ValueError:
             return None

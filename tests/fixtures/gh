@@ -320,7 +320,7 @@ def commit_lists(sha, advance=False):
         suite = run.get("check_suite", {}).get("id")
         suites.setdefault(suite, []).append({
             # GitHub lists check runs newest first; number them so.
-            "databaseId": len(runs) - index,
+            "databaseId": run.get("id", len(runs) - index),
             "name": run["name"],
             "status": run["status"].upper(),
             "conclusion": (run["conclusion"] or "").upper() or None,
@@ -540,6 +540,9 @@ if endpoint == "graphql":
             repository["head"] = gql_commit(pr["head"]["sha"])
         output({"data": {"repository": repository}})
     if operation == "SquadChecks":
+        # settings["checks_graphql_fails"] sends the read to REST (#176).
+        if settings.get("checks_graphql_fails"):
+            fail("Something went wrong while executing your query.", 502)
         if account in settings.get("checks_denied", []):
             graphql_errors({"repository": {"object": None}},
                            checks_refused("object"))

@@ -202,11 +202,14 @@ class Check:
     # can carry any creator login, ``github-actions`` included, so only
     # this says that ``url`` names a job (#176). Not in the public record.
     check_run: bool = False
+    # The check run's own ID, which for an Actions job is the job's ID, so
+    # the job a URL names must be this one (#176). Not in the public record.
+    check_run_id: int | None = None
 
     def record(self) -> dict[str, object]:
         """The public check record of §11.0."""
         row = asdict(self)
-        del row["check_run"]
+        del row["check_run"], row["check_run_id"]
         return row
 
 
