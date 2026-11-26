@@ -203,12 +203,14 @@ class Handler(BaseHTTPRequestHandler):
         if status == 302:
             self.send_header("Location", model["settings"]["redirect_to"])
         # settings["log_content_type"] is the whole header a text answer
-        # carries; an empty one sends none (REV-12).
+        # carries, or a list of fields to send in order; an empty one sends
+        # none (REV-12).
         media = (model["settings"].get(
             "log_content_type", "text/plain; charset=utf-8"
         ) if text else "application/json")
-        if media:
-            self.send_header("Content-Type", media)
+        for field in [media] if isinstance(media, str) else media:
+            if field:
+                self.send_header("Content-Type", field)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)

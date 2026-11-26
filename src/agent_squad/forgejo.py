@@ -572,9 +572,11 @@ class Forgejo:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 content = response.read()
-                # The header as sent: ``get_content_type`` would supply
-                # text/plain for a missing or malformed one (REV-12).
-                media = response.headers.get("Content-Type") if text else None
+                # Every field as sent: ``get_content_type`` would supply
+                # text/plain for a missing or malformed one, and ``get``
+                # would pick one of several (REV-12).
+                media = (response.headers.get_all("Content-Type") or []
+                         if text else [])
         except HTTPError as error:
             detail = f"HTTP {error.code}"
             try:
@@ -603,7 +605,12 @@ class Forgejo:
                 " repeating a mutation"
             ) from None
         if text:
-            kind = (media or "").split(";", 1)[0].strip().lower()
+            # Content-Type is a single field (RFC 9110 §8.3).
+            if len(media) > 1:
+                raise ForgeError(
+                    f"forge answered {len(media)} content types, not text"
+                )
+            kind = "".join(media).split(";", 1)[0].strip().lower()
             if not re.fullmatch(r"text/[a-z0-9][a-z0-9!#$&^_.+-]*", kind):
                 raise ForgeError(
                     f"forge answered {kind or 'no content type'}, not text"

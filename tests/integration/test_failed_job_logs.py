@@ -703,6 +703,14 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
             ("log_content_type", "", "no content type"),
             ("log_content_type", "unsupported", "unsupported, not text"),
             ("log_content_type", "text/", "text/, not text"),
+            # Content-Type is a single field: two are refused in either
+            # order (REV-12, review 6).
+            ("log_content_type", ["text/plain", "application/zip"],
+             "2 content types, not text"),
+            ("log_content_type", ["application/zip", "text/plain"],
+             "2 content types, not text"),
+            ("log_content_type", ["text/plain", "text/plain"],
+             "2 content types, not text"),
         ):
             with self.subTest(setting=setting, value=value):
                 self.seed(*self.statuses())
