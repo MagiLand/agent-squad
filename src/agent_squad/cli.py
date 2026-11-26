@@ -21,7 +21,7 @@ from .conventions import (
     DISPOSITIONS, GENERAL_KINDS, RECOMMENDATIONS, SHA, VERIFICATIONS,
 )
 from .doctor import diagnose
-from .forge import make_forge
+from .forge import make_forge, visible
 from .herdr import HerdrClient
 from .initialization import (
     AgentSquadError,
@@ -410,6 +410,11 @@ def execute(args: argparse.Namespace) -> dict:
     )}
 
 
+def one_line(text: str) -> str:
+    """Forge text for one plain-text line: no control character, no break."""
+    return visible(text).replace("\n", "\\x0a")
+
+
 def reply_option_error(args: argparse.Namespace) -> str | None:
     """Refuse option combinations before any forge call."""
     if args.disposition and args.role != "implementer":
@@ -528,12 +533,16 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             for check in result["checks"]:
                 if "log" not in check:
                     continue
+                # Forge text: a posted status may name itself anything.
+                name = one_line(check["name"])
                 log = check["log"]
                 if log is None:
-                    print(f'No log for {check["name"]}: {check["log_reason"]}')
+                    print(
+                        f'No log for {name}: {one_line(check["log_reason"])}'
+                    )
                     continue
                 print(
-                    f'Log of {check["name"]} (job {log["job_id"]}),'
+                    f'Log of {name} (job {log["job_id"]}),'
                     f' {len(log["lines"])} of {log["total_lines"]} lines:'
                 )
                 for line in log["lines"]:

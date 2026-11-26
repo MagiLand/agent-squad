@@ -258,7 +258,10 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
     def test_plain_output_prints_each_excerpt_or_reason(self) -> None:
         self.store(checks={"check_runs": [
             github_run("test"), github_run("cov", app="codecov", job=13),
-        ]}, actions={
+        ], "statuses": [{
+            "context": "evil\x1b[2J\nname", "state": "failure",
+            "creator": {"login": "ci-bot"}, "target_url": None,
+        }]}, actions={
             "jobs": {"12": {"id": 12, "run_id": 5, "head_sha": self.head}},
             "logs": {"12": GITHUB_LOG},
         })
@@ -276,6 +279,10 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
         self.assertIn(
             "No log for cov: not a GitHub Actions job (source codecov)",
             lines,
+        )
+        self.assertIn(
+            "No log for evil\\x1b[2J\\x0aname: not a GitHub Actions job"
+            " (source ci-bot)", lines,
         )
         self.assertNotIn("\x1b", result.stdout)
 
