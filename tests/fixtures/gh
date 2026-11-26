@@ -676,6 +676,34 @@ if kind in ("branches", "rules"):
     if kind == "branches":
         output(settings.get("protection", {}))
     output(paged(settings.get("rules", []), query))
+if kind == "actions" and parts[4:5] == ["jobs"] and len(parts) in (6, 7):
+    # An Actions job and its log (#176): model["actions"] holds "jobs" and
+    # "logs" by job ID. Like gh 2.105.0, the fake refuses to print a log
+    # with an escape sequence without --allow-escape-sequences.
+    if account in settings.get("actions_denied", []):
+        fail("Not Found", 404)
+    actions = model.get("actions", {})
+    job = parts[5]
+    if len(parts) == 6:
+        if job not in actions.get("jobs", {}):
+            fail("Not Found", 404)
+        output(actions["jobs"][job])
+    if parts[6] != "logs":
+        fail("unsupported endpoint", 404)
+    if settings.get("log_status", {}).get(job):
+        fail("log unavailable", settings["log_status"][job])
+    if job not in actions.get("logs", {}):
+        fail("Not Found", 404)
+    text = actions["logs"][job]
+    if "\x1b" in text and "--allow-escape-sequences" not in arguments:
+        save()
+        print("the response contains terminal escape sequences; pass"
+              " --allow-escape-sequences to output it anyway",
+              file=sys.stderr)
+        raise SystemExit(1)
+    save()
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    raise SystemExit(0)
 if (kind == "commits" and parts[5:] in (["check-runs"], ["status"])) or (
     kind == "actions" and parts[4:] == ["runs"]
 ):

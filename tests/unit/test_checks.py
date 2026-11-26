@@ -1,4 +1,4 @@
-"""CI result classification, summary, and the checks wait (#145)."""
+"""CI result classification, summary, the checks wait (#145), and logs."""
 
 from contextlib import nullcontext
 from dataclasses import replace
@@ -12,12 +12,15 @@ from tests.unit.test_conventions import H, config
 add_src_to_path()
 
 from agent_squad.commands import (  # noqa: E402
-    CHECK_POLL_INTERVAL, ci_record, pr_checks, summarize_checks,
+    CHECK_POLL_INTERVAL, FAILED_LOG_LINES, ci_record, log_excerpt,
+    pr_checks, summarize_checks,
 )
 from agent_squad.forge import (  # noqa: E402
-    Check, ChecksUnavailable, ForgeError,
+    Check, ChecksUnavailable, ForgeError, visible,
 )
-from agent_squad.forgejo import Forgejo, parse_status  # noqa: E402
+from agent_squad.forgejo import (  # noqa: E402
+    Forgejo, names_job, parse_status,
+)
 from agent_squad.github import (  # noqa: E402
     GitHub, check_run_result, parse_check_run, parse_commit_status,
 )
@@ -490,3 +493,52 @@ class RecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogExcerptTests(unittest.TestCase):
+    """The excerpt ``pr checks --failed-logs`` gives a failed job (#176)."""
+
+    def test_control_characters_become_visible(self) -> None:
+        self.assertEqual(
+            visible("a\x1b[1mb\x07\x00\x7f\x9b\tc\nd ﻿"),
+            "a\\x1b[1mb\\x07\\x00\\x7f\\x9b\tc\nd ﻿",
+        )
+
+    def test_excerpt_ends_at_the_last_marked_line(self) -> None:
+        lines = [f"line {n}" for n in range(1, 151)]
+        lines[119] = "x ##[error]first"
+        lines[129] = "x ##[error]last"
+        excerpt = log_excerpt("\n".join(lines) + "\n", "##[error]")
+        self.assertEqual(len(excerpt["lines"]), FAILED_LOG_LINES)
+        self.assertEqual(excerpt["lines"][0], "line 31")
+        self.assertEqual(excerpt["lines"][-1], "x ##[error]last")
+        self.assertEqual((excerpt["total_lines"], excerpt["truncated"]),
+                         (150, True))
+
+    def test_without_a_marker_the_excerpt_ends_at_the_last_line(self) -> None:
+        excerpt = log_excerpt("a ##[error]x\r\nb\r\n", None)
+        self.assertEqual(excerpt, {
+            "lines": ["a ##[error]x", "b"], "total_lines": 2,
+            "truncated": False,
+        })
+        self.assertEqual(log_excerpt("a\nb", "##[error]")["lines"],
+                         ["a", "b"])
+
+    def test_empty_log_has_no_lines(self) -> None:
+        self.assertEqual(log_excerpt("", "##[error]"), {
+            "lines": [], "total_lines": 0, "truncated": False,
+        })
+
+    def test_status_context_names_its_job(self) -> None:
+        for context, name, expected in (
+            ("Tests / unit (pull_request)", "unit", True),
+            ("/ alpha (push)", "alpha", True),
+            ("ci / test (3.11) (push)", "test (3.11)", True),
+            ("a / b / unit (push)", "unit", True),
+            ("Tests / unit (pull_request)", "it", False),
+            ("Tests / unit (pull_request)", "Tests / unit", False),
+            ("Tests / unit", "unit", False),
+            ("unit (push)", "unit", False),
+        ):
+            with self.subTest(context=context, name=name):
+                self.assertIs(names_job(context, name), expected)

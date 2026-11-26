@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import stat
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     ProxyHandler,
@@ -36,10 +36,12 @@ from .forge import (
     IssueQuery,
     Label,
     IssueRecord,
+    JobLog,
     ListedIssue,
     MergeRefused,
     MergeResult,
     Milestone,
+    NoJobLog,
     PullRequest,
     RelatedIssue,
     Review,
@@ -430,6 +432,16 @@ def parse_status(value: object) -> Check:
     )
 
 
+def names_job(context: str, name: str) -> bool:
+    """Whether a status context ``<workflow> / <job> (<event>)`` names a job.
+
+    Forgejo Actions writes the context so; the workflow name may be empty,
+    as in ``/ test (push)`` (#176).
+    """
+    match = re.fullmatch(r"(.*) \([^()]*\)", context)
+    return match is not None and (" " + match[1]).endswith(" / " + name)
+
+
 def read_token(repository: Repository, role: Role) -> str:
     """Validate the file's live identity and permissions on every read."""
     assert repository.configuration is not None
@@ -508,6 +520,8 @@ class Forgejo:
     can_read_branch_rules = True
     can_mutate = True
     mutation_unavailable_message = ""
+    # A job log has no line that marks where the failing step ended (#176).
+    log_end_marker = None
 
     def __init__(
         self,
@@ -541,6 +555,7 @@ class Forgejo:
         *,
         method: str = "GET",
         body: object = None,
+        text: bool = False,
     ) -> object:
         if not endpoint.startswith("/") or endpoint.startswith("//"):
             raise ForgeError("API endpoint must be an origin-relative path")
@@ -549,7 +564,7 @@ class Forgejo:
             data=None if body is None else json.dumps(body).encode("utf-8"),
             headers={
                 "Authorization": "token " + token,
-                "Accept": "application/json",
+                "Accept": "text/plain" if text else "application/json",
                 "Content-Type": "application/json",
             },
             method=method,
@@ -557,6 +572,7 @@ class Forgejo:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 content = response.read()
+                kind = response.headers.get_content_type()
         except HTTPError as error:
             detail = f"HTTP {error.code}"
             try:
@@ -580,6 +596,10 @@ class Forgejo:
                 "forge request failed or timed out; re-read the PR before"
                 " repeating a mutation"
             ) from None
+        if text:
+            if not kind.startswith("text/"):
+                raise ForgeError(f"forge answered {kind}, not text")
+            return content.decode("utf-8", errors="replace")
         try:
             return (
                 decode_json(content.decode("utf-8"))
@@ -638,6 +658,15 @@ class Forgejo:
             if self._version is None:
                 self._check_version(token)
         return self._request(endpoint, token, method=method, body=body)
+
+    def text(self, endpoint: str) -> str:
+        """GET a text answer, such as a job log, exactly as served (#176).
+
+        Redirects are refused as for every read; bytes that are not UTF-8
+        are replaced, and callers make control characters visible.
+        """
+        token = read_token(self.repository, self.role)
+        return self._request(endpoint, token, text=True)
 
     def repository_record(self) -> dict[str, object]:
         data = object_value(self.api(self.prefix), "repository")
@@ -971,6 +1000,87 @@ class Forgejo:
                 f"{error} (HTTP {error.status})", error.status
             ) from None
         return tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
+
+    def job_position(self, url: str | None) -> tuple[int, int] | None:
+        """The run number and job position an Actions URL names (#176).
+
+        A commit status's ``target_url`` is the path
+        ``/<owner>/<repo>/actions/runs/<N>/jobs/<M>``, under the instance's
+        sub-path; a job's ``html_url`` adds the origin and
+        ``/attempt/<A>``. N is the run's ``index_in_repo``, not its ID, and
+        M is the job's position in the workflow file, not its ID.
+        """
+        config = self.repository.configuration.forge
+        match = re.fullmatch(
+            rf"{re.escape(urlsplit(self.base_url).path)}"
+            rf"/{re.escape(config.owner)}/{re.escape(config.repo)}"
+            r"/actions/runs/([0-9]+)/jobs/([0-9]+)(?:/attempt/[0-9]+)?",
+            urlsplit(url or "").path, re.IGNORECASE,
+        )
+        return None if match is None else (int(match[1]), int(match[2]))
+
+    def job_log(self, check: Check, sha: str) -> JobLog:
+        """Read the log of the Actions job behind a failed status (#176).
+
+        The run is found by its number and must have run at ``sha``; the
+        job is the one at the status's position, which must also be the
+        position its ``html_url`` names when it has one (17.x) and carry
+        the job name of the status context. A position past the last job
+        is refused: the web interface would show the first job's log.
+        """
+        if check.source is not None:
+            raise NoJobLog(
+                f"not a Forgejo Actions status (creator {check.source})"
+            )
+        position = self.job_position(check.url)
+        if position is None:
+            raise NoJobLog(
+                "the status's URL is not an Actions job of this repository:"
+                f" {check.url}"
+            )
+        number, index = position
+        runs = [
+            data for data in (
+                object_value(row, "workflow run")
+                for row in self._all_pages(
+                    f"{self.prefix}/actions/runs?run_number={number}",
+                    key="workflow_runs",
+                )
+            )
+            if positive(data.get("index_in_repo"), "run.index_in_repo")
+            == number
+        ]
+        if len(runs) != 1:
+            raise NoJobLog(f"{len(runs)} runs have run number {number}")
+        if oid(runs[0].get("commit_sha"), "run.commit_sha") != sha:
+            raise NoJobLog(f"run {number} ran at another commit")
+        run_id = positive(runs[0].get("id"), "run.id")
+        jobs = array(
+            self.api(f"{self.prefix}/actions/runs/{run_id}/jobs"), "run jobs"
+        )
+        if index >= len(jobs):
+            raise NoJobLog(f"run {number} has no job at position {index}")
+        job = object_value(jobs[index], "job")
+        url = job.get("html_url")
+        if url is not None and self.job_position(
+            text_value(url, "job.html_url")
+        ) != position:
+            raise NoJobLog(
+                f"the job at position {index} of run {number} names another"
+                " position"
+            )
+        name = text_value(job.get("name"), "job.name")
+        if not names_job(check.name, name):
+            raise NoJobLog(
+                f"the job at position {index} of run {number} is {name!r},"
+                " which the status does not name"
+            )
+        if positive(job.get("run_id"), "job.run_id") != run_id:
+            raise NoJobLog(f"job {job.get('id')} belongs to another run")
+        job_id = positive(job.get("id"), "job.id")
+        return JobLog(
+            job_id, self.text(f"{self.prefix}/actions/jobs/{job_id}/logs")
+        )
 
     def branch_prs(
         self, branch: str, complete: bool = False,

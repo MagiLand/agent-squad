@@ -118,6 +118,7 @@ def parser() -> argparse.ArgumentParser:
         common(pr[name])
     pr["checks"].add_argument("--wait", type=positive_argument)
     pr["checks"].add_argument("--merge-commit", action="store_true")
+    pr["checks"].add_argument("--failed-logs", action="store_true")
     common(pr["create"], role="implementer", number="issue", mutation=True)
     pr["create"].add_argument("--task")
     pr["create"].add_argument("--report", required=True)
@@ -381,7 +382,8 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("pr", "checks"):
         # Only the PR record and its checks: no fetch and no Herdr read.
         return commands.pr_checks(
-            forge, args.pr, args.wait, merge_commit=args.merge_commit
+            forge, args.pr, args.wait, merge_commit=args.merge_commit,
+            failed_logs=args.failed_logs,
         )
     # Only the status report reads CI, in the same read where it can.
     report_ci = key not in (("pr", "head"), ("pr", "reviews"))
@@ -523,6 +525,19 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                     f'Stopped waiting after {result["waited_seconds"]}'
                     " seconds; checks are not final."
                 )
+            for check in result["checks"]:
+                if "log" not in check:
+                    continue
+                log = check["log"]
+                if log is None:
+                    print(f'No log for {check["name"]}: {check["log_reason"]}')
+                    continue
+                print(
+                    f'Log of {check["name"]} (job {log["job_id"]}),'
+                    f' {len(log["lines"])} of {log["total_lines"]} lines:'
+                )
+                for line in log["lines"]:
+                    print("    " + line)
             print(json.dumps(result, indent=2, default=json_default))
         elif (args.group, getattr(args, "command", None)) == (
             "issue", "list",

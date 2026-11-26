@@ -15,11 +15,12 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 from .forge import (
     CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable,
     ClosingPullRequest, Comment, Evidence, ForgeError, IssueDependencies,
-    IssueQuery, IssueRecord, Label, ListedIssue, MergeResult, Milestone,
-    PullRequest, RelatedIssue, Review, ReviewPublication, ReviewState, Role,
-    Snapshot, ThreadState, V, array, boolean, branch_present, closing_order,
-    delete_and_confirm, exposed, milestone_title, object_value, oid,
-    parse_milestone, positive, related_issue, text_value,
+    IssueQuery, IssueRecord, JobLog, Label, ListedIssue, MergeResult,
+    Milestone, NoJobLog, PullRequest, RelatedIssue, Review, ReviewPublication,
+    ReviewState, Role, Snapshot, ThreadState, V, array, boolean,
+    branch_present, closing_order, delete_and_confirm, exposed,
+    milestone_title, object_value, oid, parse_milestone, positive,
+    related_issue, text_value,
 )
 from .initialization import Repository, decode_json
 
@@ -589,6 +590,8 @@ class GitHub:
     can_resolve_threads = True
     can_read_thread_resolution = True
     can_read_branch_rules = True
+    # A failing step's last line; the post steps are logged after it (#176).
+    log_end_marker = "##[error]"
 
     def __init__(
         self, repository: Repository, role: Role, *, timeout: float = 45
@@ -615,6 +618,7 @@ class GitHub:
         *,
         authenticated: bool = False,
         body: object = None,
+        errors: str = "strict",
     ) -> str:
         env = os.environ.copy()
         for key in (
@@ -635,6 +639,7 @@ class GitHub:
                 shell=False,
                 text=True,
                 encoding="utf-8",
+                errors=errors,
                 capture_output=True,
                 timeout=self.timeout,
                 input=None if body is None else json.dumps(body),
@@ -719,6 +724,20 @@ class GitHub:
         ):
             raise ForgeError(self.graphql_errors(value["errors"]))
         return value
+
+    def text(self, endpoint: str) -> str:
+        """GET a text answer, such as a job log, exactly as served (#176).
+
+        ``gh`` refuses to print an answer with terminal escape sequences
+        unless it is given ``--allow-escape-sequences``; callers make
+        control characters visible themselves. Bytes that are not UTF-8
+        are replaced.
+        """
+        return self._run(
+            [*self.arguments(endpoint, "GET", False),
+             "--allow-escape-sequences"],
+            authenticated=True, errors="replace",
+        )
 
     @staticmethod
     def arguments(endpoint: str, method: str, body: bool) -> list[str]:
@@ -1214,6 +1233,37 @@ class GitHub:
             ))
         except ForgeError:
             return self.rest_checks(sha)
+
+    def job_log(self, check: Check, sha: str) -> JobLog:
+        """Read the log of the Actions job behind a failed check run (#176).
+
+        An Actions check run's ID is its job ID, and its URL names the run
+        and the job. The job record must name the same run and ``sha``.
+        """
+        if check.source != "github-actions":
+            raise NoJobLog(
+                f"not a GitHub Actions job (source {check.source})"
+            )
+        config = self.repository.configuration.forge
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(config.owner)}"
+            rf"/{re.escape(config.repo)}/actions/runs/([0-9]+)/job/([0-9]+)",
+            check.url or "", re.IGNORECASE,
+        )
+        if match is None:
+            raise NoJobLog(
+                "the check run's URL is not an Actions job of this"
+                f" repository: {check.url}"
+            )
+        run, job = int(match[1]), int(match[2])
+        data = object_value(
+            self.api(f"{self.prefix}/actions/jobs/{job}"), "job"
+        )
+        if positive(data.get("run_id"), "job.run_id") != run:
+            raise NoJobLog(f"job {job} belongs to another run")
+        if oid(data.get("head_sha"), "job.head_sha") != sha:
+            raise NoJobLog(f"job {job} ran at another commit")
+        return JobLog(job, self.text(f"{self.prefix}/actions/jobs/{job}/logs"))
 
     def commit_checks(self, commit: dict) -> tuple[Check, ...]:
         """Check records of one GraphQL commit, as ``rest_checks`` reads them.
