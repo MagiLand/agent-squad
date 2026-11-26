@@ -170,6 +170,15 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
         self.assertEqual(entry["total_lines"], 250)
         self.assertTrue(entry["truncated"])
 
+    def test_bare_carriage_returns_survive_the_gh_read(self) -> None:
+        # gh's output is decoded by the CLI, not in text mode, which would
+        # turn a progress update's CR into a line break (REV-3).
+        self.seed(github_run("test"),
+                  log="10%\r20%\r\n##[error]failed\r\nPost\rdone\r")
+        log = self.failed_logs()["checks"][0]["log"]
+        self.assertEqual(log["lines"], ["10%\\x0d20%", "##[error]failed"])
+        self.assertEqual((log["total_lines"], log["truncated"]), (3, True))
+
     def test_short_log_without_error_line_is_whole(self) -> None:
         self.seed(github_run("test"), log="one\ntwo")
         entry = self.failed_logs()["checks"][0]["log"]
@@ -189,6 +198,13 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
             "other repository": {"check_runs": [
                 github_run("test", repository="MagiLand/other")
             ]},
+            # A status's creator login is no check run's app (REV-2).
+            "commit status by github-actions": {"statuses": [{
+                "context": "test", "state": "failure",
+                "creator": {"login": "github-actions"},
+                "target_url": "https://github.com/MagiLand/trial/actions"
+                              "/runs/5/job/12",
+            }]},
         }
         for case, checks in cases.items():
             with self.subTest(case=case):
@@ -216,9 +232,10 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 check = self.failed_logs()["checks"][0]
                 self.assertIsNone(check["log"])
                 self.assertIn("job 12", check["log_reason"])
-                self.assertNotIn(
-                    "/actions/jobs/12/logs",
+                # Only the job record is read, never its log.
+                self.assertEqual(
                     [c["arguments"][1] for c in self.job_reads()[start:]],
+                    ["/repos/MagiLand/trial/actions/jobs/12"],
                 )
 
     def test_failed_log_read_gives_a_reason_and_exits_zero(self) -> None:
@@ -281,8 +298,8 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
             lines,
         )
         self.assertIn(
-            "No log for evil\\x1b[2J\\x0aname: not a GitHub Actions job"
-            " (source ci-bot)", lines,
+            "No log for evil\\x1b[2J\\x0aname: a commit status, not a"
+            " GitHub Actions job", lines,
         )
         self.assertNotIn("\x1b", result.stdout)
 
@@ -415,6 +432,11 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
         def other_run_id(actions: dict) -> None:
             actions["jobs"]["7"][1]["run_id"] = 3
 
+        def malformed_html_url(actions: dict) -> None:
+            actions["jobs"]["7"][1]["html_url"] = (
+                "http://[::1/MagiLand/trial/actions/runs/3/jobs/1"
+            )
+
         cases = {
             "position past the last job": (
                 forgejo_status("unit", "failure", 2), self.actions()),
@@ -431,6 +453,9 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 forgejo_status("unit", "failure", 1), changed(two_runs)),
             "job of another run": (
                 forgejo_status("unit", "failure", 1), changed(other_run_id)),
+            "html_url that does not parse": (
+                forgejo_status("unit", "failure", 1),
+                changed(malformed_html_url)),
             "another repository": (
                 forgejo_status("unit", "failure", 1, path="/MagiLand/other"),
                 self.actions()),
@@ -446,6 +471,46 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 self.assertIsNone(check["log"])
                 self.assertTrue(check["log_reason"])
                 self.assertEqual(self.log_reads()[start:], [])
+
+    def test_status_url_must_be_one_of_the_exact_forms(self) -> None:
+        # REV-1 of PR #181: the path, optionally after the configured
+        # origin and optionally with the attempt; nothing else.
+        path = "/MagiLand/trial/actions/runs/3/jobs/1"
+        base = self.f.server.base_url
+        accepted = {
+            "path": path,
+            "configured origin": base + path,
+            "attempt": path + "/attempt/2",
+        }
+        refused = {
+            "another origin": "https://other.example" + path,
+            "a query": path + "?job=0",
+            "a fragment": path + "#log",
+            "an origin without the path's slash": base + path[1:],
+            "a URL that does not parse": "http://[::1" + path,
+            "a run number past any integer field": (
+                "/MagiLand/trial/actions/runs/" + "9" * 5000 + "/jobs/1"),
+        }
+        good = forgejo_status("lint", "failure", 0)
+        for case, url in {**accepted, **refused}.items():
+            with self.subTest(case=case):
+                status = dict(forgejo_status("unit", "failure", 1),
+                              target_url=url)
+                self.seed(good, status)
+                start = len(self.log_reads())
+                checks = self.by_name(self.failed_logs())
+                unit = checks["Tests / unit (pull_request)"]
+                # The other failed check still gets its log.
+                self.assertEqual(
+                    checks["Tests / lint (pull_request)"]["log"]["job_id"],
+                    20)
+                if case in accepted:
+                    self.assertEqual(unit["log"]["job_id"], 21)
+                    continue
+                self.assertIsNone(unit["log"])
+                self.assertIn("not an Actions job", unit["log_reason"])
+                self.assertNotIn("/api/v1/repos/MagiLand/trial/actions/jobs"
+                                 "/21/logs", self.log_reads()[start:])
 
     def test_reads_run_as_the_selected_role(self) -> None:
         self.seed(*self.statuses())

@@ -243,6 +243,7 @@ def parse_check_run(value: object, events: dict[int, str]) -> Check:
         optional_text(data.get("html_url"), "check_run.html_url"),
         timestamps["started_at"],
         timestamps["completed_at"],
+        check_run=True,
     )
 
 
@@ -618,7 +619,7 @@ class GitHub:
         *,
         authenticated: bool = False,
         body: object = None,
-        errors: str = "strict",
+        raw: bool = False,
     ) -> str:
         env = os.environ.copy()
         for key in (
@@ -637,9 +638,10 @@ class GitHub:
                 cwd=self.repository.root,
                 env=env,
                 shell=False,
-                text=True,
-                encoding="utf-8",
-                errors=errors,
+                # A raw answer is decoded here, not in text mode, which
+                # would turn every bare carriage return into a newline.
+                text=not raw,
+                encoding=None if raw else "utf-8",
                 capture_output=True,
                 timeout=self.timeout,
                 input=None if body is None else json.dumps(body),
@@ -650,6 +652,9 @@ class GitHub:
             ) from None
         except OSError as error:
             raise ForgeError(f"could not execute gh: {error}") from None
+        if raw:
+            result.stdout = result.stdout.decode("utf-8", "replace")
+            result.stderr = result.stderr.decode("utf-8", "replace")
         if result.returncode:
             # Token-resolution output is never included, even on a failing
             # command.
@@ -731,12 +736,12 @@ class GitHub:
         ``gh`` refuses to print an answer with terminal escape sequences
         unless it is given ``--allow-escape-sequences``; callers make
         control characters visible themselves. Bytes that are not UTF-8
-        are replaced.
+        are replaced, and carriage returns are kept.
         """
         return self._run(
             [*self.arguments(endpoint, "GET", False),
              "--allow-escape-sequences"],
-            authenticated=True, errors="replace",
+            authenticated=True, raw=True,
         )
 
     @staticmethod
@@ -1240,6 +1245,8 @@ class GitHub:
         An Actions check run's ID is its job ID, and its URL names the run
         and the job. The job record must name the same run and ``sha``.
         """
+        if not check.check_run:
+            raise NoJobLog("a commit status, not a GitHub Actions job")
         if check.source != "github-actions":
             raise NoJobLog(
                 f"not a GitHub Actions job (source {check.source})"

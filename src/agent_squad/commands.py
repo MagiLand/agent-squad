@@ -197,6 +197,13 @@ def ci_record(
     ``checks`` are the checks at ``head`` when the snapshot already read
     them (#149). The result is derived on every read and never stored (§3).
     """
+    return read_checks(forge, head, checks)[0]
+
+
+def read_checks(
+    forge: Forge, head: str, checks: tuple[Check, ...] | None = None,
+) -> tuple[dict, tuple[Check, ...]]:
+    """``ci_record`` together with the checks it was built from (#176)."""
     try:
         if checks is None:
             checks = forge.checks(head)
@@ -204,12 +211,12 @@ def ci_record(
         return {
             "head": head, "summary": "unavailable", "reason": str(error),
             "checks": [],
-        }
+        }, ()
     return {
         "head": head,
         "summary": summarize_checks(checks),
-        "checks": [asdict(check) for check in checks],
-    }
+        "checks": [check.record() for check in checks],
+    }, checks
 
 
 def merged_commit(pr: PullRequest) -> str:
@@ -249,12 +256,13 @@ def pr_checks(
     pr = forge.pr(number)
     head = merged_commit(pr) if merge_commit else pr.head
     if wait is None:
-        record = ci_record(forge, head)
-        return with_failed_logs(forge, record) if failed_logs else record
+        record, checks = read_checks(forge, head)
+        return (with_failed_logs(forge, record, checks) if failed_logs
+                else record)
     start = time.monotonic()
     timed_out = head_changed = False
     while True:
-        record = ci_record(forge, head)
+        record, checks = read_checks(forge, head)
         if not merge_commit and forge.pr(number).head != head:
             head_changed = True
             break
@@ -267,7 +275,7 @@ def pr_checks(
         time.sleep(min(CHECK_POLL_INTERVAL, remaining))
     waited = round(time.monotonic() - start)
     if failed_logs:
-        record = with_failed_logs(forge, record)
+        record = with_failed_logs(forge, record, checks)
     return {
         **record,
         "waited_seconds": waited,
@@ -276,18 +284,22 @@ def pr_checks(
     }
 
 
-def with_failed_logs(forge: Forge, record: dict) -> dict:
+def with_failed_logs(
+    forge: Forge, record: dict, checks: tuple[Check, ...],
+) -> dict:
     """Add ``log`` and ``log_reason`` to each failed check record (#176).
 
-    Logs are read once, after any wait, at the commit the checks were read
-    at. A check with no matching Actions job, or a log read that fails,
-    gets a reason instead of a log; it never ends the command. An
-    ``unavailable`` read has no check records, so it reads no log.
+    ``checks`` are the checks ``record`` was built from, in its order, so
+    what the adapter knows of each check's origin reaches the lookup. Logs
+    are read once, after any wait, at the commit the checks were read at.
+    A check with no matching Actions job, or a log read that fails, gets a
+    reason instead of a log; it never ends the command. An ``unavailable``
+    read has no checks, so it reads no log.
     """
     return {**record, "checks": [
-        {**row, **failed_log(forge, Check(**row), record["head"])}
-        if row["result"] == "failed" else row
-        for row in record["checks"]
+        {**row, **failed_log(forge, check, record["head"])}
+        if check.result == "failed" else row
+        for row, check in zip(record["checks"], checks, strict=True)
     ]}
 
 
@@ -316,9 +328,12 @@ def log_excerpt(text: str, end_marker: str | None) -> dict:
     the log's last line. ``truncated`` says the log has lines the excerpt
     leaves out, before or after it.
     """
-    lines = [line.removesuffix("\r") for line in text.split("\n")]
-    if lines[-1] == "":
-        lines.pop()
+    # A line ends at LF or CRLF; any other CR, such as a progress update's,
+    # is part of its line and shown as \x0d.
+    parts = text.split("\n")
+    lines = [line.removesuffix("\r") for line in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
     end = len(lines)
     if end_marker is not None:
         end = next(

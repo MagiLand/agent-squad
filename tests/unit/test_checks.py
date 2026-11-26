@@ -68,6 +68,31 @@ class GitHubClassificationTests(unittest.TestCase):
                 self.assertEqual(check.result, expected)
                 self.assertEqual(check.state, state)
 
+    def test_only_a_check_run_is_marked_as_one(self) -> None:
+        # #176: a status may carry any creator login, the Actions app's
+        # slug included; only the mark says the URL names a job. Both
+        # checks reads, GraphQL and REST, build checks with these parsers.
+        status = parse_commit_status({
+            "context": "test", "state": "failure",
+            "creator": {"login": "github-actions"},
+            "target_url": "https://github.com/MagiLand/trial/actions/runs/5"
+                          "/job/12",
+        })
+        self.assertEqual(status.source, "github-actions")
+        self.assertFalse(status.check_run)
+        run = parse_check_run({
+            "name": "test", "status": "completed", "conclusion": "failure",
+            "check_suite": None, "app": {"slug": "github-actions"},
+            "html_url": None, "started_at": None, "completed_at": None,
+        }, {})
+        self.assertTrue(run.check_run)
+        # The mark stays out of the public check record.
+        self.assertNotIn("check_run", run.record())
+        self.assertEqual(set(run.record()), {
+            "name", "event", "state", "result", "source", "url",
+            "started_at", "completed_at",
+        })
+
     def test_check_run_fields_come_from_the_run_and_its_workflow_run(
         self,
     ) -> None:
@@ -82,6 +107,7 @@ class GitHubClassificationTests(unittest.TestCase):
         self.assertEqual(check, Check(
             "Tests / unit (push)", "pull_request", "completed/failure",
             "failed", "github-actions", None, "2026-11-09T10:00:00Z", None,
+            check_run=True,
         ))
         external = parse_check_run(
             {**run, "app": None, "check_suite": None}, {9: "push"}
@@ -523,6 +549,16 @@ class LogExcerptTests(unittest.TestCase):
         })
         self.assertEqual(log_excerpt("a\nb", "##[error]")["lines"],
                          ["a", "b"])
+
+    def test_a_bare_carriage_return_stays_in_its_line(self) -> None:
+        # Only LF and CRLF end a line; a progress update's bare CR, inside
+        # a line or at the end of the log, is shown (REV-3 of PR #181).
+        self.assertEqual(log_excerpt("10%\r20%\nend\r", None), {
+            "lines": ["10%\\x0d20%", "end\\x0d"], "total_lines": 2,
+            "truncated": False,
+        })
+        self.assertEqual(log_excerpt("a\r\r\nb\r\n", None)["lines"],
+                         ["a\\x0d", "b"])
 
     def test_empty_log_has_no_lines(self) -> None:
         self.assertEqual(log_excerpt("", "##[error]"), {

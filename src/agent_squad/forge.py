@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import (
     Callable, Literal, NotRequired, Protocol, TypedDict, TypeVar,
@@ -198,6 +198,16 @@ class Check:
     url: str | None
     started_at: str | None
     completed_at: str | None
+    # True only for a GitHub check run, whatever its app: a commit status
+    # can carry any creator login, ``github-actions`` included, so only
+    # this says that ``url`` names a job (#176). Not in the public record.
+    check_run: bool = False
+
+    def record(self) -> dict[str, object]:
+        """The public check record of §11.0."""
+        row = asdict(self)
+        del row["check_run"]
+        return row
 
 
 class ChecksUnavailable(ForgeError):

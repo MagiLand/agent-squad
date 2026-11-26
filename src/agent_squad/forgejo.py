@@ -1001,22 +1001,40 @@ class Forgejo:
             ) from None
         return tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
 
-    def job_position(self, url: str | None) -> tuple[int, int] | None:
+    def job_position(
+        self, url: str | None, *, status: bool = True,
+    ) -> tuple[int, int] | None:
         """The run number and job position an Actions URL names (#176).
 
         A commit status's ``target_url`` is the path
         ``/<owner>/<repo>/actions/runs/<N>/jobs/<M>``, under the instance's
-        sub-path; a job's ``html_url`` adds the origin and
+        sub-path; a job's ``html_url`` adds an origin and
         ``/attempt/<A>``. N is the run's ``index_in_repo``, not its ID, and
         M is the job's position in the workflow file, not its ID.
+
+        A status URL must be exactly that path, optionally after the
+        configured origin and optionally with the attempt: no other origin,
+        query, or fragment. A job's ``html_url`` is compared by its path
+        alone, because it carries the instance's ROOT_URL, which may differ
+        from the configured ``base_url``. Anything else, a URL that does not
+        parse included, names no job.
         """
         config = self.repository.configuration.forge
-        match = re.fullmatch(
-            rf"{re.escape(urlsplit(self.base_url).path)}"
-            rf"/{re.escape(config.owner)}/{re.escape(config.repo)}"
-            r"/actions/runs/([0-9]+)/jobs/([0-9]+)(?:/attempt/[0-9]+)?",
-            urlsplit(url or "").path, re.IGNORECASE,
-        )
+        try:
+            base = urlsplit(self.base_url)
+            if not status:
+                url = urlsplit(url or "").path
+            match = re.fullmatch(
+                (rf"(?:{re.escape(f'{base.scheme}://{base.netloc}')})?"
+                 if status else "")
+                + rf"{re.escape(base.path)}"
+                rf"/{re.escape(config.owner)}/{re.escape(config.repo)}"
+                r"/actions/runs/([0-9]{1,18})/jobs/([0-9]{1,18})"
+                r"(?:/attempt/[0-9]+)?",
+                url or "", re.IGNORECASE,
+            )
+        except ValueError:
+            return None
         return None if match is None else (int(match[1]), int(match[2]))
 
     def job_log(self, check: Check, sha: str) -> JobLog:
@@ -1063,7 +1081,7 @@ class Forgejo:
         job = object_value(jobs[index], "job")
         url = job.get("html_url")
         if url is not None and self.job_position(
-            text_value(url, "job.html_url")
+            text_value(url, "job.html_url"), status=False
         ) != position:
             raise NoJobLog(
                 f"the job at position {index} of run {number} names another"
