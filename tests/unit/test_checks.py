@@ -597,5 +597,42 @@ class LogReasonTests(unittest.TestCase):
                          "refused (HTTP 403)")
 
 
+class ForgejoJobPositionTests(unittest.TestCase):
+    """Which status URLs name a job of the configured repository (#176)."""
+
+    def position(self, url: str, *, status: bool = True):
+        from types import SimpleNamespace
+
+        forge = SimpleNamespace(
+            base_url="https://git.example.com/forge",
+            repository=SimpleNamespace(configuration=SimpleNamespace(
+                forge=SimpleNamespace(owner="MagiLand", repo="trial"),
+            )),
+        )
+        return Forgejo.job_position(forge, url, status=status)
+
+    def test_origin_folds_ascii_case_only(self) -> None:
+        path = "/forge/MagiLand/trial/actions/runs/3/jobs/1"
+        for url in (path, "https://git.example.com" + path,
+                    "HTTPS://GIT.Example.COM" + path,
+                    "https://git.example.com/forge/magiland/TRIAL/actions"
+                    "/runs/3/jobs/1"):
+            with self.subTest(url=url):
+                self.assertEqual(self.position(url), (3, 1))
+        # Unicode folds "ı" and "İ" to "i" and "ſ" to "s"; host names, the
+        # scheme, and account names do not (REV-11 of PR #181).
+        for url in ("https://g\u0131t.example.com" + path,
+                    "https://G\u0130T.example.com" + path,
+                    "http\u017f://git.example.com" + path,
+                    "https://git.example.com/forge/Mag\u0131Land/trial"
+                    "/actions/runs/3/jobs/1"):
+            with self.subTest(url=url):
+                self.assertIsNone(self.position(url))
+        # A job's html_url is compared by path, whatever its origin.
+        self.assertEqual(
+            self.position("http://other.example" + path, status=False),
+            (3, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

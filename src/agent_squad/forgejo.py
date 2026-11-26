@@ -1025,8 +1025,9 @@ class Forgejo:
             base = urlsplit(self.base_url)
             if not status:
                 url = urlsplit(url or "").path
-            # Origin, owner and repository fold case; the instance's
-            # sub-path and the Actions route are compared exactly.
+            # Origin, owner and repository fold ASCII case only, as host
+            # names do: Unicode folding would equate "ı" with "i" (REV-11).
+            # The instance's sub-path and the Actions route are exact.
             match = re.fullmatch(
                 (rf"(?i:{re.escape(f'{base.scheme}://{base.netloc}')})?"
                  if status else "")
@@ -1035,7 +1036,7 @@ class Forgejo:
                 rf"/(?i:{re.escape(config.repo)})"
                 r"/actions/runs/([0-9]{1,18})/jobs/([0-9]{1,18})"
                 r"(?:/attempt/[0-9]{1,18})?",
-                url or "",
+                url or "", re.ASCII,
             )
         except ValueError:
             return None

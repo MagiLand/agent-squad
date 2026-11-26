@@ -268,6 +268,20 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 dict(github_run("test"), html_url=url.format(5, 12).replace(
                     "/actions/runs/", "/Actions/Runs/")),
                 "not an Actions job"),
+            # Unicode folds "ı" to "i" and "ſ" to "s"; host names do not
+            # (REV-11).
+            "another host that folds to github.com": (
+                dict(github_run("test"), html_url=url.format(5, 12).replace(
+                    "github.com", "g\u0131thub.com")),
+                "not an Actions job"),
+            "a scheme that folds to https": (
+                dict(github_run("test"), html_url=url.format(5, 12).replace(
+                    "https:", "http\u017f:")),
+                "not an Actions job"),
+            "an owner that folds to MagiLand": (
+                dict(github_run("test"), html_url=url.format(5, 12).replace(
+                    "MagiLand", "Mag\u0130Land")),
+                "not an Actions job"),
         }
         for read in ("graphql", "rest"):
             self.f.settings(checks_graphql_fails=read == "rest")

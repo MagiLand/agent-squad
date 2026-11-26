@@ -1266,13 +1266,15 @@ class GitHub:
         if check.check_run_id is None:
             raise NoJobLog("the check run has no usable ID")
         config = self.repository.configuration.forge
-        # The origin, owner and repository fold case; the route does not.
-        # An ID is at most 18 digits, which ``int`` always converts.
+        # The origin, owner and repository fold ASCII case only, as host
+        # names do: Unicode folding would equate "ı" with "i" (REV-11). The
+        # route is exact. An ID is at most 18 digits, which ``int`` always
+        # converts.
         match = re.fullmatch(
             rf"(?i:https://github\.com)/(?i:{re.escape(config.owner)})"
             rf"/(?i:{re.escape(config.repo)})"
             r"/actions/runs/([0-9]{1,18})/job/([0-9]{1,18})",
-            check.url or "",
+            check.url or "", re.ASCII,
         )
         if match is None:
             raise NoJobLog(
