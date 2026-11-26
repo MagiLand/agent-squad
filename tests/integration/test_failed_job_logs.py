@@ -619,6 +619,45 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 self.assertTrue(check["log_reason"])
                 self.assertEqual(self.log_reads()[start:], [])
 
+    def test_mismatch_reasons_hold_no_job_metadata(self) -> None:
+        # REV-16 of PR #181: a reason is shown unredacted, so the forge's
+        # job names and unchecked IDs never appear in it.
+        marker = "secret-marker-9c1e"
+
+        def named(actions: dict) -> None:
+            actions["jobs"]["7"][1]["name"] = marker
+
+        def other_run(actions: dict) -> None:
+            actions["jobs"]["7"][1].update(run_id=3, id=marker)
+
+        cases = {
+            "job name differs": (forgejo_status("unit", "failure", 1),
+                                 named, "has a name the status does not"),
+            "job of another run": (forgejo_status("unit", "failure", 1),
+                                   other_run, "belongs to another run"),
+        }
+        for case, (status, edit, text) in cases.items():
+            with self.subTest(case=case):
+                actions = self.actions(html_url=True)
+                edit(actions)
+                self.seed(status, actions=actions)
+                check = self.failed_logs()["checks"][0]
+                self.assertIsNone(check["log"])
+                self.assertIn(text, check["log_reason"])
+                self.assertNotIn(marker, check["log_reason"])
+        # A context naming two jobs: the reason counts them, never naming
+        # them.
+        actions = self.actions(html_url=True)
+        actions["jobs"]["7"][0]["name"] = "build / unit " + marker
+        actions["jobs"]["7"][1]["name"] = "unit " + marker
+        context = f"Tests / build / unit {marker} (pull_request)"
+        self.seed(dict(forgejo_status("unit", "failure", 1), context=context),
+                  actions=actions)
+        check = self.failed_logs()["checks"][0]
+        self.assertIsNone(check["log"])
+        self.assertEqual(check["log_reason"],
+                         "the status names 2 jobs of run 3")
+
     def test_job_name_holding_the_separator_alone_is_found(self) -> None:
         # REV-10: "build / unit" is found when no other job is named too.
         actions = self.actions()

@@ -6,6 +6,7 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
@@ -24,6 +25,7 @@ from agent_squad.initialization import (  # noqa: E402
     Worktree,
 )
 from agent_squad.forgejo import (  # noqa: E402
+    TEXT_MEDIA_TYPE,
     Forgejo,
     hunk_anchor,
     parse_comments,
@@ -231,6 +233,51 @@ class TokenFileTests(unittest.TestCase):
         os.mkfifo(fifo, 0o600)
         with self.assertRaisesRegex(ForgeError, "absolute regular file"):
             self.read(fifo)
+
+
+class TextMediaTypeTests(unittest.TestCase):
+    """The whole Content-Type field of a Forgejo log answer (#176)."""
+
+    def test_one_text_type_with_well_formed_parameters_is_accepted(
+        self,
+    ) -> None:
+        for field in (
+            "text/plain", "Text/Plain; charset=utf-8",
+            'text/plain;charset="utf-8, x";format=fixed',
+            'text/x-log ; a="b\\"c" ;',
+            # Empty parameter slots are allowed (RFC 9110 §5.6.6).
+            "text/plain;;", "text/plain; ; charset=utf-8 ;",
+        ):
+            with self.subTest(field=field):
+                self.assertIsNotNone(TEXT_MEDIA_TYPE.fullmatch(field))
+
+    def test_other_fields_are_refused(self) -> None:
+        for field in (
+            "", "text/", "application/zip", "unsupported",
+            "text/plain; charset=utf-8, application/zip",
+            "text/plain, application/zip", 'text/plain; charset="x',
+            "text/plain; charset", "text/plain; charset =utf-8",
+            # Only ASCII folds to "text" (REV-11).
+            "\u0074\u0065\u0078\u0074/plain".replace("t", "\u0442", 1),
+        ):
+            with self.subTest(field=field):
+                self.assertIsNone(TEXT_MEDIA_TYPE.fullmatch(field))
+
+    def test_refusal_takes_linear_time(self) -> None:
+        # REV-15: whitespace between empty slots had two owners, so each
+        # extra "; " made a late failure two to four times slower. The
+        # fields grow step by step and no subTest is used, so the first
+        # slow one ends the test before a longer one can run on.
+        for field in (
+            *("text/plain" + "; " * pairs + ";\x00"
+              for pairs in range(16, 40, 2)),
+            "text/plain" + "; " * 100_000 + ";\x00",
+            "text/plain; a=" + "b" * 100_000 + "\x00",
+            'text/plain; a="' + "\\\\" * 50_000 + "\x00",
+        ):
+            start = time.monotonic()
+            self.assertIsNone(TEXT_MEDIA_TYPE.fullmatch(field))
+            self.assertLess(time.monotonic() - start, 0.5, len(field))
 
 
 class TransportTests(unittest.TestCase):

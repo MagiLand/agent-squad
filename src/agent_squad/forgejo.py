@@ -86,14 +86,17 @@ HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*")
 FINDING = re.compile(r"\[REV-[1-9][0-9]*\](?=\[| |$)")
 # A whole Content-Type field naming one text media type (RFC 9110 §8.3.1,
 # §5.6): a comma outside a quoted value means several types (REV-12).
-_TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+# Whitespace after a semicolon belongs to the parameter that follows it,
+# and every repetition is possessive, so a field that fails is refused in
+# linear time rather than after trying each way to split it (REV-15).
+_TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]++"
 _QUOTED = (
     r'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]'
-    r'|\\[\t \x21-\x7e\x80-\xff])*"'
+    r'|\\[\t \x21-\x7e\x80-\xff])*+"'
 )
 TEXT_MEDIA_TYPE = re.compile(
     rf"(?i:text)/{_TOKEN}"
-    rf"(?:[ \t]*;[ \t]*(?:{_TOKEN}=(?:{_TOKEN}|{_QUOTED}))?)*",
+    rf"(?:[ \t]*+;(?:[ \t]*+{_TOKEN}=(?:{_TOKEN}|{_QUOTED}))?+)*+",
     re.ASCII,
 )
 # The page size of the one blocks read (#144): F16 FormInt parses the limit
@@ -1125,9 +1128,11 @@ class Forgejo:
             )
         name = text_value(job.get("name"), "job.name")
         if not names_job(check.name, name):
+            # The forge's job metadata is never copied into a reason, which
+            # is shown unredacted (REV-16 of PR #181).
             raise NoJobLog(
-                f"the job at position {index} of run {number} is {name!r},"
-                " which the status does not name"
+                f"the job at position {index} of run {number} has a name"
+                " the status does not name"
             )
         # A job name may itself hold " / ", so "Tests / build / unit (push)"
         # names both "build / unit" and "unit": refuse it (REV-10).
@@ -1142,11 +1147,13 @@ class Forgejo:
         }
         if len(named) > 1:
             raise NoJobLog(
-                f"the status names more than one job of run {number}:"
-                f" {', '.join(sorted(map(repr, named)))}"
+                f"the status names {len(named)} jobs of run {number}"
             )
         if positive(job.get("run_id"), "job.run_id") != run_id:
-            raise NoJobLog(f"job {job.get('id')} belongs to another run")
+            raise NoJobLog(
+                f"the job at position {index} of run {number} belongs to"
+                " another run"
+            )
         job_id = positive(job.get("id"), "job.id")
         return JobLog(
             job_id, self.text(f"{self.prefix}/actions/jobs/{job_id}/logs")
