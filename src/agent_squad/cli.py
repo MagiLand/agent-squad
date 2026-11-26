@@ -21,7 +21,7 @@ from .conventions import (
     DISPOSITIONS, GENERAL_KINDS, RECOMMENDATIONS, SHA, VERIFICATIONS,
 )
 from .doctor import diagnose
-from .forge import make_forge
+from .forge import make_forge, visible
 from .herdr import HerdrClient
 from .initialization import (
     AgentSquadError,
@@ -118,6 +118,7 @@ def parser() -> argparse.ArgumentParser:
         common(pr[name])
     pr["checks"].add_argument("--wait", type=positive_argument)
     pr["checks"].add_argument("--merge-commit", action="store_true")
+    pr["checks"].add_argument("--failed-logs", action="store_true")
     common(pr["create"], role="implementer", number="issue", mutation=True)
     pr["create"].add_argument("--task")
     pr["create"].add_argument("--report", required=True)
@@ -381,7 +382,8 @@ def execute(args: argparse.Namespace) -> dict:
     if key == ("pr", "checks"):
         # Only the PR record and its checks: no fetch and no Herdr read.
         return commands.pr_checks(
-            forge, args.pr, args.wait, merge_commit=args.merge_commit
+            forge, args.pr, args.wait, merge_commit=args.merge_commit,
+            failed_logs=args.failed_logs,
         )
     # Only the status report reads CI, in the same read where it can.
     report_ci = key not in (("pr", "head"), ("pr", "reviews"))
@@ -406,6 +408,18 @@ def execute(args: argparse.Namespace) -> dict:
     return {**state, "ci": commands.ci_record(
         forge, head, snapshot.head_checks if head == snapshot.pr.head else None
     )}
+
+
+def one_line(text: str) -> str:
+    """Forge text for one plain-text line: no control character, no break.
+
+    A character the output's encoding cannot hold, such as ``é`` on an
+    ASCII pipe, is shown as a backslash escape rather than ending the
+    command (REV-13).
+    """
+    shown = visible(text).replace("\n", "\\x0a")
+    encoding = sys.stdout.encoding or "utf-8"
+    return shown.encode(encoding, "backslashreplace").decode(encoding)
 
 
 def reply_option_error(args: argparse.Namespace) -> str | None:
@@ -523,6 +537,23 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                     f'Stopped waiting after {result["waited_seconds"]}'
                     " seconds; checks are not final."
                 )
+            for check in result["checks"]:
+                if "log" not in check:
+                    continue
+                # Forge text: a posted status may name itself anything.
+                name = one_line(check["name"])
+                log = check["log"]
+                if log is None:
+                    print(
+                        f'No log for {name}: {one_line(check["log_reason"])}'
+                    )
+                    continue
+                print(
+                    f'Log of {name} (job {log["job_id"]}),'
+                    f' {len(log["lines"])} of {log["total_lines"]} lines:'
+                )
+                for line in log["lines"]:
+                    print("    " + one_line(line))
             print(json.dumps(result, indent=2, default=json_default))
         elif (args.group, getattr(args, "command", None)) == (
             "issue", "list",

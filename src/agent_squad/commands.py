@@ -56,6 +56,7 @@ from .forge import (
     label_scope,
     positive,
     requested_state,
+    visible,
 )
 from .initialization import (
     AgentSquadError,
@@ -78,6 +79,9 @@ TRIAGE_LABEL = "needs-triage"
 PROTECTED_LABELS = (TRIAGE_LABEL, "needs-info", "ready-for-human", "wontfix")
 # Seconds between the reads of `pr checks --wait` (#145).
 CHECK_POLL_INTERVAL = 10.0
+# How many lines of a failed job's log ``pr checks --failed-logs`` returns.
+FAILED_LOG_LINES = 100
+LOG_REASON_LENGTH = 200
 
 
 def read_file(path: str) -> str:
@@ -194,6 +198,13 @@ def ci_record(
     ``checks`` are the checks at ``head`` when the snapshot already read
     them (#149). The result is derived on every read and never stored (§3).
     """
+    return read_checks(forge, head, checks)[0]
+
+
+def read_checks(
+    forge: Forge, head: str, checks: tuple[Check, ...] | None = None,
+) -> tuple[dict, tuple[Check, ...]]:
+    """``ci_record`` together with the checks it was built from (#176)."""
     try:
         if checks is None:
             checks = forge.checks(head)
@@ -201,12 +212,12 @@ def ci_record(
         return {
             "head": head, "summary": "unavailable", "reason": str(error),
             "checks": [],
-        }
+        }, ()
     return {
         "head": head,
         "summary": summarize_checks(checks),
-        "checks": [asdict(check) for check in checks],
-    }
+        "checks": [check.record() for check in checks],
+    }, checks
 
 
 def merged_commit(pr: PullRequest) -> str:
@@ -231,6 +242,7 @@ def pr_checks(
     wait: int | None = None,
     *,
     merge_commit: bool = False,
+    failed_logs: bool = False,
 ) -> dict:
     """Report the checks at the PR's head or merge commit, optionally waiting.
 
@@ -239,16 +251,19 @@ def pr_checks(
     every checks read, so a head that moved before or during the read that
     ends the wait is reported as ``head_changed`` with the old head's result.
     A merge commit does not change, so with ``merge_commit`` the PR is read
-    only once and ``head_changed`` stays false (#157).
+    only once and ``head_changed`` stays false (#157). With ``failed_logs``
+    each failed check carries its job's log excerpt (#176).
     """
     pr = forge.pr(number)
     head = merged_commit(pr) if merge_commit else pr.head
     if wait is None:
-        return ci_record(forge, head)
+        record, checks = read_checks(forge, head)
+        return (with_failed_logs(forge, record, checks) if failed_logs
+                else record)
     start = time.monotonic()
     timed_out = head_changed = False
     while True:
-        record = ci_record(forge, head)
+        record, checks = read_checks(forge, head)
         if not merge_commit and forge.pr(number).head != head:
             head_changed = True
             break
@@ -259,11 +274,90 @@ def pr_checks(
             timed_out = True
             break
         time.sleep(min(CHECK_POLL_INTERVAL, remaining))
+    waited = round(time.monotonic() - start)
+    if failed_logs:
+        record = with_failed_logs(forge, record, checks)
     return {
         **record,
-        "waited_seconds": round(time.monotonic() - start),
+        "waited_seconds": waited,
         "timed_out": timed_out,
         "head_changed": head_changed,
+    }
+
+
+def with_failed_logs(
+    forge: Forge, record: dict, checks: tuple[Check, ...],
+) -> dict:
+    """Add ``log`` and ``log_reason`` to each failed check record (#176).
+
+    ``checks`` are the checks ``record`` was built from, in its order, so
+    what the adapter knows of each check's origin reaches the lookup. Logs
+    are read once, after any wait, at the commit the checks were read at.
+    A check with no matching Actions job, or a log read that fails, gets a
+    reason instead of a log; it never ends the command. An ``unavailable``
+    read has no checks, so it reads no log.
+    """
+    return {**record, "checks": [
+        {**row, **failed_log(forge, check, record["head"])}
+        if check.result == "failed" else row
+        for row, check in zip(record["checks"], checks, strict=True)
+    ]}
+
+
+def failed_log(forge: Forge, check: Check, sha: str) -> dict:
+    try:
+        found = forge.job_log(check, sha)
+    except ForgeError as error:
+        return {"log": None, "log_reason": log_reason(error)}
+    return {
+        "log": {
+            "job_id": found.job_id,
+            **log_excerpt(found.text, forge.log_end_marker),
+        },
+        "log_reason": None,
+    }
+
+
+def log_reason(error: ForgeError) -> str:
+    """One short, nonempty line saying why a check has no log (REV-9).
+
+    The reason may echo forge text, such as a long URL, so it is cut to
+    ``LOG_REASON_LENGTH`` characters; the HTTP status is always kept.
+    """
+    reason = " ".join(str(error).split()) or type(error).__name__
+    if len(reason) > LOG_REASON_LENGTH:
+        reason = reason[:LOG_REASON_LENGTH - 3] + "..."
+    if error.status is not None and f"HTTP {error.status}" not in reason:
+        reason += f" (HTTP {error.status})"
+    return reason
+
+
+def log_excerpt(text: str, end_marker: str | None) -> dict:
+    """The last ``FAILED_LOG_LINES`` lines, ending at the last marked line.
+
+    GitHub ends a failing step with a ``##[error]`` line and then logs the
+    post steps, so its excerpt ends there; without a marked line it ends at
+    the log's last line. ``truncated`` says the log has lines the excerpt
+    leaves out, before or after it.
+    """
+    # A line ends at LF or CRLF; any other CR, such as a progress update's,
+    # is part of its line and shown as \x0d.
+    parts = text.split("\n")
+    lines = [line.removesuffix("\r") for line in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    end = len(lines)
+    if end_marker is not None:
+        end = next(
+            (i + 1 for i in range(len(lines) - 1, -1, -1)
+             if end_marker in lines[i]),
+            end,
+        )
+    begin = max(0, end - FAILED_LOG_LINES)
+    return {
+        "lines": [visible(line) for line in lines[begin:end]],
+        "total_lines": len(lines),
+        "truncated": begin > 0 or end < len(lines),
     }
 
 

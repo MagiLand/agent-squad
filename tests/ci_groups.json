@@ -15,7 +15,8 @@
     "tests/integration/test_forgejo_mutations.py",
     "tests/integration/test_issue_labels.py",
     "tests/integration/test_issue_list.py",
-    "tests/integration/test_ci_checks.py"
+    "tests/integration/test_ci_checks.py",
+    "tests/integration/test_failed_job_logs.py"
   ],
   "smoke": [
     "tests/integration/test_smoke_workflow.py"

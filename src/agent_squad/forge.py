@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import (
     Callable, Literal, NotRequired, Protocol, TypedDict, TypeVar,
     runtime_checkable,
 )
 import re
+import unicodedata
 
 from .initialization import AgentSquadError, Repository
 from .validation import JsonValidator
@@ -197,10 +198,48 @@ class Check:
     url: str | None
     started_at: str | None
     completed_at: str | None
+    # True only for a GitHub check run, whatever its app: a commit status
+    # can carry any creator login, ``github-actions`` included, so only
+    # this says that ``url`` names a job (#176). Not in the public record.
+    check_run: bool = False
+    # The check run's own ID, which for an Actions job is the job's ID, so
+    # the job a URL names must be this one (#176). Not in the public record.
+    check_run_id: int | None = None
+
+    def record(self) -> dict[str, object]:
+        """The public check record of §11.0."""
+        row = asdict(self)
+        del row["check_run"], row["check_run_id"]
+        return row
 
 
 class ChecksUnavailable(ForgeError):
     """The forge refused the checks read for the acting identity."""
+
+
+class NoJobLog(ForgeError):
+    """No Actions job of this repository matches a check exactly (#176)."""
+
+
+@dataclass(frozen=True)
+class JobLog:
+    """A failed check's Actions job and its latest attempt's log (#176)."""
+
+    job_id: int
+    text: str
+
+
+def visible(text: str) -> str:
+    """Show every control character except newline and tab as ``\\xNN``.
+
+    Forge text such as a job log carries what a job printed, colour codes
+    and other terminal sequences included (#176).
+    """
+    return "".join(
+        f"\\x{ord(c):02x}"
+        if c not in "\n\t" and unicodedata.category(c) == "Cc" else c
+        for c in text
+    )
 
 
 class IssueRecord(TypedDict):
@@ -435,6 +474,9 @@ class Forge(Protocol):
     @property
     def can_read_branch_rules(self) -> bool: ...
 
+    @property
+    def log_end_marker(self) -> str | None: ...
+
     def version(self) -> str: ...
     def verify_credentials(self) -> None: ...
     def verify_identity(self) -> None: ...
@@ -470,6 +512,7 @@ class Forge(Protocol):
 
     def branch_rules(self, branch: str) -> dict[str, object]: ...
     def checks(self, sha: str) -> tuple[Check, ...]: ...
+    def job_log(self, check: Check, sha: str) -> JobLog: ...
     def branch_head(self, branch: str) -> str | None: ...
     def delete_branch(self, branch: str, expected_head: str) -> None: ...
     def validate_anchors(self, anchors: tuple[Anchor, ...]) -> None: ...

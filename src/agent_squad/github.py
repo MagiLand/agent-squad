@@ -15,11 +15,12 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 from .forge import (
     CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable,
     ClosingPullRequest, Comment, Evidence, ForgeError, IssueDependencies,
-    IssueQuery, IssueRecord, Label, ListedIssue, MergeResult, Milestone,
-    PullRequest, RelatedIssue, Review, ReviewPublication, ReviewState, Role,
-    Snapshot, ThreadState, V, array, boolean, branch_present, closing_order,
-    delete_and_confirm, exposed, milestone_title, object_value, oid,
-    parse_milestone, positive, related_issue, text_value,
+    IssueQuery, IssueRecord, JobLog, Label, ListedIssue, MergeResult,
+    Milestone, NoJobLog, PullRequest, RelatedIssue, Review, ReviewPublication,
+    ReviewState, Role, Snapshot, ThreadState, V, array, boolean,
+    branch_present, closing_order, delete_and_confirm, exposed,
+    milestone_title, object_value, oid, parse_milestone, positive,
+    related_issue, text_value,
 )
 from .initialization import Repository, decode_json
 
@@ -242,6 +243,11 @@ def parse_check_run(value: object, events: dict[int, str]) -> Check:
         optional_text(data.get("html_url"), "check_run.html_url"),
         timestamps["started_at"],
         timestamps["completed_at"],
+        check_run=True,
+        # Only the log lookup uses the ID, so one it cannot use leaves that
+        # check without a log instead of failing the read (REV-8).
+        check_run_id=(data["id"] if type(data.get("id")) is int
+                      and data["id"] > 0 else None),
     )
 
 
@@ -543,6 +549,7 @@ def rest_comment(node: dict, thread: dict | None) -> dict[str, object]:
 
 def rest_check_run(node: dict, suite: int, app: object) -> dict[str, object]:
     return {
+        "id": node.get("databaseId"),
         "name": node.get("name"),
         "status": lower(node.get("status")),
         "conclusion": lower(node.get("conclusion")),
@@ -589,6 +596,8 @@ class GitHub:
     can_resolve_threads = True
     can_read_thread_resolution = True
     can_read_branch_rules = True
+    # A failing step's last line; the post steps are logged after it (#176).
+    log_end_marker = "##[error]"
 
     def __init__(
         self, repository: Repository, role: Role, *, timeout: float = 45
@@ -615,6 +624,7 @@ class GitHub:
         *,
         authenticated: bool = False,
         body: object = None,
+        raw: bool = False,
     ) -> str:
         env = os.environ.copy()
         for key in (
@@ -633,8 +643,10 @@ class GitHub:
                 cwd=self.repository.root,
                 env=env,
                 shell=False,
-                text=True,
-                encoding="utf-8",
+                # A raw answer is decoded here, not in text mode, which
+                # would turn every bare carriage return into a newline.
+                text=not raw,
+                encoding=None if raw else "utf-8",
                 capture_output=True,
                 timeout=self.timeout,
                 input=None if body is None else json.dumps(body),
@@ -645,6 +657,11 @@ class GitHub:
             ) from None
         except OSError as error:
             raise ForgeError(f"could not execute gh: {error}") from None
+        except UnicodeDecodeError:
+            raise ForgeError("gh answered bytes that are not UTF-8") from None
+        if raw:
+            result.stdout = result.stdout.decode("utf-8", "replace")
+            result.stderr = result.stderr.decode("utf-8", "replace")
         if result.returncode:
             # Token-resolution output is never included, even on a failing
             # command.
@@ -652,7 +669,11 @@ class GitHub:
                 raise ForgeError(
                     f"cannot resolve token for configured {self.role} account"
                 )
-            detail = (result.stderr or result.stdout).strip()
+            # A raw answer's output is the answer itself, such as part of a
+            # log, so only gh's own message describes the failure.
+            detail = (
+                result.stderr if raw else result.stderr or result.stdout
+            ).strip() or f"gh exited with status {result.returncode}"
             if self._token:
                 detail = detail.replace(self._token, "[redacted]")
             status = re.search(r"HTTP (\d{3})", detail)
@@ -719,6 +740,20 @@ class GitHub:
         ):
             raise ForgeError(self.graphql_errors(value["errors"]))
         return value
+
+    def text(self, endpoint: str) -> str:
+        """GET a text answer, such as a job log, exactly as served (#176).
+
+        ``gh`` refuses to print an answer with terminal escape sequences
+        unless it is given ``--allow-escape-sequences``; callers make
+        control characters visible themselves. Bytes that are not UTF-8
+        are replaced, and carriage returns are kept.
+        """
+        return self._run(
+            [*self.arguments(endpoint, "GET", False),
+             "--allow-escape-sequences"],
+            authenticated=True, raw=True,
+        )
 
     @staticmethod
     def arguments(endpoint: str, method: str, body: bool) -> list[str]:
@@ -1214,6 +1249,52 @@ class GitHub:
             ))
         except ForgeError:
             return self.rest_checks(sha)
+
+    def job_log(self, check: Check, sha: str) -> JobLog:
+        """Read the log of the Actions job behind a failed check run (#176).
+
+        An Actions check run's ID is its job ID, and its URL names the run
+        and the job, which must be the check run itself. The job record
+        must name the same run and ``sha``.
+        """
+        if not check.check_run:
+            raise NoJobLog("a commit status, not a GitHub Actions job")
+        if check.source != "github-actions":
+            raise NoJobLog(
+                f"not a GitHub Actions job (source {check.source})"
+            )
+        if check.check_run_id is None:
+            raise NoJobLog("the check run has no usable ID")
+        config = self.repository.configuration.forge
+        # The origin, owner and repository fold ASCII case only, as host
+        # names do: Unicode folding would equate "ı" with "i" (REV-11). The
+        # route is exact. An ID is at most 18 digits, which ``int`` always
+        # converts.
+        match = re.fullmatch(
+            rf"(?i:https://github\.com)/(?i:{re.escape(config.owner)})"
+            rf"/(?i:{re.escape(config.repo)})"
+            r"/actions/runs/([0-9]{1,18})/job/([0-9]{1,18})",
+            check.url or "", re.ASCII,
+        )
+        if match is None:
+            raise NoJobLog(
+                "the check run's URL is not an Actions job of this"
+                f" repository: {check.url}"
+            )
+        run, job = int(match[1]), int(match[2])
+        if job != check.check_run_id:
+            raise NoJobLog(
+                f"the check run's URL names job {job}, but the check run is"
+                f" {check.check_run_id}"
+            )
+        data = object_value(
+            self.api(f"{self.prefix}/actions/jobs/{job}"), "job"
+        )
+        if positive(data.get("run_id"), "job.run_id") != run:
+            raise NoJobLog(f"job {job} belongs to another run")
+        if oid(data.get("head_sha"), "job.head_sha") != sha:
+            raise NoJobLog(f"job {job} ran at another commit")
+        return JobLog(job, self.text(f"{self.prefix}/actions/jobs/{job}/logs"))
 
     def commit_checks(self, commit: dict) -> tuple[Check, ...]:
         """Check records of one GraphQL commit, as ``rest_checks`` reads them.

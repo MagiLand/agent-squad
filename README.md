@@ -244,7 +244,9 @@ its results, or certify that the checks a repository expects ran. `status`
 reports them under `ci` for the current head, and `pr checks` prints the same
 result and can wait for pending checks. With `--merge-commit`, `pr checks`
 reads a merged PR's merge commit instead, which is how the Implementer reads
-the run that a merge started on the base branch. The skills act on them: a
+the run that a merge started on the base branch. With `--failed-logs`, each
+failed check also carries the last lines of its Actions job's log, or the
+reason there is none. The skills act on them: a
 failed check is a defect, the Implementer waits for a head's checks before
 requesting review and for the push run after a merge, and the Reviewer does
 not approve a head with a failed check. Any
@@ -260,6 +262,7 @@ agent-squad pr head --pr 43 --json
 agent-squad pr reviews --pr 43 --json
 agent-squad pr checks --pr 43 --json
 agent-squad pr checks --pr 43 --merge-commit --json
+agent-squad pr checks --pr 43 --failed-logs --json
 agent-squad status --pr 43 --json
 ```
 

@@ -1,4 +1,4 @@
-"""CI result classification, summary, and the checks wait (#145)."""
+"""CI result classification, summary, the checks wait (#145), and logs."""
 
 from contextlib import nullcontext
 from dataclasses import replace
@@ -12,12 +12,15 @@ from tests.unit.test_conventions import H, config
 add_src_to_path()
 
 from agent_squad.commands import (  # noqa: E402
-    CHECK_POLL_INTERVAL, ci_record, pr_checks, summarize_checks,
+    CHECK_POLL_INTERVAL, FAILED_LOG_LINES, LOG_REASON_LENGTH, ci_record,
+    log_excerpt, log_reason, pr_checks, summarize_checks,
 )
 from agent_squad.forge import (  # noqa: E402
-    Check, ChecksUnavailable, ForgeError,
+    Check, ChecksUnavailable, ForgeError, NoJobLog, visible,
 )
-from agent_squad.forgejo import Forgejo, parse_status  # noqa: E402
+from agent_squad.forgejo import (  # noqa: E402
+    Forgejo, names_job, parse_status,
+)
 from agent_squad.github import (  # noqa: E402
     GitHub, check_run_result, parse_check_run, parse_commit_status,
 )
@@ -65,6 +68,39 @@ class GitHubClassificationTests(unittest.TestCase):
                 self.assertEqual(check.result, expected)
                 self.assertEqual(check.state, state)
 
+    def test_only_a_check_run_is_marked_as_one(self) -> None:
+        # #176: a status may carry any creator login, the Actions app's
+        # slug included; only the mark says the URL names a job. Both
+        # checks reads, GraphQL and REST, build checks with these parsers.
+        status = parse_commit_status({
+            "context": "test", "state": "failure",
+            "creator": {"login": "github-actions"},
+            "target_url": "https://github.com/MagiLand/trial/actions/runs/5"
+                          "/job/12",
+        })
+        self.assertEqual(status.source, "github-actions")
+        self.assertFalse(status.check_run)
+        run = parse_check_run({
+            "name": "test", "status": "completed", "conclusion": "failure",
+            "check_suite": None, "app": {"slug": "github-actions"},
+            "html_url": None, "started_at": None, "completed_at": None,
+        }, {})
+        self.assertTrue(run.check_run)
+        self.assertIsNone(run.check_run_id)
+        # REST gives a check run's ID as ``id``; GraphQL's ``databaseId``
+        # is rewritten into it (REV-7 of PR #181).
+        self.assertEqual(parse_check_run({
+            "id": 12, "name": "test", "status": "completed",
+            "conclusion": "failure", "check_suite": None, "app": None,
+            "html_url": None, "started_at": None, "completed_at": None,
+        }, {}).check_run_id, 12)
+        # The mark and the ID stay out of the public check record.
+        self.assertNotIn("check_run", run.record())
+        self.assertEqual(set(run.record()), {
+            "name", "event", "state", "result", "source", "url",
+            "started_at", "completed_at",
+        })
+
     def test_check_run_fields_come_from_the_run_and_its_workflow_run(
         self,
     ) -> None:
@@ -79,6 +115,7 @@ class GitHubClassificationTests(unittest.TestCase):
         self.assertEqual(check, Check(
             "Tests / unit (push)", "pull_request", "completed/failure",
             "failed", "github-actions", None, "2026-11-09T10:00:00Z", None,
+            check_run=True,
         ))
         external = parse_check_run(
             {**run, "app": None, "check_suite": None}, {9: "push"}
@@ -486,6 +523,115 @@ class RecordTests(unittest.TestCase):
                 "started_at": None, "completed_at": None,
             }],
         })
+
+
+class LogExcerptTests(unittest.TestCase):
+    """The excerpt ``pr checks --failed-logs`` gives a failed job (#176)."""
+
+    def test_control_characters_become_visible(self) -> None:
+        self.assertEqual(
+            visible("a\x1b[1mb\x07\x00\x7f\x9b\tc\nd ﻿"),
+            "a\\x1b[1mb\\x07\\x00\\x7f\\x9b\tc\nd ﻿",
+        )
+
+    def test_excerpt_ends_at_the_last_marked_line(self) -> None:
+        lines = [f"line {n}" for n in range(1, 151)]
+        lines[119] = "x ##[error]first"
+        lines[129] = "x ##[error]last"
+        excerpt = log_excerpt("\n".join(lines) + "\n", "##[error]")
+        self.assertEqual(len(excerpt["lines"]), FAILED_LOG_LINES)
+        self.assertEqual(excerpt["lines"][0], "line 31")
+        self.assertEqual(excerpt["lines"][-1], "x ##[error]last")
+        self.assertEqual((excerpt["total_lines"], excerpt["truncated"]),
+                         (150, True))
+
+    def test_without_a_marker_the_excerpt_ends_at_the_last_line(self) -> None:
+        excerpt = log_excerpt("a ##[error]x\r\nb\r\n", None)
+        self.assertEqual(excerpt, {
+            "lines": ["a ##[error]x", "b"], "total_lines": 2,
+            "truncated": False,
+        })
+        self.assertEqual(log_excerpt("a\nb", "##[error]")["lines"],
+                         ["a", "b"])
+
+    def test_a_bare_carriage_return_stays_in_its_line(self) -> None:
+        # Only LF and CRLF end a line; a progress update's bare CR, inside
+        # a line or at the end of the log, is shown (REV-3 of PR #181).
+        self.assertEqual(log_excerpt("10%\r20%\nend\r", None), {
+            "lines": ["10%\\x0d20%", "end\\x0d"], "total_lines": 2,
+            "truncated": False,
+        })
+        self.assertEqual(log_excerpt("a\r\r\nb\r\n", None)["lines"],
+                         ["a\\x0d", "b"])
+
+    def test_empty_log_has_no_lines(self) -> None:
+        self.assertEqual(log_excerpt("", "##[error]"), {
+            "lines": [], "total_lines": 0, "truncated": False,
+        })
+
+    def test_status_context_names_its_job(self) -> None:
+        for context, name, expected in (
+            ("Tests / unit (pull_request)", "unit", True),
+            ("/ alpha (push)", "alpha", True),
+            ("ci / test (3.11) (push)", "test (3.11)", True),
+            ("a / b / unit (push)", "unit", True),
+            ("Tests / unit (pull_request)", "it", False),
+            ("Tests / unit (pull_request)", "Tests / unit", False),
+            ("Tests / unit", "unit", False),
+            ("unit (push)", "unit", False),
+        ):
+            with self.subTest(context=context, name=name):
+                self.assertIs(names_job(context, name), expected)
+
+
+class LogReasonTests(unittest.TestCase):
+    """The reason a failed check has no log (REV-9 of PR #181)."""
+
+    def test_reason_is_one_short_nonempty_line(self) -> None:
+        self.assertEqual(log_reason(NoJobLog("a\n  b\r\nc")), "a b c")
+        self.assertEqual(log_reason(NoJobLog("")), "NoJobLog")
+        long = log_reason(ForgeError("x" * 5000, 404))
+        self.assertEqual(
+            long, "x" * (LOG_REASON_LENGTH - 3) + "... (HTTP 404)")
+        self.assertEqual(log_reason(ForgeError("refused (HTTP 403)", 403)),
+                         "refused (HTTP 403)")
+
+
+class ForgejoJobPositionTests(unittest.TestCase):
+    """Which status URLs name a job of the configured repository (#176)."""
+
+    def position(self, url: str, *, status: bool = True):
+        from types import SimpleNamespace
+
+        forge = SimpleNamespace(
+            base_url="https://git.example.com/forge",
+            repository=SimpleNamespace(configuration=SimpleNamespace(
+                forge=SimpleNamespace(owner="MagiLand", repo="trial"),
+            )),
+        )
+        return Forgejo.job_position(forge, url, status=status)
+
+    def test_origin_folds_ascii_case_only(self) -> None:
+        path = "/forge/MagiLand/trial/actions/runs/3/jobs/1"
+        for url in (path, "https://git.example.com" + path,
+                    "HTTPS://GIT.Example.COM" + path,
+                    "https://git.example.com/forge/magiland/TRIAL/actions"
+                    "/runs/3/jobs/1"):
+            with self.subTest(url=url):
+                self.assertEqual(self.position(url), (3, 1))
+        # Unicode folds "ı" and "İ" to "i" and "ſ" to "s"; host names, the
+        # scheme, and account names do not (REV-11 of PR #181).
+        for url in ("https://g\u0131t.example.com" + path,
+                    "https://G\u0130T.example.com" + path,
+                    "http\u017f://git.example.com" + path,
+                    "https://git.example.com/forge/Mag\u0131Land/trial"
+                    "/actions/runs/3/jobs/1"):
+            with self.subTest(url=url):
+                self.assertIsNone(self.position(url))
+        # A job's html_url is compared by path, whatever its origin.
+        self.assertEqual(
+            self.position("http://other.example" + path, status=False),
+            (3, 1))
 
 
 if __name__ == "__main__":

@@ -196,11 +196,21 @@ class Handler(BaseHTTPRequestHandler):
             )
             status, result = self.dispatch(model, auth, body)
             self.server.model_path.write_text(json.dumps(model))
-        content = json.dumps(result).encode("utf-8")
+        # A job log is the one text answer (#176).
+        text = isinstance(result, bytes)
+        content = result if text else json.dumps(result).encode("utf-8")
         self.send_response(status)
         if status == 302:
             self.send_header("Location", model["settings"]["redirect_to"])
-        self.send_header("Content-Type", "application/json")
+        # settings["log_content_type"] is the whole header a text answer
+        # carries, or a list of fields to send in order; an empty one sends
+        # none (REV-12).
+        media = (model["settings"].get(
+            "log_content_type", "text/plain; charset=utf-8"
+        ) if text else "application/json")
+        for field in [media] if isinstance(media, str) else media:
+            if field:
+                self.send_header("Content-Type", field)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -377,6 +387,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"name": branch, "commit": {"id": head}}
         if parts[3] == "commits" and parts[5:] == ["status"]:
             return self.combined_status(model, account, parts[4], query)
+        if parts[3] == "actions" and parts[4] in ("runs", "jobs"):
+            return self.actions(model, account, parts[4:], query)
         prs = model.get("prs", {})
         number = parts[4] if len(parts) > 4 else None
         if parts[3] == "labels":
@@ -843,6 +855,55 @@ class Handler(BaseHTTPRequestHandler):
             "total_count": len(rows),
             "statuses": rows or None,
         }
+
+    def actions(
+        self, model: dict, account: str, parts: list[str], query: dict,
+    ) -> tuple[int, object]:
+        """Serve Actions runs, a run's jobs, and job logs (#176).
+
+        As probed on 16.0.3 and 17.0.1: ``runs`` filters by ``run_number``
+        (the run's ``index_in_repo``) and ``head_sha`` and is paged; a
+        run's jobs come in workflow-file order, unpaged, and the ID in the
+        path is the run's API ID; a log is plain text. ``model["actions"]``
+        holds ``runs``, ``jobs`` by run ID, and ``logs`` by job ID (or
+        ``log_bytes``, hexadecimal, for bytes that are not UTF-8). An
+        account in ``actions_denied`` gets 404, as a user who is not a
+        collaborator of a private repository did; ``log_status`` maps a job
+        ID to the status its log read answers.
+        """
+        settings = model.get("settings", {})
+        if account in settings.get("actions_denied", []):
+            return 404, {"message": "not found"}
+        actions = model.get("actions", {})
+        if parts == ["runs"]:
+            rows = [
+                run for run in actions.get("runs", [])
+                if str(run["index_in_repo"]) in query.get(
+                    "run_number", [str(run["index_in_repo"])])
+                and run["commit_sha"] in query.get(
+                    "head_sha", [run["commit_sha"]])
+            ]
+            page = self.paged(rows, query, settings)
+            return 200, {"total_count": len(rows), "workflow_runs": page}
+        if len(parts) == 3 and parts[0] == "runs" and parts[2] == "jobs":
+            if parts[1] not in actions.get("jobs", {}):
+                return 404, {"message": "run not found"}
+            return 200, actions["jobs"][parts[1]]
+        if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "logs":
+            status = settings.get("log_status", {}).get(parts[1])
+            if status is not None:
+                # settings["log_error_text"] is a failed read's body, sent
+                # as text like a log (REV-12).
+                if "log_error_text" in settings:
+                    return status, settings["log_error_text"].encode("utf-8")
+                return status, {"message": "log unavailable"}
+            if parts[1] in actions.get("log_bytes", {}):
+                # Hexadecimal, for a log that is not valid UTF-8.
+                return 200, bytes.fromhex(actions["log_bytes"][parts[1]])
+            if parts[1] not in actions.get("logs", {}):
+                return 404, {"message": "job not found"}
+            return 200, actions["logs"][parts[1]].encode("utf-8")
+        return 404, {"message": "unknown actions route"}
 
     @staticmethod
     def paged(rows: list, query: dict, settings: dict | None = None) -> list:
