@@ -202,11 +202,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         if status == 302:
             self.send_header("Location", model["settings"]["redirect_to"])
-        self.send_header(
-            "Content-Type",
-            model["settings"].get("log_content_type", "text/plain")
-            + "; charset=utf-8" if text else "application/json",
-        )
+        # settings["log_content_type"] is the whole header a text answer
+        # carries; an empty one sends none (REV-12).
+        media = (model["settings"].get(
+            "log_content_type", "text/plain; charset=utf-8"
+        ) if text else "application/json")
+        if media:
+            self.send_header("Content-Type", media)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -888,6 +890,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "logs":
             status = settings.get("log_status", {}).get(parts[1])
             if status is not None:
+                # settings["log_error_text"] is a failed read's body, sent
+                # as text like a log (REV-12).
+                if "log_error_text" in settings:
+                    return status, settings["log_error_text"].encode("utf-8")
                 return status, {"message": "log unavailable"}
             if parts[1] in actions.get("log_bytes", {}):
                 # Hexadecimal, for a log that is not valid UTF-8.

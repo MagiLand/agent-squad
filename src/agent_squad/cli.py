@@ -411,8 +411,15 @@ def execute(args: argparse.Namespace) -> dict:
 
 
 def one_line(text: str) -> str:
-    """Forge text for one plain-text line: no control character, no break."""
-    return visible(text).replace("\n", "\\x0a")
+    """Forge text for one plain-text line: no control character, no break.
+
+    A character the output's encoding cannot hold, such as ``é`` on an
+    ASCII pipe, is shown as a backslash escape rather than ending the
+    command (REV-13).
+    """
+    shown = visible(text).replace("\n", "\\x0a")
+    encoding = sys.stdout.encoding or "utf-8"
+    return shown.encode(encoding, "backslashreplace").decode(encoding)
 
 
 def reply_option_error(args: argparse.Namespace) -> str | None:
@@ -546,7 +553,7 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                     f' {len(log["lines"])} of {log["total_lines"]} lines:'
                 )
                 for line in log["lines"]:
-                    print("    " + line)
+                    print("    " + one_line(line))
             print(json.dumps(result, indent=2, default=json_default))
         elif (args.group, getattr(args, "command", None)) == (
             "issue", "list",

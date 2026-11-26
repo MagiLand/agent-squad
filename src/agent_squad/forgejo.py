@@ -572,11 +572,17 @@ class Forgejo:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 content = response.read()
-                kind = response.headers.get_content_type() if text else None
+                # The header as sent: ``get_content_type`` would supply
+                # text/plain for a missing or malformed one (REV-12).
+                media = response.headers.get("Content-Type") if text else None
         except HTTPError as error:
             detail = f"HTTP {error.code}"
             try:
-                payload = decode_json(error.read().decode("utf-8"))
+                # A failed text read's body may be the answer itself, such
+                # as part of a log, so only its status describes it.
+                payload = (
+                    None if text else decode_json(error.read().decode("utf-8"))
+                )
                 if isinstance(payload, dict) and isinstance(
                     payload.get("message"), str
                 ):
@@ -596,9 +602,12 @@ class Forgejo:
                 "forge request failed or timed out; re-read the PR before"
                 " repeating a mutation"
             ) from None
-        if kind is not None:
-            if not kind.startswith("text/"):
-                raise ForgeError(f"forge answered {kind}, not text")
+        if text:
+            kind = (media or "").split(";", 1)[0].strip().lower()
+            if not re.fullmatch(r"text/[a-z0-9][a-z0-9!#$&^_.+-]*", kind):
+                raise ForgeError(
+                    f"forge answered {kind or 'no content type'}, not text"
+                )
             return content.decode("utf-8", errors="replace")
         try:
             return (

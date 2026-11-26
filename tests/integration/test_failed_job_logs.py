@@ -1,5 +1,6 @@
 """Failed Actions jobs' log excerpts through both fake forges (#176)."""
 
+import json
 import os
 import sys
 import unittest
@@ -408,6 +409,31 @@ class GitHubFailedLogTests(LogFixtureMixin, unittest.TestCase):
         )
         self.assertNotIn("\x1b", result.stdout)
 
+    def test_plain_output_escapes_what_stdout_cannot_encode(self) -> None:
+        # REV-13 of PR #181: an ASCII pipe still gets every line, exit 0.
+        self.store(checks={"check_runs": [
+            github_run("t\u00e9st"),
+            github_run("cov", app="c\u00f6dec\u00f6v", job=13),
+        ]}, actions={
+            "jobs": {"12": {"id": 12, "run_id": 5, "head_sha": self.head}},
+            "logs": {"12": "caf\u00e9 failed\n##[error]exit 1\n"},
+        })
+        with patch.dict(self.f.env, {"PYTHONIOENCODING": "ascii"}):
+            result = self.f.run(
+                [sys.executable, "-m", "agent_squad", "pr", "checks",
+                 "--pr", "1", "--failed-logs"], cwd=self.f.worktree,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("Log of t\\xe9st (job 12), 2 of 2 lines:", lines)
+        self.assertIn("    caf\\xe9 failed", lines)
+        self.assertIn("No log for cov: not a GitHub Actions job (source"
+                      " c\\xf6dec\\xf6v)", lines)
+        # The JSON keeps the values themselves.
+        record = json.loads(result.stdout[result.stdout.index("{"):])
+        self.assertEqual(record["checks"][1]["log"]["lines"][0],
+                         "caf\u00e9 failed")
+
     def test_wait_reads_logs_once_after_the_wait(self) -> None:
         pending = github_run("test")
         pending.update(status="in_progress", conclusion=None)
@@ -672,6 +698,11 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
             ("log_status", {"21": 500}, "HTTP 500"),
             ("actions_denied", ["developer"], "HTTP 404"),
             ("log_content_type", "application/zip", "application/zip"),
+            # No header, or one that names no text type, is not a log
+            # (REV-12 of PR #181).
+            ("log_content_type", "", "no content type"),
+            ("log_content_type", "unsupported", "unsupported, not text"),
+            ("log_content_type", "text/", "text/, not text"),
         ):
             with self.subTest(setting=setting, value=value):
                 self.seed(*self.statuses())
@@ -683,6 +714,23 @@ class ForgejoFailedLogTests(LogFixtureMixin, unittest.TestCase):
                 model = self.f.read_model()
                 del model["settings"][setting]
                 self.f.save_model(model)
+
+    def test_text_type_in_any_case_with_parameters_is_a_log(self) -> None:
+        self.seed(*self.statuses())
+        self.f.settings(log_content_type="Text/Plain; charset=utf-8")
+        check = self.by_name(self.failed_logs())[
+            "Tests / unit (pull_request)"]
+        self.assertEqual(check["log"]["job_id"], 21)
+
+    def test_failed_log_read_reason_never_holds_its_body(self) -> None:
+        # REV-12: a failed text read's body may be the log itself.
+        self.seed(*self.statuses())
+        self.f.settings(log_status={"21": 500}, log_error_text=(
+            '{"message": "2026-11-26 secret log line"}\n'))
+        check = self.by_name(self.failed_logs())[
+            "Tests / unit (pull_request)"]
+        self.assertIsNone(check["log"])
+        self.assertEqual(check["log_reason"], "HTTP 500")
 
     def test_bytes_that_are_not_utf8_are_replaced(self) -> None:
         actions = self.actions()
