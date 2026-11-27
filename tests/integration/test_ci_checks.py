@@ -706,6 +706,12 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
             f"CI pending: 2 checks at {self.head}",
             "Workflow runs not completed: 17 (queued), 4242 (in_progress)",
         ])
+        # A status is forge text: a control character is shown, not sent.
+        checks["workflow_runs"] = [workflow_run(18, "queued\x1b\x07")]
+        self.seed(checks)
+        result = self.f.run(command, cwd=self.f.repo)
+        self.assertEqual(result.stdout.splitlines()[1],
+                         "Workflow runs not completed: 18 (queued\\x1b\\x07)")
         self.seed(self.passing())
         result = self.f.run(command, cwd=self.f.repo)
         self.assertEqual(result.stdout.splitlines()[1], "{")
