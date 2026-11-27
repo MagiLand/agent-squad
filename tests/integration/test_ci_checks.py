@@ -681,18 +681,25 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
         self.assertEqual(self.ci()["unfinished_runs"],
                          [{"id": 4343, "status": "queued"}])
 
-    def test_null_suite_is_read_by_rest_without_an_error(self) -> None:
-        self.f.settings(null_check_suite=True)
-        self.seed(self.unfinished())
-        for command, read in (("status", self.ci), ("pr checks", self.checks)):
-            with self.subTest(command=command):
-                start = len(self.run_list_reads())
-                record = read()
-                self.assertEqual(record["summary"], "pending")
-                self.assertEqual(record["unfinished_runs"],
-                                 [{"id": 4242, "status": "in_progress"}])
-                self.assertEqual(len(record["checks"]), 2)
-                self.assertEqual(len(self.run_list_reads()) - start, 1)
+    def test_null_or_partial_suite_is_read_by_rest_without_an_error(
+        self,
+    ) -> None:
+        # A null suite, and a suite without its selected workflowRun field
+        # (REV-2), are partial answers that REST reads instead.
+        settings = ("null_check_suite", "omit_workflow_run")
+        reads = (("status", self.ci), ("pr checks", self.checks))
+        for setting in settings:
+            self.f.settings(**{name: name == setting for name in settings})
+            self.seed(self.unfinished())
+            for command, read in reads:
+                with self.subTest(setting=setting, command=command):
+                    start = len(self.run_list_reads())
+                    record = read()
+                    self.assertEqual(record["summary"], "pending")
+                    self.assertEqual(record["unfinished_runs"],
+                                     [{"id": 4242, "status": "in_progress"}])
+                    self.assertEqual(len(record["checks"]), 2)
+                    self.assertEqual(len(self.run_list_reads()) - start, 1)
 
     def test_plain_text_names_the_unfinished_runs(self) -> None:
         command = [sys.executable, "-m", "agent_squad", "pr", "checks",

@@ -345,7 +345,9 @@ class GraphQLCheckTests(unittest.TestCase):
             ("COMPLETED", ()),
             *((value, (UnfinishedRun(900, value.lower()),)) for value in (
                 "QUEUED", "IN_PROGRESS", "PENDING", "REQUESTED", "WAITING",
-                "UNNAMED_STATUS")),
+                "UNNAMED_STATUS",
+                # Only the wire value `COMPLETED` is terminal, as on REST.
+                "completed")),
         ):
             with self.subTest(status=status):
                 commit = graphql_commit([("push", [graphql_run(1, "test")])])
@@ -382,16 +384,26 @@ class GraphQLCheckTests(unittest.TestCase):
 
     def test_an_unreadable_workflow_suite_is_read_by_rest(self) -> None:
         rest = CommitChecks((), (UnfinishedRun(4, "queued"),))
+        missing = "<missing>"
         for field, value in (
             ("status", None), ("status", ""), ("status", 7),
+            ("status", missing),
             ("databaseId", None), ("databaseId", 0), ("databaseId", "12"),
+            ("databaseId", missing),
+            # A selected field left out is a partial answer, not a null
+            # one (#169, REV-2).
+            ("workflowRun", missing),
         ):
             with self.subTest(field=field, value=value):
                 commit = graphql_commit([("push", [graphql_run(1, "test")])])
                 node = commit["checkSuites"]["nodes"][0]
                 node["status"] = "IN_PROGRESS"
-                target = node if field == "status" else node["workflowRun"]
-                target[field] = value
+                target = (node if field in ("status", "workflowRun")
+                          else node["workflowRun"])
+                if value == missing:
+                    del target[field]
+                else:
+                    target[field] = value
                 response = {"repository": {"object": commit}}
                 with patch.object(self.forge, "graphql",
                                   return_value=response), \
@@ -450,9 +462,12 @@ class RestCheckTests(unittest.TestCase):
     def test_a_run_not_completed_is_an_unfinished_run(self) -> None:
         for status, expected in (
             ("completed", ()),
-            *((value, (UnfinishedRun(5, value),)) for value in (
+            *((value, (UnfinishedRun(5, value.lower()),)) for value in (
                 "queued", "in_progress", "waiting", "requested", "pending",
-                "unnamed_status")),
+                "unnamed_status",
+                # The record's status is in lower case (#169, REV-3); only
+                # the wire value `completed` is terminal.
+                "In_Progress", "Completed")),
         ):
             with self.subTest(status=status):
                 found = self.read([rest_run(5, status)])

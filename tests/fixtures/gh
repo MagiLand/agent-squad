@@ -374,6 +374,10 @@ def commit_lists(sha, advance=False):
                if selected("databaseId") else {}),
             "event": workflow["event"],
         }
+        # settings["omit_workflow_run"] leaves the selected field out, as a
+        # partial answer would (#169).
+        if settings.get("omit_workflow_run"):
+            del node["workflowRun"]
         node["checkRuns"] = gql_page(nodes, "CheckSuite.checkRuns")
         return node
 

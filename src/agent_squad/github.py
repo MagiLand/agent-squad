@@ -1323,7 +1323,12 @@ class GitHub:
         # Each suite's position stands for its ID, which binds a check run
         # to the event of the suite's workflow run.
         for key, suite in enumerate(suites, 1):
-            workflow = suite.get("workflowRun")
+            # GraphQL answers every selected field, so a missing one marks a
+            # partial answer, which REST reads instead; only null means the
+            # suite has no workflow run (#169).
+            if "workflowRun" not in suite:
+                raise ForgeError("checkSuite.workflowRun is missing")
+            workflow = suite["workflowRun"]
             if workflow is not None:
                 data = object_value(workflow, "workflowRun")
                 events[key] = V.require_string(
@@ -1331,12 +1336,13 @@ class GitHub:
                 )
                 suite_status = V.require_string(
                     suite.get("status"), "checkSuite.status"
-                ).lower()
-                if suite_status != "completed":
+                )
+                # Only the wire value `COMPLETED` is terminal, as on REST.
+                if suite_status != "COMPLETED":
                     unfinished.append(UnfinishedRun(
                         positive(data.get("databaseId"),
                                  "workflowRun.databaseId"),
-                        suite_status,
+                        suite_status.lower(),
                     ))
             runs.extend(
                 (positive(run.get("databaseId"), "checkRun.databaseId"),
@@ -1394,9 +1400,12 @@ class GitHub:
             run_status = V.require_string(
                 data.get("status"), "workflow_run.status"
             )
+            # Only the wire value `completed` is terminal; the record's
+            # status is in lower case on both paths (#169).
             if run_status != "completed":
                 unfinished.append(UnfinishedRun(
-                    positive(data.get("id"), "workflow_run.id"), run_status
+                    positive(data.get("id"), "workflow_run.id"),
+                    run_status.lower(),
                 ))
         return CommitChecks(ordered(
             [parse_check_run(run, events) for run in runs]
