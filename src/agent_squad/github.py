@@ -14,13 +14,13 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from .forge import (
     CHECK_REFUSALS, Anchor, Check, CheckResult, ChecksUnavailable,
-    ClosingPullRequest, Comment, Evidence, ForgeError, IssueDependencies,
-    IssueQuery, IssueRecord, JobLog, Label, ListedIssue, MergeResult,
-    Milestone, NoJobLog, PullRequest, RelatedIssue, Review, ReviewPublication,
-    ReviewState, Role, Snapshot, ThreadState, V, array, boolean,
-    branch_present, closing_order, delete_and_confirm, exposed,
-    milestone_title, object_value, oid, parse_milestone, positive,
-    related_issue, text_value,
+    ClosingPullRequest, Comment, CommitChecks, Evidence, ForgeError,
+    IssueDependencies, IssueQuery, IssueRecord, JobLog, Label, ListedIssue,
+    MergeResult, Milestone, NoJobLog, PullRequest, RelatedIssue, Review,
+    ReviewPublication, ReviewState, Role, Snapshot, ThreadState,
+    UnfinishedRun, V, array, boolean, branch_present, closing_order,
+    delete_and_confirm, exposed, milestone_title, object_value, oid,
+    parse_milestone, positive, related_issue, text_value,
 )
 from .initialization import Repository, decode_json
 
@@ -276,6 +276,10 @@ def ordered(checks: list[Check]) -> tuple[Check, ...]:
     ))
 
 
+def unfinished_order(runs: list[UnfinishedRun]) -> tuple[UnfinishedRun, ...]:
+    return tuple(sorted(runs, key=lambda run: run.id))
+
+
 # One GraphQL read of the PR record and every list behind `status` (#149).
 # Each node is rewritten into the record the REST read returns, so the REST
 # parsers above validate both reads.
@@ -341,8 +345,11 @@ THREADS = Connection(
 CONVERSATION = Connection(
     "comments", "PullRequest", f"fullDatabaseId {ACTOR} body createdAt"
 )
+# A suite's status says whether its workflow run has completed, which its
+# check runs alone cannot: a job behind `needs` has none yet (#169).
 CHECK_SUITES = Connection(
-    "checkSuites", "Commit", "id app { slug } workflowRun { event }",
+    "checkSuites", "Commit",
+    "id status app { slug } workflowRun { databaseId event }",
     (Connection(
         "checkRuns", "CheckSuite", "databaseId name status conclusion"
         " permalink startedAt completedAt",
@@ -1143,7 +1150,7 @@ class GitHub:
 
     def head_checks(
         self, commit: object, head: str,
-    ) -> tuple[Check, ...] | None:
+    ) -> CommitChecks | None:
         """Checks read with the snapshot, or null when ``checks`` must."""
         if commit is None or object_value(commit, "head").get("oid") != head:
             return None
@@ -1229,8 +1236,9 @@ class GitHub:
                     raise
         return result
 
-    def checks(self, sha: str) -> tuple[Check, ...]:
-        """Read check runs and commit statuses at one commit in one query.
+    def checks(self, sha: str) -> CommitChecks:
+        """Read check runs, commit statuses, and the unfinished workflow
+        runs at one commit in one query.
 
         Any failure of the query leaves the result to the REST reads, which
         decide between checks, a refusal, and an error as before (#149).
@@ -1296,27 +1304,48 @@ class GitHub:
             raise NoJobLog(f"job {job} ran at another commit")
         return JobLog(job, self.text(f"{self.prefix}/actions/jobs/{job}/logs"))
 
-    def commit_checks(self, commit: dict) -> tuple[Check, ...]:
+    def commit_checks(self, commit: dict) -> CommitChecks:
         """Check records of one GraphQL commit, as ``rest_checks`` reads them.
 
         ``LATEST`` keeps each check run's latest attempt and ``contexts`` the
         latest status per context. REST lists check runs newest first; that
-        order is kept for runs with the same name and event.
+        order is kept for runs with the same name and event. A suite with a
+        workflow run whose status is not ``COMPLETED`` is an unfinished run
+        (#169); a suite of another app has no workflow run and is ignored,
+        since such a suite can stay queued indefinitely.
         """
         suites = self.complete(
             commit.get("checkSuites"), CHECK_SUITES, commit.get("id")
         )
         events: dict[int, str] = {}
+        unfinished = []
         runs = []
         # Each suite's position stands for its ID, which binds a check run
         # to the event of the suite's workflow run.
         for key, suite in enumerate(suites, 1):
-            workflow = suite.get("workflowRun")
+            # GraphQL answers every selected field, so a missing one marks a
+            # partial answer, which REST reads instead; only null means the
+            # suite has no workflow run (#169).
+            if "workflowRun" not in suite:
+                raise ForgeError("checkSuite.workflowRun is missing")
+            workflow = suite["workflowRun"]
             if workflow is not None:
+                data = object_value(workflow, "workflowRun")
                 events[key] = V.require_string(
-                    object_value(workflow, "workflowRun").get("event"),
-                    "workflowRun.event",
+                    data.get("event"), "workflowRun.event"
                 )
+                # Every workflow suite's run ID is read, whatever its status,
+                # so an unreadable one falls back to REST (#169, REV-4).
+                run_id = positive(data.get("databaseId"),
+                                  "workflowRun.databaseId")
+                suite_status = V.require_string(
+                    suite.get("status"), "checkSuite.status"
+                )
+                # Only the wire value `COMPLETED` is terminal, as on REST.
+                if suite_status != "COMPLETED":
+                    unfinished.append(
+                        UnfinishedRun(run_id, suite_status.lower())
+                    )
             runs.extend(
                 (positive(run.get("databaseId"), "checkRun.databaseId"),
                  rest_check_run(run, key, suite.get("app")))
@@ -1329,43 +1358,61 @@ class GitHub:
         # The list has no pages; one that may be cut off is read by REST.
         if len(contexts) >= PAGE_SIZE:
             raise ForgeError("status contexts may be incomplete")
-        return ordered(
+        return CommitChecks(ordered(
             [parse_check_run(run, events)
              for _, run in sorted(runs, key=lambda r: r[0], reverse=True)]
             + [parse_commit_status(rest_status(object_value(s, "context")))
                for s in contexts]
-        )
+        ), unfinished_order(unfinished))
 
-    def rest_checks(self, sha: str) -> tuple[Check, ...]:
+    def rest_checks(self, sha: str) -> CommitChecks:
         """Read check runs and commit statuses at one commit (#145).
 
         The default check-run filter keeps each run's latest attempt, and the
         combined status keeps the latest status per context; its own state
-        reads pending for a commit without statuses, so it is never used.
+        reads pending for a commit without statuses, so it is never used. A
+        listed workflow run whose status is not ``completed`` is an
+        unfinished run (#169).
+
+        The workflow runs are read first. A run listed as completed created
+        every job before that read, so the later check-run read lists them
+        all; read the other way round, a job created and failed between the
+        two reads would be missing beside a completed run (#169).
         """
         commit = f"{self.prefix}/commits/{sha}"
         try:
+            workflow_runs = self.listing(
+                f"{self.prefix}/actions/runs?head_sha={sha}", "workflow_runs"
+            )
             runs = self.listing(
                 f"{commit}/check-runs?filter=latest", "check_runs"
             )
             statuses = self.listing(f"{commit}/status", "statuses")
-            workflow_runs = self.listing(
-                f"{self.prefix}/actions/runs?head_sha={sha}", "workflow_runs"
-            )
         except ForgeError as error:
             if error.status not in CHECK_REFUSALS:
                 raise
             raise ChecksUnavailable(str(error), error.status) from None
         events = {}
+        unfinished = []
         for value in workflow_runs:
             data = object_value(value, "workflow run")
             events[positive(data.get("check_suite_id"), "check_suite_id")] = (
                 V.require_string(data.get("event"), "workflow_run.event")
             )
-        return ordered(
+            run_status = V.require_string(
+                data.get("status"), "workflow_run.status"
+            )
+            # Only the wire value `completed` is terminal; the record's
+            # status is in lower case on both paths (#169).
+            if run_status != "completed":
+                unfinished.append(UnfinishedRun(
+                    positive(data.get("id"), "workflow_run.id"),
+                    run_status.lower(),
+                ))
+        return CommitChecks(ordered(
             [parse_check_run(run, events) for run in runs]
             + [parse_commit_status(status) for status in statuses]
-        )
+        ), unfinished_order(unfinished))
 
     def merge(self, number: int, head: str, method: str) -> MergeResult:
         data = object_value(self.api(

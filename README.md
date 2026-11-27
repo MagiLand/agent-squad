@@ -246,9 +246,11 @@ result and can wait for pending checks. With `--merge-commit`, `pr checks`
 reads a merged PR's merge commit instead, which is how the Implementer reads
 the run that a merge started on the base branch. With `--failed-logs`, each
 failed check also carries the last lines of its Actions job's log, or the
-reason there is none. The skills act on them: a
-failed check is a defect, the Implementer waits for a head's checks before
-requesting review and for the push run after a merge, and the Reviewer does
+reason there is none. On GitHub a workflow run that has not completed keeps
+the result `pending` unless a check failed, even when every check it has
+created so far has finished, and `unfinished_runs` names it. The skills
+act on them: a failed check is a defect, the Implementer waits for a head's
+checks before requesting review and for the push run after a merge, and the Reviewer does
 not approve a head with a failed check. Any
 other repository review-readiness policy must be satisfied separately for the
 exact revision.

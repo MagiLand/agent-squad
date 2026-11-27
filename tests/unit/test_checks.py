@@ -16,7 +16,8 @@ from agent_squad.commands import (  # noqa: E402
     log_excerpt, log_reason, pr_checks, summarize_checks,
 )
 from agent_squad.forge import (  # noqa: E402
-    Check, ChecksUnavailable, ForgeError, NoJobLog, visible,
+    Check, ChecksUnavailable, CommitChecks, ForgeError, NoJobLog,
+    UnfinishedRun, visible,
 )
 from agent_squad.forgejo import (  # noqa: E402
     Forgejo, names_job, parse_status,
@@ -162,8 +163,24 @@ class SummaryTests(unittest.TestCase):
         ):
             with self.subTest(results=results):
                 self.assertEqual(
-                    summarize_checks(tuple(map(row, results))), expected
+                    summarize_checks(CommitChecks(tuple(map(row, results)))),
+                    expected,
                 )
+
+    def test_an_unfinished_run_is_pending_unless_a_row_failed(self) -> None:
+        # #169: a run that has not completed may still create check runs.
+        run = (UnfinishedRun(7, "in_progress"),)
+        for results, expected in (
+            ((), "pending"),
+            (("passed",), "pending"),
+            (("skipped",), "pending"),
+            (("passed", "pending"), "pending"),
+            (("passed", "failed"), "failed"),
+            (("failed",), "failed"),
+        ):
+            with self.subTest(results=results):
+                self.assertEqual(summarize_checks(CommitChecks(
+                    tuple(map(row, results)), run)), expected)
 
 
 class RefusalTests(unittest.TestCase):
@@ -197,6 +214,7 @@ class RefusalTests(unittest.TestCase):
                         record = ci_record(forge, H)
                         self.assertEqual(record["summary"], "unavailable")
                         self.assertEqual(record["checks"], [])
+                        self.assertEqual(record["unfinished_runs"], [])
                         self.assertIn("refused", record["reason"])
                     else:
                         with self.assertRaises(ForgeError) as raised:
@@ -222,10 +240,10 @@ class RefusalTests(unittest.TestCase):
                 patch.object(forge, "api", side_effect=api):
             self.assertEqual(ci_record(forge, H)["summary"], "none")
         self.assertEqual(seen, [
+            f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
             f"/repos/org/repo/commits/{H}/check-runs"
             "?filter=latest&per_page=100&page=1",
             f"/repos/org/repo/commits/{H}/status?per_page=100&page=1",
-            f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
         ])
 
 
@@ -246,8 +264,10 @@ def graphql_commit(suites: list, contexts: list | None = None) -> dict:
     return {
         "id": "C-1", "oid": H,
         "checkSuites": page([
-            {"id": f"CS-{n}", "app": {"slug": "github-actions"},
-             "workflowRun": None if event is None else {"event": event},
+            {"id": f"CS-{n}", "status": "COMPLETED",
+             "app": {"slug": "github-actions"},
+             "workflowRun": None if event is None else {
+                 "databaseId": 900 + n, "event": event},
              "checkRuns": page(runs)}
             for n, (event, runs) in enumerate(suites)
         ]),
@@ -265,7 +285,7 @@ class GraphQLCheckTests(unittest.TestCase):
                 Repository(path, path, path / ".git", config()), "reviewer"
             )
 
-    def read(self, commit: dict) -> tuple[Check, ...]:
+    def read(self, commit: dict) -> CommitChecks:
         response = {"repository": {"object": commit}}
         with patch.object(self.forge, "graphql", return_value=response), \
                 patch.object(self.forge, "api",
@@ -283,9 +303,10 @@ class GraphQLCheckTests(unittest.TestCase):
              {"context": "docs", "state": "SUCCESS", "targetUrl": None,
               "creator": None}],
         ))
+        self.assertEqual(checks.unfinished_runs, ())
         self.assertEqual(
             [(c.name, c.event, c.state, c.result, c.source, c.url)
-             for c in checks],
+             for c in checks.checks],
             [("deploy", None, "failure", "failed", "ci[bot]",
               "https://ci.example/deploy"),
              ("docs", None, "success", "passed", None, None),
@@ -305,17 +326,215 @@ class GraphQLCheckTests(unittest.TestCase):
         response = {"repository": {"object": graphql_commit([], contexts)}}
         with patch.object(self.forge, "graphql", return_value=response), \
                 patch.object(self.forge, "rest_checks",
-                             return_value=()) as rest:
-            self.assertEqual(self.forge.checks(H), ())
+                             return_value=CommitChecks(())) as rest:
+            self.assertEqual(self.forge.checks(H), CommitChecks(()))
         rest.assert_called_once_with(H)
 
     def test_snapshot_checks_must_be_at_the_head(self) -> None:
         commit = graphql_commit([("push", [graphql_run(1, "test")])])
-        self.assertEqual(len(self.forge.head_checks(commit, H)), 1)
+        self.assertEqual(len(self.forge.head_checks(commit, H).checks), 1)
         self.assertIsNone(self.forge.head_checks(commit, OTHER))
         self.assertIsNone(self.forge.head_checks(None, H))
         commit["checkSuites"] = None
         self.assertIsNone(self.forge.head_checks(commit, H))
+
+    def test_an_unfinished_workflow_suite_is_an_unfinished_run(self) -> None:
+        # #169: the suite's status, not its check runs, says whether the
+        # workflow run has completed; its ID is the run's.
+        for status, expected in (
+            ("COMPLETED", ()),
+            *((value, (UnfinishedRun(900, value.lower()),)) for value in (
+                "QUEUED", "IN_PROGRESS", "PENDING", "REQUESTED", "WAITING",
+                "UNNAMED_STATUS",
+                # Only the wire value `COMPLETED` is terminal, as on REST.
+                "completed")),
+        ):
+            with self.subTest(status=status):
+                commit = graphql_commit([("push", [graphql_run(1, "test")])])
+                commit["checkSuites"]["nodes"][0]["status"] = status
+                found = self.read(commit)
+                self.assertEqual(found.unfinished_runs, expected)
+                self.assertEqual([c.result for c in found.checks],
+                                 ["passed"])
+
+    def test_unfinished_runs_are_ordered_by_id(self) -> None:
+        commit = graphql_commit([("push", []), ("pull_request", [])])
+        for node, (ident, status) in zip(
+            commit["checkSuites"]["nodes"],
+            ((902, "QUEUED"), (901, "IN_PROGRESS")),
+        ):
+            node["status"] = status
+            node["workflowRun"]["databaseId"] = ident
+        self.assertEqual(self.read(commit).unfinished_runs, (
+            UnfinishedRun(901, "in_progress"), UnfinishedRun(902, "queued"),
+        ))
+
+    def test_a_suite_without_a_workflow_run_is_ignored(self) -> None:
+        # Other apps' suites stayed QUEUED for 25 to 40 minutes, with and
+        # without check runs, in the triage of #169.
+        commit = graphql_commit([(None, []), (None, [graphql_run(3, "az")]),
+                                 (None, [])])
+        nodes = commit["checkSuites"]["nodes"]
+        nodes[0].update(status="QUEUED", app={"slug": "codecov"})
+        nodes[1].update(status="QUEUED", app={"slug": "azure-pipelines"})
+        del nodes[2]["status"]
+        found = self.read(commit)
+        self.assertEqual(found.unfinished_runs, ())
+        self.assertEqual([c.result for c in found.checks], ["passed"])
+
+    def test_an_unreadable_workflow_suite_is_read_by_rest(self) -> None:
+        rest = CommitChecks((), (UnfinishedRun(4, "queued"),))
+        missing = "<missing>"
+        unread_ids = [
+            ("databaseId", value, suite)
+            for value in (None, 0, "12", missing)
+            # A completed suite's run ID is read too (#169, REV-4).
+            for suite in ("IN_PROGRESS", "COMPLETED")
+        ]
+        for field, value, suite in (
+            ("status", None, None), ("status", "", None), ("status", 7, None),
+            ("status", missing, None),
+            *unread_ids,
+            # A selected field left out is a partial answer, not a null
+            # one (#169, REV-2).
+            ("workflowRun", missing, None),
+        ):
+            with self.subTest(field=field, value=value, suite=suite):
+                commit = graphql_commit([("push", [graphql_run(1, "test")])])
+                node = commit["checkSuites"]["nodes"][0]
+                node["status"] = suite or "IN_PROGRESS"
+                target = (node if field in ("status", "workflowRun")
+                          else node["workflowRun"])
+                if value == missing:
+                    del target[field]
+                else:
+                    target[field] = value
+                response = {"repository": {"object": commit}}
+                with patch.object(self.forge, "graphql",
+                                  return_value=response), \
+                        patch.object(self.forge, "rest_checks",
+                                     return_value=rest) as read:
+                    self.assertEqual(self.forge.checks(H), rest)
+                read.assert_called_once_with(H)
+                self.assertIsNone(self.forge.head_checks(commit, H))
+
+    def test_a_null_suite_is_read_by_rest(self) -> None:
+        # GitHub answered `checkSuites.nodes: [null]` with no error 6.5
+        # seconds after a push in the triage of #169.
+        commit = graphql_commit([])
+        commit["checkSuites"]["nodes"] = [None]
+        self.assertIsNone(self.forge.head_checks(commit, H))
+        response = {"repository": {"object": commit}}
+        with patch.object(self.forge, "graphql", return_value=response), \
+                patch.object(self.forge, "rest_checks",
+                             return_value=CommitChecks(())) as read:
+            self.assertEqual(self.forge.checks(H), CommitChecks(()))
+        read.assert_called_once_with(H)
+
+
+def rest_run(ident: int, status: object, suite: int = 1) -> dict:
+    return {"id": ident, "check_suite_id": suite, "event": "push",
+            "status": status}
+
+
+class RestCheckTests(unittest.TestCase):
+    """The REST read lists the workflow runs at the commit (#169)."""
+
+    def setUp(self) -> None:
+        path = Path("/repo")
+        with patch("agent_squad.github.shutil.which", return_value="/gh"):
+            self.forge = GitHub(
+                Repository(path, path, path / ".git", config()), "reviewer"
+            )
+
+    def read(self, runs: list) -> CommitChecks:
+        pages = {
+            "check-runs": {"check_runs": [{
+                "id": 3, "name": "test", "status": "completed",
+                "conclusion": "success", "check_suite": {"id": 1},
+                "app": {"slug": "github-actions"}, "html_url": None,
+                "started_at": None, "completed_at": None,
+            }]},
+            "/status": {"state": "pending", "statuses": []},
+            "actions/runs": {"workflow_runs": runs},
+        }
+        with patch.object(self.forge, "graphql",
+                          side_effect=ForgeError("GraphQL failed")), \
+                patch.object(self.forge, "api", side_effect=lambda e: next(
+                    v for k, v in pages.items() if k in e)):
+            return self.forge.checks(H)
+
+    def test_a_run_not_completed_is_an_unfinished_run(self) -> None:
+        for status, expected in (
+            ("completed", ()),
+            *((value, (UnfinishedRun(5, value.lower()),)) for value in (
+                "queued", "in_progress", "waiting", "requested", "pending",
+                "unnamed_status",
+                # The record's status is in lower case (#169, REV-3); only
+                # the wire value `completed` is terminal.
+                "In_Progress", "Completed")),
+        ):
+            with self.subTest(status=status):
+                found = self.read([rest_run(5, status)])
+                self.assertEqual(found.unfinished_runs, expected)
+                self.assertEqual(
+                    [(c.event, c.result) for c in found.checks],
+                    [("push", "passed")],
+                )
+
+    def test_unfinished_runs_are_ordered_by_id(self) -> None:
+        found = self.read([rest_run(9, "queued", 2),
+                           rest_run(8, "completed", 3),
+                           rest_run(7, "in_progress")])
+        self.assertEqual(found.unfinished_runs, (
+            UnfinishedRun(7, "in_progress"), UnfinishedRun(9, "queued"),
+        ))
+
+    def test_a_run_completing_between_the_requests_never_reads_passed(
+        self,
+    ) -> None:
+        # The dependent job is created and fails, and its run completes,
+        # after the first `after` requests of one read (#169, REV-1).
+        first = {
+            "id": 3, "name": "first", "status": "completed",
+            "conclusion": "success", "check_suite": {"id": 1},
+            "app": {"slug": "github-actions"}, "html_url": None,
+            "started_at": None, "completed_at": None,
+        }
+        dependent = dict(first, id=4, name="dependent", conclusion="failure")
+        for after, expected in (
+            (0, "failed"), (1, "failed"), (2, "pending"), (3, "pending"),
+        ):
+            seen = []
+
+            def api(endpoint: str) -> dict:
+                seen.append(endpoint)
+                done = len(seen) > after
+                if "actions/runs" in endpoint:
+                    return {"workflow_runs": [rest_run(
+                        5, "completed" if done else "in_progress")]}
+                if "check-runs" in endpoint:
+                    return {"check_runs": (
+                        [first, dependent] if done else [first])}
+                return {"state": "pending", "statuses": []}
+
+            with self.subTest(after=after), \
+                    patch.object(self.forge, "graphql",
+                                 side_effect=ForgeError("GraphQL failed")), \
+                    patch.object(self.forge, "api", side_effect=api):
+                self.assertEqual(
+                    summarize_checks(self.forge.checks(H)), expected)
+
+    def test_an_unreadable_run_fails_the_read(self) -> None:
+        for run in (
+            rest_run(5, None), rest_run(5, ""), rest_run(5, 7),
+            rest_run(None, "queued"), rest_run("5", "queued"),
+            rest_run(0, "queued"),
+        ):
+            with self.subTest(run=run):
+                with self.assertRaises(ForgeError) as raised:
+                    self.read([run])
+                self.assertNotIsInstance(raised.exception, ChecksUnavailable)
 
 
 class StubForge:
@@ -332,13 +551,13 @@ class StubForge:
             self.head = self.heads.pop(0)
         return type("PR", (), {"head": self.head})()
 
-    def checks(self, sha: str) -> tuple[Check, ...]:
+    def checks(self, sha: str) -> CommitChecks:
         self.reads.append(sha)
         result = self.results.pop(0) if len(self.results) > 1 else (
             self.results[0])
         if result == "unavailable":
             raise ChecksUnavailable("refused (HTTP 403)", 403)
-        return () if result == "none" else (row(result),)
+        return CommitChecks(() if result == "none" else (row(result),))
 
 
 class WaitTests(unittest.TestCase):
@@ -468,8 +687,8 @@ class MergeCommitTests(unittest.TestCase):
         result, sleeps = self.run_wait(forge, 60)
         self.assertEqual(result, {
             "head": MERGE, "summary": "failed",
-            "checks": result["checks"], "waited_seconds": 20,
-            "timed_out": False, "head_changed": False,
+            "checks": result["checks"], "unfinished_runs": [],
+            "waited_seconds": 20, "timed_out": False, "head_changed": False,
         })
         self.assertEqual(sleeps, [CHECK_POLL_INTERVAL] * 2)
         self.assertEqual(forge.reads, [MERGE] * 3)
@@ -515,13 +734,16 @@ class RecordTests(unittest.TestCase):
     def test_rows_keep_every_record_field(self) -> None:
         check = replace(row("failed"), event="push", url="https://ci/1")
         forge = StubForge([])
-        forge.checks = lambda sha: (check,)
+        forge.checks = lambda sha: CommitChecks(
+            (check,), (UnfinishedRun(7, "queued"),)
+        )
         self.assertEqual(ci_record(forge, H), {
             "head": H, "summary": "failed", "checks": [{
                 "name": "test", "event": "push", "state": "failed",
                 "result": "failed", "source": None, "url": "https://ci/1",
                 "started_at": None, "completed_at": None,
             }],
+            "unfinished_runs": [{"id": 7, "status": "queued"}],
         })
 
 

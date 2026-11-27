@@ -20,6 +20,11 @@ checks at a head passed, failed, or are still pending from `ci` in
 `agent-squad pr checks --pr <N> [--wait <seconds>] --json`, and read the result
 of the run at a merged PR's merge commit from
 `agent-squad pr checks --pr <N> --merge-commit [--wait <seconds>] --json`.
+In `ci` and in either `pr checks` read, `unfinished_runs` lists each Actions
+workflow run at that commit that has not completed, with its `id` and
+`status`. Such a run may still add checks, so while the list is not empty
+`summary` is `pending` unless a check failed. On Forgejo the list is always
+empty.
 Add `--failed-logs` to either `pr checks` read for the last lines of each
 failed Actions job's log, in `log` on each failed check, or the reason in
 `log_reason` when the CLI found no matching job or could not read it. An

@@ -1538,7 +1538,8 @@ class PagedReadTests(unittest.TestCase):
              "pulls/1/reviews", [review[:3], review[3:]], [], review_ids),
             ("branch_prs", lambda: self.forge.branch_prs("feature"),
              "pulls?state=all", [pr[:1], pr[1:]], [], [pr[1]]),
-            ("checks", lambda: tuple(c.name for c in self.forge.checks("s")),
+            ("checks",
+             lambda: tuple(c.name for c in self.forge.checks("s").checks),
              "commits/s/status",
              [{"statuses": status[:1]}, {"statuses": status[1:]}],
              {"statuses": None, "total_count": 0}, ("a", "b")),
@@ -1574,7 +1575,10 @@ class PagedReadTests(unittest.TestCase):
         self.forge.api.side_effect = [
             {"statuses": [status_row("a")]}, {"statuses": []},
         ]
-        self.assertEqual([c.name for c in self.forge.checks("s")], ["a"])
+        found = self.forge.checks("s")
+        self.assertEqual([c.name for c in found.checks], ["a"])
+        # Forgejo never reports an unfinished run (#169).
+        self.assertEqual(found.unfinished_runs, ())
         self.assertEqual(len(self.paths()), 2)
 
     def test_a_refused_later_status_page_is_still_unavailable(self):
