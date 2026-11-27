@@ -385,19 +385,24 @@ class GraphQLCheckTests(unittest.TestCase):
     def test_an_unreadable_workflow_suite_is_read_by_rest(self) -> None:
         rest = CommitChecks((), (UnfinishedRun(4, "queued"),))
         missing = "<missing>"
-        for field, value in (
-            ("status", None), ("status", ""), ("status", 7),
-            ("status", missing),
-            ("databaseId", None), ("databaseId", 0), ("databaseId", "12"),
-            ("databaseId", missing),
+        unread_ids = [
+            ("databaseId", value, suite)
+            for value in (None, 0, "12", missing)
+            # A completed suite's run ID is read too (#169, REV-4).
+            for suite in ("IN_PROGRESS", "COMPLETED")
+        ]
+        for field, value, suite in (
+            ("status", None, None), ("status", "", None), ("status", 7, None),
+            ("status", missing, None),
+            *unread_ids,
             # A selected field left out is a partial answer, not a null
             # one (#169, REV-2).
-            ("workflowRun", missing),
+            ("workflowRun", missing, None),
         ):
-            with self.subTest(field=field, value=value):
+            with self.subTest(field=field, value=value, suite=suite):
                 commit = graphql_commit([("push", [graphql_run(1, "test")])])
                 node = commit["checkSuites"]["nodes"][0]
-                node["status"] = "IN_PROGRESS"
+                node["status"] = suite or "IN_PROGRESS"
                 target = (node if field in ("status", "workflowRun")
                           else node["workflowRun"])
                 if value == missing:

@@ -1334,16 +1334,18 @@ class GitHub:
                 events[key] = V.require_string(
                     data.get("event"), "workflowRun.event"
                 )
+                # Every workflow suite's run ID is read, whatever its status,
+                # so an unreadable one falls back to REST (#169, REV-4).
+                run_id = positive(data.get("databaseId"),
+                                  "workflowRun.databaseId")
                 suite_status = V.require_string(
                     suite.get("status"), "checkSuite.status"
                 )
                 # Only the wire value `COMPLETED` is terminal, as on REST.
                 if suite_status != "COMPLETED":
-                    unfinished.append(UnfinishedRun(
-                        positive(data.get("databaseId"),
-                                 "workflowRun.databaseId"),
-                        suite_status.lower(),
-                    ))
+                    unfinished.append(
+                        UnfinishedRun(run_id, suite_status.lower())
+                    )
             runs.extend(
                 (positive(run.get("databaseId"), "checkRun.databaseId"),
                  rest_check_run(run, key, suite.get("app")))
