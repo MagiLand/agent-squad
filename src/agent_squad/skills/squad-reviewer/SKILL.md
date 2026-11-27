@@ -105,7 +105,11 @@ the implementation report. Supply the axes to the published review through
 
 CI results are necessary but not sufficient for approval. Read `ci` in
 `status --json` for the pinned head and list every check with its `result`
-in Evidence. Then:
+in Evidence. `unfinished_runs` in `ci` lists each Actions workflow run at
+that head that has not completed, with its `id` and `status`. Such a run
+may still add checks, so while the list is not empty `summary` is `pending`
+unless a check failed; list those runs in Evidence too. On Forgejo the list
+is always empty. Then:
 
 - A `failed` check prevents approval. Raise a blocking finding naming the
   check, unless another blocking finding already covers its cause. To name
