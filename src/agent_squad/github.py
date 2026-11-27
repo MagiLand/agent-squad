@@ -1365,16 +1365,21 @@ class GitHub:
         reads pending for a commit without statuses, so it is never used. A
         listed workflow run whose status is not ``completed`` is an
         unfinished run (#169).
+
+        The workflow runs are read first. A run listed as completed created
+        every job before that read, so the later check-run read lists them
+        all; read the other way round, a job created and failed between the
+        two reads would be missing beside a completed run (#169).
         """
         commit = f"{self.prefix}/commits/{sha}"
         try:
+            workflow_runs = self.listing(
+                f"{self.prefix}/actions/runs?head_sha={sha}", "workflow_runs"
+            )
             runs = self.listing(
                 f"{commit}/check-runs?filter=latest", "check_runs"
             )
             statuses = self.listing(f"{commit}/status", "statuses")
-            workflow_runs = self.listing(
-                f"{self.prefix}/actions/runs?head_sha={sha}", "workflow_runs"
-            )
         except ForgeError as error:
             if error.status not in CHECK_REFUSALS:
                 raise

@@ -240,10 +240,10 @@ class RefusalTests(unittest.TestCase):
                 patch.object(forge, "api", side_effect=api):
             self.assertEqual(ci_record(forge, H)["summary"], "none")
         self.assertEqual(seen, [
+            f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
             f"/repos/org/repo/commits/{H}/check-runs"
             "?filter=latest&per_page=100&page=1",
             f"/repos/org/repo/commits/{H}/status?per_page=100&page=1",
-            f"/repos/org/repo/actions/runs?head_sha={H}&per_page=100&page=1",
         ])
 
 
@@ -469,6 +469,41 @@ class RestCheckTests(unittest.TestCase):
         self.assertEqual(found.unfinished_runs, (
             UnfinishedRun(7, "in_progress"), UnfinishedRun(9, "queued"),
         ))
+
+    def test_a_run_completing_between_the_requests_never_reads_passed(
+        self,
+    ) -> None:
+        # The dependent job is created and fails, and its run completes,
+        # after the first `after` requests of one read (#169, REV-1).
+        first = {
+            "id": 3, "name": "first", "status": "completed",
+            "conclusion": "success", "check_suite": {"id": 1},
+            "app": {"slug": "github-actions"}, "html_url": None,
+            "started_at": None, "completed_at": None,
+        }
+        dependent = dict(first, id=4, name="dependent", conclusion="failure")
+        for after, expected in (
+            (0, "failed"), (1, "failed"), (2, "pending"), (3, "pending"),
+        ):
+            seen = []
+
+            def api(endpoint: str) -> dict:
+                seen.append(endpoint)
+                done = len(seen) > after
+                if "actions/runs" in endpoint:
+                    return {"workflow_runs": [rest_run(
+                        5, "completed" if done else "in_progress")]}
+                if "check-runs" in endpoint:
+                    return {"check_runs": (
+                        [first, dependent] if done else [first])}
+                return {"state": "pending", "statuses": []}
+
+            with self.subTest(after=after), \
+                    patch.object(self.forge, "graphql",
+                                 side_effect=ForgeError("GraphQL failed")), \
+                    patch.object(self.forge, "api", side_effect=api):
+                self.assertEqual(
+                    summarize_checks(self.forge.checks(H)), expected)
 
     def test_an_unreadable_run_fails_the_read(self) -> None:
         for run in (
