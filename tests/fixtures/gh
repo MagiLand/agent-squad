@@ -310,14 +310,39 @@ def latest_statuses(statuses):
     return list(latest.values())
 
 
+def workflow_runs(recorded):
+    """The recorded workflow runs as REST lists them (#169). A run without
+    "id" or "status" is completed, and its ID follows from its suite, so
+    the REST and GraphQL reads agree and older fixtures are unchanged."""
+    return [{"id": 5000 + w["check_suite_id"], "status": "completed", **w}
+            for w in recorded.get("workflow_runs", [])]
+
+
+def selected(field):
+    """Whether the GraphQL query selects a new check-suite field (#169):
+    "status" of each suite or "databaseId" of its workflow run."""
+    query = (payload or {}).get("query", "")
+    return {
+        "status": "{ nodes { id status app { slug }",
+        "databaseId": "workflowRun { databaseId ",
+    }[field] in query
+
+
 def commit_lists(sha, advance=False):
+    # A commit's suites are those of its check runs, of its workflow runs,
+    # and model["checks"][sha]["check_suites"]: {"id", "status", "app"} for
+    # a suite without check runs or workflow run, such as another app's
+    # queued suite (#169). A workflow run's suite has its run's status;
+    # another suite is completed unless recorded otherwise.
     recorded = recorded_checks(sha, advance)
-    events = {w["check_suite_id"]: w["event"]
-              for w in recorded.get("workflow_runs", [])}
+    workflows = {w["check_suite_id"]: w for w in workflow_runs(recorded)}
+    extra = {s["id"]: s for s in recorded.get("check_suites", [])}
     runs = latest_runs(recorded.get("check_runs", []))
     suites = {}
+    apps = {}
     for index, run in enumerate(runs):
         suite = run.get("check_suite", {}).get("id")
+        apps.setdefault(suite, run.get("app"))
         suites.setdefault(suite, []).append({
             # GitHub lists check runs newest first; number them so.
             "databaseId": run.get("id", len(runs) - index),
@@ -328,19 +353,36 @@ def commit_lists(sha, advance=False):
             "startedAt": run.get("started_at"),
             "completedAt": run.get("completed_at"),
         })
+    for suite in workflows:
+        suites.setdefault(suite, [])
+        apps.setdefault(suite, {"slug": "github-actions"})
+    for suite, record in extra.items():
+        suites.setdefault(suite, [])
+        apps.setdefault(suite, record.get("app"))
+
+    def suite_node(suite, nodes):
+        node = {"id": f"CS-{sha}-{suite}"}
+        if selected("status"):
+            node["status"] = (
+                workflows[suite]["status"] if suite in workflows
+                else extra.get(suite, {}).get("status", "completed")
+            ).upper()
+        workflow = workflows.get(suite)
+        node["app"] = apps[suite]
+        node["workflowRun"] = None if workflow is None else {
+            **({"databaseId": workflow["id"]}
+               if selected("databaseId") else {}),
+            "event": workflow["event"],
+        }
+        node["checkRuns"] = gql_page(nodes, "CheckSuite.checkRuns")
+        return node
+
     rows = latest_statuses(recorded.get("statuses", []))
     return {
-        "checkSuites": [
-            {
-                "id": f"CS-{sha}-{suite}",
-                "app": next(r.get("app") for r in runs
-                            if r.get("check_suite", {}).get("id") == suite),
-                "workflowRun": (
-                    {"event": events[suite]} if suite in events else None
-                ),
-                "checkRuns": gql_page(nodes, "CheckSuite.checkRuns"),
-            }
-            for suite, nodes in suites.items()
+        # settings["null_check_suite"] lists the suites as [null] with no
+        # error, as GitHub answered 6.5 seconds after a push (#169).
+        "checkSuites": [None] if settings.get("null_check_suite") else [
+            suite_node(suite, nodes) for suite, nodes in suites.items()
         ],
         "suites": suites,
         "status": {"contexts": [
@@ -536,6 +578,15 @@ if endpoint == "graphql":
                 repository["head"] = None
                 graphql_errors({"repository": repository},
                                checks_refused("head"))
+            # settings["checks_graphql_fails"] also fails the head part,
+            # so that `status` reads its checks by REST (#169).
+            if settings.get("checks_graphql_fails"):
+                repository["head"] = None
+                graphql_errors({"repository": repository}, [{
+                    "type": "INTERNAL", "path": ["repository", "head"],
+                    "message": "Something went wrong while executing your"
+                    " query.",
+                }])
             # The PR's head ref names its current head commit.
             repository["head"] = gql_commit(pr["head"]["sha"])
         output({"data": {"repository": repository}})
@@ -730,7 +781,7 @@ if (kind == "commits" and parts[5:] in (["check-runs"], ["status"])) or (
     first = query.get("page", ["1"])[0] == "1"
     recorded = recorded_checks(sha, parts[5:] == ["check-runs"] and first)
     if kind == "actions":
-        runs = recorded.get("workflow_runs", [])
+        runs = workflow_runs(recorded)
         output({"total_count": len(runs), "workflow_runs": paged(runs, query)})
     if parts[5] == "check-runs":
         runs = recorded.get("check_runs", [])

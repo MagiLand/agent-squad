@@ -1643,7 +1643,7 @@ class GitHubSnapshotReadTests(unittest.TestCase):
         self.assertEqual(
             [len(baseline.reviews), len(baseline.comments),
              len(baseline.threads), len(baseline.conversation),
-             len(baseline.head_checks)],
+             len(baseline.head_checks.checks)],
             [2, 4, 2, 2, 3],
         )
         for sizes in [{key: 1} for key in SNAPSHOT_LISTS] + [

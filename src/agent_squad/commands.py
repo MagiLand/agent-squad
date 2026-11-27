@@ -43,6 +43,7 @@ from .conventions import (
 from .forge import (
     Check,
     ChecksUnavailable,
+    CommitChecks,
     ForgeError,
     Forge,
     IssueQuery,
@@ -180,44 +181,46 @@ def state_for(
     return {**state, "paths": workflow_paths(repository, pr=pr.number)}
 
 
-def summarize_checks(checks: tuple[Check, ...]) -> str:
-    """One CI summary: any failed row wins, then any pending row (#145)."""
-    if not checks:
-        return "none"
-    results = {check.result for check in checks}
-    return next(
-        (s for s in ("failed", "pending") if s in results), "passed"
-    )
+def summarize_checks(found: CommitChecks) -> str:
+    """One CI summary: any failed row wins, then any pending row or
+    unfinished workflow run (#145, #169), then no rows at all."""
+    results = {check.result for check in found.checks}
+    if "failed" in results:
+        return "failed"
+    if "pending" in results or found.unfinished_runs:
+        return "pending"
+    return "passed" if found.checks else "none"
 
 
 def ci_record(
-    forge: Forge, head: str, checks: tuple[Check, ...] | None = None,
+    forge: Forge, head: str, found: CommitChecks | None = None,
 ) -> dict:
     """Read and classify the checks at ``head``; never a gate (§7.9).
 
-    ``checks`` are the checks at ``head`` when the snapshot already read
-    them (#149). The result is derived on every read and never stored (§3).
+    ``found`` is what the snapshot already read at ``head`` (#149). The
+    result is derived on every read and never stored (§3).
     """
-    return read_checks(forge, head, checks)[0]
+    return read_checks(forge, head, found)[0]
 
 
 def read_checks(
-    forge: Forge, head: str, checks: tuple[Check, ...] | None = None,
+    forge: Forge, head: str, found: CommitChecks | None = None,
 ) -> tuple[dict, tuple[Check, ...]]:
     """``ci_record`` together with the checks it was built from (#176)."""
     try:
-        if checks is None:
-            checks = forge.checks(head)
+        if found is None:
+            found = forge.checks(head)
     except ChecksUnavailable as error:
         return {
             "head": head, "summary": "unavailable", "reason": str(error),
-            "checks": [],
+            "checks": [], "unfinished_runs": [],
         }, ()
     return {
         "head": head,
-        "summary": summarize_checks(checks),
-        "checks": [check.record() for check in checks],
-    }, checks
+        "summary": summarize_checks(found),
+        "checks": [check.record() for check in found.checks],
+        "unfinished_runs": [run.record() for run in found.unfinished_runs],
+    }, found.checks
 
 
 def merged_commit(pr: PullRequest) -> str:

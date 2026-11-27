@@ -154,7 +154,7 @@ class Snapshot:
     protects_pending_drafts: bool = False
     # The checks at pr.head when the adapter read them in the same read
     # (#149); null when it did not and ``checks`` must read them.
-    head_checks: tuple[Check, ...] | None = None
+    head_checks: CommitChecks | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +211,32 @@ class Check:
         row = asdict(self)
         del row["check_run"], row["check_run_id"]
         return row
+
+
+@dataclass(frozen=True)
+class UnfinishedRun:
+    """A GitHub Actions workflow run at the commit that has not completed.
+
+    GitHub creates a job behind ``needs`` only when the jobs it needs have
+    finished, so its check run is missing until then (#169).
+    """
+
+    id: int
+    status: str
+
+    def record(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CommitChecks:
+    """What one checks read found at a commit (§11.0).
+
+    ``unfinished_runs`` is ordered by ID; Forgejo never reports one.
+    """
+
+    checks: tuple[Check, ...]
+    unfinished_runs: tuple[UnfinishedRun, ...] = ()
 
 
 class ChecksUnavailable(ForgeError):
@@ -511,7 +537,7 @@ class Forge(Protocol):
         ...
 
     def branch_rules(self, branch: str) -> dict[str, object]: ...
-    def checks(self, sha: str) -> tuple[Check, ...]: ...
+    def checks(self, sha: str) -> CommitChecks: ...
     def job_log(self, check: Check, sha: str) -> JobLog: ...
     def branch_head(self, branch: str) -> str | None: ...
     def delete_branch(self, branch: str, expected_head: str) -> None: ...

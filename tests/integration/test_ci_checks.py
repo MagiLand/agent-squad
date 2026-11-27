@@ -54,6 +54,15 @@ def commit_status(context: str, state: str, creator: str = "ci-bot") -> dict:
     }
 
 
+def workflow_run(
+    ident: int, status: str = "completed", *, suite: int = 1,
+    event: str = "push",
+) -> dict:
+    """One GitHub workflow run as the actions/runs read lists it (#169)."""
+    return {"id": ident, "check_suite_id": suite, "event": event,
+            "status": status}
+
+
 def forgejo_status(
     context: str, status: str, creator: str | None = None
 ) -> dict:
@@ -131,15 +140,17 @@ class CheckFixtureMixin:
         return self.checks("--merge-commit", *args, expected=expected,
                            cwd=self.f.repo)
 
-    def wait_on_clock(self, limit: int) -> tuple[dict, list[float]]:
-        """Run the merge-commit wait in process on a virtual clock."""
+    def wait_on_clock(
+        self, limit: int, *, merge_commit: bool = True,
+    ) -> tuple[dict, list[float]]:
+        """Run the wait in process on a virtual clock."""
         clock = FakeClock()
         with patch.dict(os.environ, self.f.env, clear=True):
             repository = load_initialized_repository(self.f.repo)
             with patch("agent_squad.commands.time", clock):
                 result = pr_checks(
                     make_forge(repository, "implementer"), 1, limit,
-                    merge_commit=True,
+                    merge_commit=merge_commit,
                 )
         return result, clock.sleeps
 
@@ -153,8 +164,40 @@ class CheckFixtureMixin:
         ci = self.ci()
         self.assertEqual(ci, {
             "head": self.head, "summary": "none", "checks": [],
+            "unfinished_runs": [],
         })
         self.assertEqual(self.checks(), ci)
+
+    def test_every_record_carries_its_unfinished_runs(self) -> None:
+        # #169: an empty list when every run has completed, on Forgejo
+        # always; nothing else in the record changes.
+        for name, checks in (
+            ("passed", self.passing()), ("pending", self.pending()),
+            ("failed", self.failing()), ("none", self.empty()),
+        ):
+            with self.subTest(summary=name):
+                self.seed(checks)
+                self.seed(checks, MERGE_COMMIT)
+                records = [self.ci(), self.checks(),
+                           self.checks("--wait", "1")]
+                for record in records:
+                    self.assertEqual(record["summary"], name)
+                    self.assertEqual(record["unfinished_runs"], [])
+                self.assertEqual(set(records[0]),
+                                 {"head", "summary", "checks",
+                                  "unfinished_runs"})
+                self.assertEqual(records[1], records[0])
+        self.close_pr()
+        merged = self.at_merge_commit()
+        self.assertEqual((merged["summary"], merged["unfinished_runs"]),
+                         ("none", []))
+        self.f.settings(checks_denied=["developer"])
+        refused = self.checks("--as", "implementer")
+        self.assertEqual(
+            (refused["summary"], refused["checks"],
+             refused["unfinished_runs"]),
+            ("unavailable", [], []),
+        )
 
     def test_new_head_is_the_head_reported(self) -> None:
         self.seed(self.passing())
@@ -521,6 +564,151 @@ class GitHubCheckTests(CheckFixtureMixin, unittest.TestCase):
              ("test", "pull_request", "passed"),
              ("test", "push", "failed")],
         )
+
+    # #169: GitHub creates a job behind `needs` only when the jobs it needs
+    # have finished, so finished rows alone do not mean a finished run.
+    READS = ("graphql", "rest")
+
+    @staticmethod
+    def unfinished(status: str = "in_progress") -> dict:
+        """Every check run finished while their workflow run is not."""
+        return {"check_runs": [check_run("first"), check_run("second")],
+                "workflow_runs": [workflow_run(4242, status)]}
+
+    def read_by(self, read: str) -> None:
+        self.f.settings(checks_graphql_fails=read == "rest")
+
+    def run_list_reads(self) -> list:
+        return [c for c in self.f.read_model()["calls"]
+                if c["arguments"][:1] == ["api"]
+                and "/actions/runs?" in c["arguments"][1]]
+
+    def test_finished_rows_of_an_unfinished_run_are_pending(self) -> None:
+        for read in self.READS:
+            with self.subTest(read=read):
+                self.read_by(read)
+                self.seed(self.unfinished())
+                start = len(self.run_list_reads())
+                for command, record in (("status", self.ci()),
+                                        ("pr checks", self.checks())):
+                    with self.subTest(command=command):
+                        self.assertEqual(record["summary"], "pending")
+                        self.assertEqual(record["unfinished_runs"],
+                                         [{"id": 4242,
+                                           "status": "in_progress"}])
+                        self.assertEqual(
+                            [c["result"] for c in record["checks"]],
+                            ["passed", "passed"],
+                        )
+                # Only the REST read lists the workflow runs.
+                self.assertEqual(len(self.run_list_reads()) > start,
+                                 read == "rest")
+
+    def test_unfinished_run_at_the_merge_commit_is_pending(self) -> None:
+        self.close_pr()
+        for read in self.READS:
+            with self.subTest(read=read):
+                self.read_by(read)
+                self.seed(self.unfinished("queued"), MERGE_COMMIT)
+                result = self.at_merge_commit()
+                self.assertEqual((result["head"], result["summary"]),
+                                 (MERGE_COMMIT, "pending"))
+                self.assertEqual(result["unfinished_runs"],
+                                 [{"id": 4242, "status": "queued"}])
+
+    def test_wait_ends_passed_only_once_the_run_completes(self) -> None:
+        stages = (
+            self.unfinished(),
+            # The job behind `needs` exists now, queued.
+            {"check_runs": [check_run("first"), check_run("second"),
+                            check_run("third", None, status="queued")],
+             "workflow_runs": [workflow_run(4242, "in_progress")]},
+            {"check_runs": [check_run("first"), check_run("second"),
+                            check_run("third")],
+             "workflow_runs": [workflow_run(4242)]},
+        )
+        for read in self.READS:
+            for merge_commit in (False, True):
+                with self.subTest(read=read, merge_commit=merge_commit):
+                    self.read_by(read)
+                    if merge_commit:
+                        self.close_pr()
+                    self.sequence(*stages,
+                                  sha=MERGE_COMMIT if merge_commit else None)
+                    result, sleeps = self.wait_on_clock(
+                        60, merge_commit=merge_commit)
+                    self.assertEqual(
+                        (result["summary"], len(result["checks"]), sleeps),
+                        ("passed", 3, [10, 10]),
+                    )
+                    self.assertEqual(result["unfinished_runs"], [])
+                    self.assertEqual(result["waited_seconds"], 20)
+                    self.assertFalse(result["timed_out"])
+
+    def test_failed_row_of_an_unfinished_run_is_failed(self) -> None:
+        for read in self.READS:
+            with self.subTest(read=read):
+                self.read_by(read)
+                checks = self.unfinished()
+                checks["check_runs"][0] = check_run("first", "failure")
+                self.seed(checks)
+                for record in (self.ci(), self.checks()):
+                    self.assertEqual(record["summary"], "failed")
+                    self.assertEqual(record["unfinished_runs"],
+                                     [{"id": 4242, "status": "in_progress"}])
+
+    def test_queued_suite_without_a_workflow_run_is_not_pending(self) -> None:
+        # Other apps' suites stayed QUEUED for 25 to 40 minutes on public
+        # default-branch heads: one without check runs, one with them.
+        azure = dict(check_run("azure", suite=8),
+                     app={"slug": "azure-pipelines"})
+        suites = [{"id": 9, "status": "queued", "app": {"slug": "codecov"}},
+                  {"id": 8, "status": "queued",
+                   "app": {"slug": "azure-pipelines"}}]
+        self.seed({"check_runs": [check_run("test"), azure],
+                   "check_suites": suites,
+                   "workflow_runs": [workflow_run(4242)]})
+        start = len(self.run_list_reads())
+        for record in (self.ci(), self.checks()):
+            self.assertEqual((record["summary"], record["unfinished_runs"]),
+                             ("passed", []))
+        self.assertEqual(self.run_list_reads()[start:], [])
+        # The same queued suite with a workflow run is unfinished.
+        self.seed({"check_runs": [check_run("test"), azure],
+                   "check_suites": suites,
+                   "workflow_runs": [workflow_run(4242),
+                                     workflow_run(4343, "queued", suite=9)]})
+        self.assertEqual(self.ci()["unfinished_runs"],
+                         [{"id": 4343, "status": "queued"}])
+
+    def test_null_suite_is_read_by_rest_without_an_error(self) -> None:
+        self.f.settings(null_check_suite=True)
+        self.seed(self.unfinished())
+        for command, read in (("status", self.ci), ("pr checks", self.checks)):
+            with self.subTest(command=command):
+                start = len(self.run_list_reads())
+                record = read()
+                self.assertEqual(record["summary"], "pending")
+                self.assertEqual(record["unfinished_runs"],
+                                 [{"id": 4242, "status": "in_progress"}])
+                self.assertEqual(len(record["checks"]), 2)
+                self.assertEqual(len(self.run_list_reads()) - start, 1)
+
+    def test_plain_text_names_the_unfinished_runs(self) -> None:
+        command = [sys.executable, "-m", "agent_squad", "pr", "checks",
+                   "--pr", "1"]
+        checks = self.unfinished()
+        checks["workflow_runs"].append(workflow_run(17, "queued", suite=2))
+        self.seed(checks)
+        result = self.f.run(command, cwd=self.f.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[:2], [
+            f"CI pending: 2 checks at {self.head}",
+            "Workflow runs not completed: 17 (queued), 4242 (in_progress)",
+        ])
+        self.seed(self.passing())
+        result = self.f.run(command, cwd=self.f.repo)
+        self.assertEqual(result.stdout.splitlines()[1], "{")
 
     def test_every_page_is_read(self) -> None:
         self.seed({

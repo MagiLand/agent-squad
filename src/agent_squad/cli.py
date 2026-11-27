@@ -530,6 +530,12 @@ def run(root: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 f'CI {result["summary"]}: {len(result["checks"])} checks at'
                 f' {place}{result["head"]}'
             )
+            if result["unfinished_runs"]:
+                # Forge text: GitHub may add a status value (#169).
+                print("Workflow runs not completed: " + ", ".join(
+                    f'{run["id"]} ({one_line(run["status"])})'
+                    for run in result["unfinished_runs"]
+                ))
             if result.get("head_changed"):
                 print("The PR head changed; stopped waiting.")
             elif result.get("timed_out"):

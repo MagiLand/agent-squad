@@ -29,6 +29,7 @@ from .forge import (
     ChecksUnavailable,
     ClosingPullRequest,
     Comment,
+    CommitChecks,
     DEPENDENCY_REFUSALS,
     Evidence,
     ForgeError,
@@ -1016,12 +1017,14 @@ class Forgejo:
                 return {"visibility": "not visible"}
             raise
 
-    def checks(self, sha: str) -> tuple[Check, ...]:
+    def checks(self, sha: str) -> CommitChecks:
         """Read the latest commit status per context at one commit (#145).
 
         The combined read is paged like a list and read to a page without
         statuses, which is ``statuses: null`` (#168); each page's ``state``
         and ``total_count`` describe that page alone, so neither is read.
+        Forgejo lists a job behind ``needs`` as pending from the start, so
+        no unfinished run is reported (#169).
         """
         try:
             rows = self._all_pages(
@@ -1033,7 +1036,9 @@ class Forgejo:
             raise ChecksUnavailable(
                 f"{error} (HTTP {error.status})", error.status
             ) from None
-        return tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
+        return CommitChecks(
+            tuple(sorted(map(parse_status, rows), key=lambda c: c.name))
+        )
 
     def job_position(
         self, url: str | None, *, status: bool = True,
