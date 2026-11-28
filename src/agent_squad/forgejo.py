@@ -1336,7 +1336,8 @@ class Forgejo:
                 raise ForgeError(f"expected {event}, author, head and body")
         except ForgeError as error:
             raise ForgeError(
-                f"review {review_id} published; read-back failed: {error}"
+                f"review {review_id} published; read-back failed: {error}",
+                written=True,
             ) from None
         return review
 
@@ -1417,9 +1418,13 @@ class Forgejo:
                 },
             ), "posted reply")
             reply_id = positive(written.get("id"), "reply ID")
-            comments, _ = parse_comments(
-                self._review_comments(number, review_id), review_id,
-            )
+            try:
+                comments, _ = parse_comments(
+                    self._review_comments(number, review_id), review_id,
+                )
+            except ForgeError as error:
+                error.written = True  # The same message, now marked.
+                raise
             reply = next(
                 (c for c in comments if c.evidence.id == reply_id), None,
             )
@@ -1428,7 +1433,9 @@ class Forgejo:
                 or reply.evidence.author.casefold() != self.account.casefold()
                 or reply.evidence.body != body.replace("\r\n", "\n")
             ):
-                raise ForgeError(f"reply {reply_id} read-back mismatch")
+                raise ForgeError(
+                    f"reply {reply_id} read-back mismatch", written=True
+                )
             return reply
         raise ForgeError(f"finding root {root} is missing")
 

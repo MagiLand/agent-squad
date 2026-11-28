@@ -493,6 +493,19 @@ class StoreTests(unittest.TestCase):
             # A missing value.
             ("claude", ("--model",), None, None),
             ("codex", ("-c",), None, None),
+            # After the separator every argument is positional (REV-1).
+            ("claude", ("--", "--model", "opus", "--effort=high"),
+             None, None),
+            ("codex", ("--", "-m", "o3", "-c", "model=o3", "--config",
+                       "model_reasoning_effort=high"), None, None),
+            ("claude", ("--model", "opus", "--effort", "high", "--",
+                        "--model=other", "--effort", "low"), "opus", "high"),
+            ("codex", ("-m", "o3", "--", "-m", "o4"), "o3", None),
+            # The separator ends the options even where a value was due.
+            ("claude", ("--model", "--", "opus"), None, None),
+            ("codex", ("-c", "--", "model=o3"), None, None),
+            ("codex", ("--config", "--", "model_reasoning_effort=high"),
+             None, None),
         ):
             if model == "x":  # Only the effort is repeated here.
                 arguments = (*arguments, "--model", "x")

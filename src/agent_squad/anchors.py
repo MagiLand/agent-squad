@@ -43,7 +43,12 @@ def unquote_path(value: str) -> str:
     return raw.decode("utf-8")
 
 
-def parse_diff(diff: str) -> dict[str, set[int]]:
+def parse_diff(diff: str, added_only: bool = False) -> dict[str, set[int]]:
+    """Map each head-side path to its right-side lines.
+
+    With ``added_only``, only ``+`` lines count: context lines, including
+    any that ``diff.interHunkContext`` adds between hunks, do not.
+    """
     result: dict[str, set[int]] = {}
     path = None
     line_number = 0
@@ -54,7 +59,9 @@ def parse_diff(diff: str) -> dict[str, set[int]]:
             remaining = 0
         elif remaining:
             if line.startswith((" ", "+")):
-                if path is not None:
+                if path is not None and (
+                    not added_only or line.startswith("+")
+                ):
                     result[path].add(line_number)
                 line_number += 1
                 remaining -= 1
@@ -77,7 +84,7 @@ def parse_diff(diff: str) -> dict[str, set[int]]:
 
 
 def right_side_lines(
-    root: Path, base: str, head: str, context: int
+    root: Path, base: str, head: str, context: int, added_only: bool = False
 ) -> dict[str, set[int]]:
     return parse_diff(
         git_output(
@@ -95,7 +102,8 @@ def right_side_lines(
             base,
             head,
             "--",
-        )
+        ),
+        added_only,
     )
 
 
@@ -104,21 +112,29 @@ def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
 
 
 def changed_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
-    """Lines added or changed on the head side: the diff without context."""
-    return right_side_lines(root, base, head, 0)
+    """Lines added or changed on the head side, without any context."""
+    return right_side_lines(root, base, head, 0, added_only=True)
 
 
 def changed_line_count(root: Path, base: str, head: str) -> int:
     """Added plus deleted lines, as the anchor diff finds renames.
 
     ``--numstat`` reports a binary file as ``-`` twice, which counts 0.
+    With ``-z`` each record ends at a NUL, so no character a path may hold
+    splits one (REV-3); a rename's record has an empty path followed by
+    its source and destination.
     """
-    total = 0
-    for row in git_output(
+    fields = iter(git_output(
         root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
-        "--numstat", "--find-renames", base, head, "--",
-    ).splitlines():
-        added, deleted, _ = row.split("\t", 2)
+        "--numstat", "-z", "--find-renames", base, head, "--",
+    ).split("\0"))
+    total = 0
+    for record in fields:
+        if not record:
+            continue  # The empty field after the final NUL.
+        added, deleted, path = record.split("\t", 2)
+        if not path:
+            next(fields), next(fields)
         total += sum(int(count) for count in (added, deleted) if count != "-")
     return total
 

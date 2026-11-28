@@ -12,9 +12,12 @@ import sys
 import unittest
 
 from tests.forge_support import (
-    TASK, ForgeFixture, ForgejoFixture, finding,
+    REVIEW, TASK, ForgeFixture, ForgejoFixture, finding,
 )
+from agent_squad import commands, events
+from agent_squad.anchors import changed_line_count, changed_lines
 from agent_squad.cli import parser
+from agent_squad.initialization import AgentSquadError
 from agent_squad.events import FIELDS, OUTCOME_FIELDS, subcommands
 from agent_squad.skills import packaged_skill
 
@@ -557,6 +560,158 @@ class GitHubOutcomeTests(OutcomeTests, unittest.TestCase):
                          start_state="working")
         f.cli("reviewer", "launch", "--pr", "1", expected=1)
         self.assertIsNone(self.last("reviewer", "launch", 1))
+
+    def test_a_submitted_draft_counts_toward_the_pass(self) -> None:
+        f = self.f
+        model = f.read_model()
+        # A stranded tagged draft that review post submits first (REV-2).
+        model["prs"]["1"]["reviews"].append({
+            "id": 50, "user": {"login": "reviewer"}, "commit_id": self.head,
+            "state": "PENDING", "submitted_at": None,
+            "body": f"AGENT_SQUAD/0.5.0 REVIEW pr=1 head={self.head}"
+                    f" base={f.base} verdict=needs_human\n\n{REVIEW}",
+        })
+        f.save_model(model)
+        f.review("approved")
+        outcome = self.last("review", "post")
+        self.assertEqual(len(f.status()["reviews"]), 2)
+        self.assertEqual(
+            (outcome["pass"], outcome["diff_lines_since_previous"],
+             outcome["findings_on_changed_lines"]), (2, 0, 0))
+
+    def test_a_resumed_review_keeps_its_published_anchors(self) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        self.push_lines("value = 1", "second = 2", "third = 30")
+        f.review("changes_requested", [finding(title="Kept", line=2)])
+        self.assertEqual(
+            self.last("review", "post")["findings_on_changed_lines"], 0)
+        ident = f.status()["reviews"][1]["id"]
+        # The same title and severity at a changed line: the published root
+        # on unchanged line 2 still decides.
+        f.review("changes_requested", [finding(title="Kept", line=3)],
+                 resume=ident)
+        outcome = self.last("review", "post")
+        self.assertEqual(f.status()["findings"][1]["anchor"]["line"], 2)
+        self.assertEqual(
+            (outcome["resumed"], outcome["pass"],
+             outcome["findings_on_changed_lines"]), (True, 2, 0))
+
+    def test_git_settings_do_not_change_the_measures(self) -> None:
+        f = self.f
+        # Valid repository settings that change Git's diff output (REV-3).
+        f.git("config", "diff.interHunkContext", "1")
+        f.git("config", "core.quotePath", "false")
+        (f.worktree / "notes.txt").write_text("".join(
+            f"note {n}\n" for n in range(5)))
+        f.git("add", "notes.txt", cwd=f.worktree)
+        f.git("commit", "-m", "test: add notes", cwd=f.worktree)
+        f.git("push", "origin", "HEAD", cwd=f.worktree)
+        first = f.git("rev-parse", "HEAD", cwd=f.worktree)
+        f.review("changes_requested", [finding()])
+        # Lines 1 and 3 change around an unchanged line 2; a file whose name
+        # holds U+2028 is added; notes.txt is renamed unchanged.
+        (f.worktree / "example.py").write_text(
+            "value = 10\nsecond = 2\nthird = 30\n")
+        (f.worktree / "a\u2028b.txt").write_text("one line\n")
+        f.git("mv", "notes.txt", "moved.txt", cwd=f.worktree)
+        f.git("add", "-A", cwd=f.worktree)
+        f.git("commit", "-m", "test: edit around line 2", cwd=f.worktree)
+        f.git("push", "origin", "HEAD", cwd=f.worktree)
+        f.review("changes_requested", [finding(title="Between", line=2)])
+        outcome = self.last("review", "post")
+        self.assertEqual(
+            (outcome["diff_lines"], outcome["diff_lines_since_previous"],
+             outcome["findings_on_changed_lines"]), (10, 5, 0))
+        head = f.git("rev-parse", "HEAD", cwd=f.worktree)
+        self.assertEqual(
+            changed_lines(f.repo, first, head)["example.py"], {1, 3})
+        self.assertEqual(changed_line_count(f.repo, first, head), 5)
+
+    def test_a_git_error_is_no_ancestry_answer(self) -> None:
+        f = self.f
+        inputs = commands.load_threads([finding()])
+        absent = "0" * 40
+        for previous, expected in ((absent, None), (f.base, 2)):
+            compute = commands.review_outcome(
+                f.repo, f.base, self.head, "changes_requested", inputs,
+                ["REV-1"], [{"id": 1, "head": previous}], 1, False,
+                {"id": None, "state": None},
+            )
+            with self.subTest(previous=previous):
+                if expected is None:
+                    # merge-base exits 128 for a missing object (REV-3).
+                    with self.assertRaises(AgentSquadError):
+                        compute()
+                    events.forget()
+                    events.outcome(compute)
+                    self.assertIsNone(
+                        events.computed_outcome("review", "post"))
+                    events.forget()
+                else:
+                    self.assertEqual(
+                        compute()["diff_lines_since_previous"], expected)
+        # A head that is not an ancestor: null fields in a valid outcome.
+        unrelated = f.git("commit-tree", "-m", "x", "-p", f.base,
+                          f.git("rev-parse", f.base + "^{tree}"))
+        outcome = commands.review_outcome(
+            f.repo, f.base, self.head, "changes_requested", inputs,
+            ["REV-1"], [{"id": 1, "head": unrelated}], 1, False,
+            {"id": None, "state": None},
+        )()
+        self.assertEqual(
+            (outcome["pass"], outcome["diff_lines_since_previous"]),
+            (2, None))
+
+
+class ForgejoRecoveryOutcomeTests(OutcomeTests, unittest.TestCase):
+    """Forgejo's refusals and read-backs (REV-4, REV-5)."""
+
+    fixture = ForgejoFixture
+    # The scenarios of OutcomeTests run in ForgejoOutcomeTests.
+    test_each_command_records_its_outcome = None
+
+    def test_a_refused_resumption_records_no_outcome(self) -> None:
+        f = self.f
+        f.review("approved")
+        ident = f.status()["reviews"][0]["id"]
+        f.settings(pending_draft=True)
+        error = f.review("approved", resume=ident, expected=4)
+        self.assertIn("pending_draft", error["error"])
+        self.assertIsNone(self.last("review", "post", 4))
+
+    def test_a_confirmed_write_whose_read_back_fails(self) -> None:
+        f = self.f
+        f.settings(fail_read_after_write=True)
+        error = f.review("changes_requested", [finding()], expected=1)
+        self.assertIn("published; read-back failed", error["error"])
+        self.assertEqual(self.last("review", "post", 1), {
+            "verdict": "changes_requested", "blocking": 1, "optional": 0,
+            "pass": 1, "resumed": False, "diff_lines": 2,
+            "diff_lines_since_previous": None,
+            "findings_on_changed_lines": None,
+        })
+        f.settings(fail_read_after_write=False, fail_next_read=False)
+        ident = f.status()["reviews"][0]["id"]
+        f.review("changes_requested", [finding()], resume=ident)
+        self.assertTrue(self.last("review", "post")["resumed"])
+        f.settings(fail_read_after_write=True)
+        error = f.reply("REV-1", "Scripted reply prose.",
+                        disposition="rejected", expected=1)
+        self.assertIn("injected read-back failure", error["error"])
+        self.assertEqual(self.last("thread", "reply", 1), {
+            "disposition": "rejected", "verification": None,
+            "rejection": None,
+        })
+        f.settings(fail_read_after_write=False, fail_next_read=False)
+        self.assertEqual(
+            len(f.status()["findings"][0]["replies"]), 1)
+
+    def test_an_unconfirmed_write_records_no_outcome(self) -> None:
+        f = self.f
+        f.settings(interrupt_after_body=True)
+        f.review("approved", expected=1)
+        self.assertIsNone(self.last("review", "post", 1))
 
 
 class GitHubLaunchFormTests(unittest.TestCase):

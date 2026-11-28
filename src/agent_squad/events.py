@@ -119,14 +119,17 @@ def named_setting(
 ) -> str | None:
     """Read a model or effort level from the Reviewer's start arguments.
 
-    Only the documented forms count. A setting named in none of them, or
-    more than once, or whose value fails ``SETTING_VALUE``, is None; a
-    profile or settings file is never read.
+    Only the documented forms count, and only before ``--``: what follows
+    it is positional, such as a prompt (REV-1). A setting named in none of
+    them, or more than once, or whose value fails ``SETTING_VALUE``, is
+    None; a profile or settings file is never read.
     """
     options = SETTING_OPTIONS.get(kind, {}).get(setting, ())
     config = CONFIG_KEYS[setting] + "=" if kind == "codex" else None
     values: list[str | None] = []
-    tokens = iter(start_args)
+    # The separator ends the options, even where a value was due.
+    tokens = iter(start_args[:list(start_args).index("--")]
+                  if "--" in start_args else start_args)
     for token in tokens:
         if config is not None and token in ("-c", "--config"):
             item = next(tokens, None)

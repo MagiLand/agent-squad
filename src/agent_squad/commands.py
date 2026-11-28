@@ -887,39 +887,85 @@ def compose_review(
     return body
 
 
+def strictly_ancestor(root: Path, earlier: str, later: str) -> bool:
+    """Like ``is_ancestor``, but a Git error is an error, not a no (REV-3)."""
+    code = run_git(
+        root, "merge-base", "--is-ancestor", earlier, later
+    ).returncode
+    if code not in (0, 1):
+        raise AgentSquadError(f"git merge-base failed with exit {code}")
+    return code == 0
+
+
 def review_outcome(
     root: Path,
     base: str,
     head: str,
-    previous: str | None,
     verdict: str,
     inputs: list[FindingInput],
+    ids: list[str],
+    earlier: list[dict],
     position: int,
     resumed: bool,
+    published: dict,
 ) -> events.Outcome:
-    """Describe a published review; the diffs run only when recorded."""
+    """Describe a published review; the diffs run only when recorded.
+
+    ``earlier`` is the tagged reviews read before publication and
+    ``position`` this review's index among them. ``published`` gains the
+    review's ``id`` and the ``state`` read after publication as the command
+    proceeds. That read, when it happened, decides the pass, the previous
+    reviewed head, and the anchor of each root already published (REV-2);
+    without it the earlier reviews and the given anchors stand.
+    """
     def compute() -> dict[str, object]:
+        reviews = earlier
+        anchors = [item.anchor for item in inputs]
+        current = published.get("state")
+        if current is not None:
+            found = [
+                index for index, review in enumerate(current["reviews"])
+                if review["id"] == published["id"]
+            ]
+            if found:
+                reviews, at = current["reviews"], found[0]
+            else:
+                at = position
+            roots = {
+                f["finding"]: f["anchor"] for f in current["findings"]
+                if f["finding"] in ids and f["root"] is not None
+                and f["anchor"] is not None and f["anchor"]["line"]
+            }
+            anchors = [
+                Anchor(
+                    roots[fid]["path"], roots[fid]["line"],
+                    roots[fid]["start_line"],
+                ) if fid in roots else anchor
+                for fid, anchor in zip(ids, anchors)
+            ]
+        else:
+            at = position
+        previous = reviews[at - 1]["head"] if at else None
         since = on_changed = None
         if previous == head:
             since = on_changed = 0
-        elif previous is not None and is_ancestor(root, previous, head):
+        elif previous is not None and strictly_ancestor(root, previous, head):
             since = changed_line_count(root, previous, head)
             changed = changed_lines(root, previous, head)
             on_changed = sum(
                 any(
-                    number in changed.get(item.anchor.path, ())
+                    number in changed.get(anchor.path, ())
                     for number in range(
-                        item.anchor.start_line or item.anchor.line,
-                        item.anchor.line + 1,
+                        anchor.start_line or anchor.line, anchor.line + 1,
                     )
                 )
-                for item in inputs
+                for anchor in anchors
             )
         return {
             "verdict": verdict,
             "blocking": sum(i.severity == "blocking" for i in inputs),
             "optional": sum(i.severity == "optional" for i in inputs),
-            "pass": position,
+            "pass": at + 1,
             "resumed": resumed,
             "diff_lines": changed_line_count(root, base, head),
             "diff_lines_since_previous": since,
@@ -997,6 +1043,11 @@ def post_review(
         start = allocate_id(snapshot)
         ids = [f"REV-{start + i}" for i in range(len(inputs))]
     complete_body = header + "\n\n" + compose_review(sections, inputs, ids)
+    published: dict = {"id": None, "state": None}
+    outcome = review_outcome(
+        repository.root, base, head, verdict, inputs, ids,
+        state["reviews"], position, existing is not None, published,
+    )
     if existing is None:
         if verdict == "approved" and (
             any(f.severity == "blocking" for f in inputs)
@@ -1038,23 +1089,27 @@ def post_review(
             + "\n\n".join(comment.body for comment in comments),
             comments, base,
         )
-        review = forge.post_review(number, publication)
+        try:
+            review = forge.post_review(number, publication)
+        except ForgeError as error:
+            if error.written:  # Published, though its read-back failed.
+                events.outcome(outcome)
+            raise
         review_id = review.evidence.id
-    # Published, or found by --resume: the event describes this review
-    # whatever follows, such as a root that cannot be posted.
-    events.outcome(review_outcome(
-        repository.root, base, head,
-        state["reviews"][position - 1]["head"] if position else None,
-        verdict, inputs, position + 1, existing is not None,
-    ))
-    if existing is not None:
+    else:
+        # Forgejo refuses here over a pending draft: no outcome (REV-4).
         forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
         review_id = existing["id"]
+    # Published, or found by --resume: the event describes this review
+    # whatever follows, such as a root that cannot be posted.
+    published["id"] = review_id
+    events.outcome(outcome)
     # Read after publication: partial success is recoverable by this exact
     # review ID.
     current = state_for(repository, forge.snapshot(number))
+    published["state"] = current
     failed = []
     for fid, item in zip(ids, inputs):
         finding = find_finding(current, fid)
@@ -1188,15 +1243,24 @@ def reply_thread(
                 "fixed SHA must name a local commit absent from the finding"
                 " opening head"
             )
-    reply = forge.reply(number, finding["root"]["id"], body)
-    events.outcome(lambda: {
-        "disposition": disposition,
-        "verification": verification,
-        "rejection": (
-            "not-pursued" if not_pursued
-            else "deferred" if deferred_to is not None else None
-        ),
-    })
+
+    def outcome() -> dict[str, object]:
+        return {
+            "disposition": disposition,
+            "verification": verification,
+            "rejection": (
+                "not-pursued" if not_pursued
+                else "deferred" if deferred_to is not None else None
+            ),
+        }
+
+    try:
+        reply = forge.reply(number, finding["root"]["id"], body)
+    except ForgeError as error:
+        if error.written:  # Posted, though its read-back failed.
+            events.outcome(outcome)
+        raise
+    events.outcome(outcome)
     return asdict(reply)
 
 
