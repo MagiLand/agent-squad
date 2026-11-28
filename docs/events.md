@@ -106,7 +106,8 @@ its write:
 
 - `review post`: when the run published the review, or found it with
   `--resume`. This includes a run that published the review and then could
-  not post a thread root (exit code `1`).
+  not post a thread root (exit code `1`). A `--resume` run that the forge
+  refuses over a pending draft (exit code `4`) records none.
 - `thread reply`: when the reply was posted.
 - `decision post`: when the decision was posted, or an identical Task
   amendment was reused. This includes a run that posted the decision and then
@@ -117,9 +118,11 @@ its write:
   `reviewer adopt` (exit code `3`).
 
 A refused run (exit code `4`), a usage error, and a run that fails before its
-write have `outcome: null`, and so does every other command. A run whose
-write cannot be confirmed, such as one interrupted while the forge received
-the review, also has `outcome: null`.
+write have `outcome: null`, and so does every other command. A write counts
+as happened once the forge answered it with the new object's ID, even when
+reading it back then fails (exit code `1`), as Forgejo's review and reply
+read-backs can. A run whose write cannot be confirmed, such as one
+interrupted before the forge answered, has `outcome: null`.
 
 Each outcome has exactly these keys, in this order:
 
@@ -151,27 +154,35 @@ Each outcome has exactly these keys, in this order:
 ### Review measures
 
 - **Previous reviewed head.** The `head` of the latest tagged review before
-  this one, read from the reviews `review post` already reads. For
-  `--resume`, it is the latest one before the resumed review. For
-  `--resume`, `blocking`, `optional`, and `pass` also describe the resumed
-  review.
+  this one, from the reviews `review post` already reads. The read after
+  publication decides, so a stranded draft that the run submitted before
+  publishing counts as an earlier review; when that read fails, the reviews
+  read before publication decide. For `--resume`, it is the latest one
+  before the resumed review. For `--resume`, `blocking`, `optional`, and
+  `pass` also describe the resumed review.
 - **Line counts.** `diff_lines` and `diff_lines_since_previous` sum the
   added and deleted lines of `git diff --numstat` with the rename detection
   that anchor validation uses. A binary file counts `0`.
 - **Findings on changed lines.** A finding counts when at least one of its
   anchored lines is added or changed on the head side of
   `git diff <previous> <head>`. For a finding with `start_line`, that is any
-  line from `start_line` to `line`. This separates findings in fix code from
-  findings in code an earlier pass could have reviewed.
+  line from `start_line` to `line`. A finding whose thread root is already
+  published, as on `--resume`, is counted at that root's anchor. Context
+  lines never count, including those `diff.interHunkContext` adds. This
+  separates findings in fix code from findings in code an earlier pass could
+  have reviewed.
 - **Edge cases.** With no earlier tagged review, or a previous reviewed head
   that is not an ancestor of `head`, `diff_lines_since_previous` and
   `findings_on_changed_lines` are `null`. When the previous reviewed head
-  equals `head`, both are `0`.
+  equals `head`, both are `0`. A Git error, as opposed to a "not an
+  ancestor" answer, makes the whole outcome `null`.
 
 ### Reviewer configuration
 
 `model` and `effort` are read from `reviewer.start_args` only, never from a
-harness configuration file, profile, or environment variable. No other
+harness configuration file, profile, or environment variable, and only from
+the arguments before a `--` separator: what follows it is positional, such
+as a prompt, even where an option before it still lacked its value. No other
 element of `reviewer.start_args` is ever recorded, because it can hold a
 credential.
 
