@@ -544,17 +544,27 @@ class OutcomeTests:
     def test_a_resumed_review_keeps_its_published_anchors(self) -> None:
         f = self.f
         f.review("changes_requested", [finding()])
-        self.push_lines("value = 1", "second = 2", "third = 30")
-        f.review("changes_requested", [finding(title="Kept", line=2)])
+        # Lines 1 to 3 are unchanged, and lines 4 and 5 are added.
+        self.push_lines("value = 1", "second = 2", "third = 3", "fourth = 4",
+                        "fifth = 5")
+        f.review("changes_requested", [
+            finding(title="Kept", line=2),
+            {**finding("optional", "Span", line=3), "start_line": 1},
+        ])
         self.assertEqual(
             self.last("review", "post")["findings_on_changed_lines"], 0)
         ident = f.status()["reviews"][1]["id"]
-        # The same title and severity at a changed line: the published root
-        # on unchanged line 2 still decides.
-        f.review("changes_requested", [finding(title="Kept", line=3)],
-                 resume=ident)
+        # The same titles and severities at changed lines: the published
+        # roots on unchanged lines still decide.
+        f.review("changes_requested", [
+            finding(title="Kept", line=4),
+            {**finding("optional", "Span", line=5), "start_line": 1},
+        ], resume=ident)
         outcome = self.last("review", "post")
-        self.assertEqual(f.status()["findings"][1]["anchor"]["line"], 2)
+        anchors = [f["anchor"] for f in f.status()["findings"][1:]]
+        self.assertEqual(
+            [(a["start_line"], a["line"]) for a in anchors],
+            [(None, 2), (1, 3)])
         self.assertEqual(
             (outcome["resumed"], outcome["pass"],
              outcome["findings_on_changed_lines"]), (True, 2, 0))
@@ -621,10 +631,6 @@ class OutcomeTests:
         self.assertEqual(changed_lines(f.repo, first, head),
                          {"blank.txt": {1, 3}, "cr.txt": {2}})
 
-
-class GitHubOutcomeTests(OutcomeTests, unittest.TestCase):
-    root_failure = {"reject_batch": True}
-
     def test_a_blocked_reviewer_records_its_launch(self) -> None:
         f = self.f
         self.configure_reviewer("codex", ["-m", "gpt-6.2-sol"])
@@ -646,6 +652,46 @@ class GitHubOutcomeTests(OutcomeTests, unittest.TestCase):
                          start_state="working")
         f.cli("reviewer", "launch", "--pr", "1", expected=1)
         self.assertIsNone(self.last("reviewer", "launch", 1))
+
+    def test_a_git_error_is_no_ancestry_answer(self) -> None:
+        f = self.f
+        inputs = commands.load_threads([finding()])
+        absent = "0" * 40
+        for previous, expected in ((absent, None), (f.base, 2)):
+            compute = self.outcome(inputs, previous)
+            with self.subTest(previous=previous):
+                if expected is None:
+                    # merge-base exits 128 for a missing object (REV-3).
+                    with self.assertRaises(AgentSquadError):
+                        compute()
+                    events.forget()
+                    events.outcome(compute)
+                    self.assertIsNone(
+                        events.computed_outcome("review", "post"))
+                    events.forget()
+                else:
+                    self.assertEqual(
+                        compute()["diff_lines_since_previous"], expected)
+        # A head that is not an ancestor: null fields in a valid outcome.
+        unrelated = f.git("commit-tree", "-m", "x", "-p", f.base,
+                          f.git("rev-parse", f.base + "^{tree}"))
+        outcome = self.outcome(inputs, unrelated)()
+        self.assertEqual(
+            (outcome["pass"], outcome["diff_lines_since_previous"]),
+            (2, None))
+
+    def outcome(self, inputs: list, previous: str):
+        """A review outcome after one earlier review at ``previous``."""
+        return commands.review_outcome(
+            self.f.repo, self.f.base, self.head, "changes_requested", inputs,
+            ["REV-1"], False, {"id": None, "submitted": (), "current": None},
+            lambda: {"reviews": [{"id": 1, "head": previous}],
+                     "findings": []},
+        )
+
+
+class GitHubOutcomeTests(OutcomeTests, unittest.TestCase):
+    root_failure = {"reject_batch": True}
 
     def test_a_submitted_draft_counts_toward_the_pass(self) -> None:
         f = self.f
@@ -699,42 +745,6 @@ class GitHubOutcomeTests(OutcomeTests, unittest.TestCase):
             "pass": 3, "resumed": True, "diff_lines": 2,
             "diff_lines_since_previous": 2, "findings_on_changed_lines": 0,
         })
-
-    def test_a_git_error_is_no_ancestry_answer(self) -> None:
-        f = self.f
-        inputs = commands.load_threads([finding()])
-        absent = "0" * 40
-        for previous, expected in ((absent, None), (f.base, 2)):
-            compute = self.outcome(inputs, previous)
-            with self.subTest(previous=previous):
-                if expected is None:
-                    # merge-base exits 128 for a missing object (REV-3).
-                    with self.assertRaises(AgentSquadError):
-                        compute()
-                    events.forget()
-                    events.outcome(compute)
-                    self.assertIsNone(
-                        events.computed_outcome("review", "post"))
-                    events.forget()
-                else:
-                    self.assertEqual(
-                        compute()["diff_lines_since_previous"], expected)
-        # A head that is not an ancestor: null fields in a valid outcome.
-        unrelated = f.git("commit-tree", "-m", "x", "-p", f.base,
-                          f.git("rev-parse", f.base + "^{tree}"))
-        outcome = self.outcome(inputs, unrelated)()
-        self.assertEqual(
-            (outcome["pass"], outcome["diff_lines_since_previous"]),
-            (2, None))
-
-    def outcome(self, inputs: list, previous: str):
-        """A review outcome after one earlier review at ``previous``."""
-        return commands.review_outcome(
-            self.f.repo, self.f.base, self.head, "changes_requested", inputs,
-            ["REV-1"], False, {"id": None, "submitted": (), "current": None},
-            lambda: {"reviews": [{"id": 1, "head": previous}],
-                     "findings": []},
-        )
 
 
 class GitHubLaunchFormTests(unittest.TestCase):
@@ -849,6 +859,16 @@ class ForgejoOutcomeTests(OutcomeTests, unittest.TestCase):
                 model = f.read_model()
                 model["prs"]["1"]["reviews"] = []
                 f.save_model(model)
+
+    def test_a_reply_the_read_back_does_not_show(self) -> None:
+        f = self.f
+        f.review("changes_requested", [finding()])
+        # The read after the POST succeeds without the reply (REV-6).
+        f.settings(drop_root=True)
+        error = f.reply("REV-1", "Scripted reply prose.",
+                        disposition="rejected", expected=1)
+        self.assertIn("read-back mismatch", error["error"])
+        self.assertIsNone(self.last("thread", "reply", 1))
 
 
 class OutcomeSideEffectTests(unittest.TestCase):

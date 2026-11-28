@@ -1325,12 +1325,9 @@ class Forgejo:
         ), "posted review")
         review_id = positive(data.get("id"), "review ID")
 
-        def submitted(value: object) -> Review | None:
+        def submitted(value: object) -> Review:
             """The review ``value`` shows, if it is the one requested."""
-            try:
-                review = parse_review(value)
-            except ForgeError:
-                return None
+            review = parse_review(value)
             if (
                 review is None or review.evidence.id != review_id
                 or review.state != publication.state or review.dismissed
@@ -1339,26 +1336,30 @@ class Forgejo:
                 or review.evidence.body
                 != publication.fallback_body.replace("\r\n", "\n")
             ):
-                return None
+                raise ForgeError(f"expected {event}, author, head and body")
             return review
 
         try:
             value = self.api(f"{endpoint}/{review_id}")
         except ForgeError as error:
-            # Unread: published only if the POST's own answer shows the
+            # Unread: confirmed only by the POST's own answer showing the
             # submitted review (REV-6).
+            try:
+                written = submitted(data) is not None
+            except ForgeError:
+                written = False
             raise ForgeError(
                 f"review {review_id} published; read-back failed: {error}",
-                written=submitted(data) is not None,
+                written=written,
             ) from None
-        review = submitted(value)
-        if review is None:
-            # Read, and not the submitted review, such as a draft (REV-6).
+        try:
+            return submitted(value)
+        except ForgeError as error:
+            # Read, and showing another review, such as a draft: the write
+            # is unconfirmed (REV-6).
             raise ForgeError(
-                f"review {review_id} published; read-back failed: expected"
-                f" {event}, author, head and body"
-            )
-        return review
+                f"review {review_id} published; read-back failed: {error}"
+            ) from None
 
     def _review_comments(self, number: int, review_id: int) -> list[dict]:
         rows = array(self.api(
