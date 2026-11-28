@@ -119,10 +119,12 @@ its write:
 
 A refused run (exit code `4`), a usage error, and a run that fails before its
 write have `outcome: null`, and so does every other command. A write counts
-as happened once the forge answered it with the new object's ID, even when
-reading it back then fails (exit code `1`), as Forgejo's review and reply
-read-backs can. A run whose write cannot be confirmed, such as one
-interrupted before the forge answered, has `outcome: null`.
+as happened once the forge's answer to it shows the submitted review or the
+posted reply, even when reading it back then fails (exit code `1`), as
+Forgejo's review and reply read-backs can. A run whose write cannot be
+confirmed has `outcome: null`: one interrupted before the forge answered,
+and one whose answer or read-back shows something else, such as a review
+Forgejo kept as a draft.
 
 Each outcome has exactly these keys, in this order:
 
@@ -156,8 +158,9 @@ Each outcome has exactly these keys, in this order:
 - **Previous reviewed head.** The `head` of the latest tagged review before
   this one, from the reviews `review post` already reads. The read after
   publication decides, so a stranded draft that the run submitted before
-  publishing counts as an earlier review; when that read fails, the reviews
-  read before publication decide. For `--resume`, it is the latest one
+  publishing counts as an earlier review. When that read fails, the reviews
+  read before publication decide, with each draft the run submitted as the
+  forge answered its submission. For `--resume`, it is the latest one
   before the resumed review. For `--resume`, `blocking`, `optional`, and
   `pass` also describe the resumed review.
 - **Line counts.** `diff_lines` and `diff_lines_since_previous` sum the
@@ -167,8 +170,12 @@ Each outcome has exactly these keys, in this order:
   anchored lines is added or changed on the head side of
   `git diff <previous> <head>`. For a finding with `start_line`, that is any
   line from `start_line` to `line`. A finding whose thread root is already
-  published, as on `--resume`, is counted at that root's anchor. Context
-  lines never count, including those `diff.interHunkContext` adds. This
+  published, as on `--resume`, is counted at that root's anchor, from the
+  read after publication or, when that read fails, the read before it.
+  Context lines never count. Both diffs run with Git's default
+  `diff.suppressBlankEmpty` and `diff.interHunkContext`, whatever the
+  repository sets, and only a line feed ends a patch line, so a carriage
+  return inside a source line does not split it. This
   separates findings in fix code from findings in code an earlier pass could
   have reviewed.
 - **Edge cases.** With no earlier tagged review, or a previous reviewed head
