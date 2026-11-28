@@ -537,6 +537,13 @@ method = (
     if "--method" in arguments
     else "GET"
 )
+# settings["fail_snapshot_read"] = n fails the n-th SquadSnapshot query
+# counted from settings["snapshot_reads"], as a dropped connection would
+# (#184 REV-2).
+if endpoint == "graphql" and "query SquadSnapshot(" in payload["query"]:
+    settings["snapshot_reads"] = settings.get("snapshot_reads", 0) + 1
+    if settings["snapshot_reads"] == settings.get("fail_snapshot_read"):
+        fail("injected snapshot read failure", 503)
 if endpoint == "/user":
     if account in settings.get("user_failure", []):
         fail("user unavailable: " + token, 401)

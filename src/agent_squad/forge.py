@@ -571,7 +571,9 @@ class Forge(Protocol):
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
         discard_draft: int | None = None,
-    ) -> None: ...
+    ) -> tuple[Review, ...]:
+        """Clear the way to publish; return the drafts it submitted."""
+        ...
 
     def post_review(
         self, number: int, publication: ReviewPublication,

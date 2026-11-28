@@ -1280,7 +1280,7 @@ class Forgejo:
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
         discard_draft: int | None = None,
-    ) -> None:
+    ) -> tuple[Review, ...]:
         # Refresh immediately before publication; snapshot reads may be old.
         current = self.reviews(number)
         pending = [
@@ -1305,6 +1305,7 @@ class Forgejo:
         if pending:
             ids = ", ".join(str(r.evidence.id) for r in pending)
             raise GateError(f"pending_draft: protected review IDs: {ids}")
+        return ()  # Forgejo submits no draft: it refuses over one.
 
     def post_review(
         self, number: int, publication: ReviewPublication
@@ -1323,8 +1324,13 @@ class Forgejo:
             },
         ), "posted review")
         review_id = positive(data.get("id"), "review ID")
-        try:
-            review = parse_review(self.api(f"{endpoint}/{review_id}"))
+
+        def submitted(value: object) -> Review | None:
+            """The review ``value`` shows, if it is the one requested."""
+            try:
+                review = parse_review(value)
+            except ForgeError:
+                return None
             if (
                 review is None or review.evidence.id != review_id
                 or review.state != publication.state or review.dismissed
@@ -1333,12 +1339,25 @@ class Forgejo:
                 or review.evidence.body
                 != publication.fallback_body.replace("\r\n", "\n")
             ):
-                raise ForgeError(f"expected {event}, author, head and body")
+                return None
+            return review
+
+        try:
+            value = self.api(f"{endpoint}/{review_id}")
         except ForgeError as error:
+            # Unread: published only if the POST's own answer shows the
+            # submitted review (REV-6).
             raise ForgeError(
                 f"review {review_id} published; read-back failed: {error}",
-                written=True,
+                written=submitted(data) is not None,
             ) from None
+        review = submitted(value)
+        if review is None:
+            # Read, and not the submitted review, such as a draft (REV-6).
+            raise ForgeError(
+                f"review {review_id} published; read-back failed: expected"
+                f" {event}, author, head and body"
+            )
         return review
 
     def _review_comments(self, number: int, review_id: int) -> list[dict]:
@@ -1423,7 +1442,15 @@ class Forgejo:
                     self._review_comments(number, review_id), review_id,
                 )
             except ForgeError as error:
-                error.written = True  # The same message, now marked.
+                # Unread: posted only if the POST's own answer shows this
+                # account's reply text (REV-6).
+                user = written.get("user")
+                error.written = (
+                    isinstance(user, dict)
+                    and isinstance(user.get("login"), str)
+                    and user["login"].casefold() == self.account.casefold()
+                    and written.get("body") == body.replace("\r\n", "\n")
+                )
                 raise
             reply = next(
                 (c for c in comments if c.evidence.id == reply_id), None,
@@ -1433,9 +1460,8 @@ class Forgejo:
                 or reply.evidence.author.casefold() != self.account.casefold()
                 or reply.evidence.body != body.replace("\r\n", "\n")
             ):
-                raise ForgeError(
-                    f"reply {reply_id} read-back mismatch", written=True
-                )
+                # Read, and not the requested reply: unconfirmed (REV-6).
+                raise ForgeError(f"reply {reply_id} read-back mismatch")
             return reply
         raise ForgeError(f"finding root {root} is missing")
 

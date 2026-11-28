@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 import re
 import time
@@ -904,47 +904,39 @@ def review_outcome(
     verdict: str,
     inputs: list[FindingInput],
     ids: list[str],
-    earlier: list[dict],
-    position: int,
     resumed: bool,
-    published: dict,
+    basis: dict,
+    earlier: Callable[[], dict],
 ) -> events.Outcome:
     """Describe a published review; the diffs run only when recorded.
 
-    ``earlier`` is the tagged reviews read before publication and
-    ``position`` this review's index among them. ``published`` gains the
-    review's ``id`` and the ``state`` read after publication as the command
-    proceeds. That read, when it happened, decides the pass, the previous
-    reviewed head, and the anchor of each root already published (REV-2);
-    without it the earlier reviews and the given anchors stand.
+    ``basis`` gains the review's ``id`` and the ``current`` state read after
+    publication as the command proceeds. That state, when read, decides the
+    pass, the previous reviewed head, and the anchor of each root already
+    published (REV-2). Without it ``earlier()`` decides: the state read
+    before publication, with any draft the run submitted first.
     """
     def compute() -> dict[str, object]:
-        reviews = earlier
-        anchors = [item.anchor for item in inputs]
-        current = published.get("state")
-        if current is not None:
-            found = [
-                index for index, review in enumerate(current["reviews"])
-                if review["id"] == published["id"]
-            ]
-            if found:
-                reviews, at = current["reviews"], found[0]
-            else:
-                at = position
-            roots = {
-                f["finding"]: f["anchor"] for f in current["findings"]
-                if f["finding"] in ids and f["root"] is not None
-                and f["anchor"] is not None and f["anchor"]["line"]
-            }
-            anchors = [
-                Anchor(
-                    roots[fid]["path"], roots[fid]["line"],
-                    roots[fid]["start_line"],
-                ) if fid in roots else anchor
-                for fid, anchor in zip(ids, anchors)
-            ]
-        else:
-            at = position
+        current = basis["current"]
+        state = current if current is not None else earlier()
+        reviews = state["reviews"]
+        at = next(
+            (index for index, review in enumerate(reviews)
+             if review["id"] == basis["id"]),
+            len(reviews),  # A new review the state does not yet list.
+        )
+        roots = {
+            f["finding"]: f["anchor"] for f in state["findings"]
+            if f["finding"] in ids and f["root"] is not None
+            and f["anchor"] is not None and f["anchor"]["line"]
+        }
+        anchors = [
+            Anchor(
+                roots[fid]["path"], roots[fid]["line"],
+                roots[fid]["start_line"],
+            ) if fid in roots else item.anchor
+            for fid, item in zip(ids, inputs)
+        ]
         previous = reviews[at - 1]["head"] if at else None
         since = on_changed = None
         if previous == head:
@@ -1015,15 +1007,9 @@ def post_review(
             "review base must be an ancestor of head and the base branch"
         )
     existing = None
-    # The review's place among the tagged reviews before it (docs/events.md).
-    position = len(state["reviews"])
     if resume is not None:
-        position, existing = next(
-            (
-                (index, r) for index, r in enumerate(state["reviews"])
-                if r["id"] == resume
-            ),
-            (position, None),
+        existing = next(
+            (r for r in state["reviews"] if r["id"] == resume), None,
         )
         if existing is None or first_line(existing["body"]) != header:
             raise AgentSquadError(
@@ -1043,10 +1029,21 @@ def post_review(
         start = allocate_id(snapshot)
         ids = [f"REV-{start + i}" for i in range(len(inputs))]
     complete_body = header + "\n\n" + compose_review(sections, inputs, ids)
-    published: dict = {"id": None, "state": None}
+    # What the outcome reads (docs/events.md): the review's ID, the drafts
+    # prepare_review submitted, and the state read after publication.
+    basis: dict = {"id": resume, "submitted": (), "current": None}
+
+    def earlier() -> dict:
+        submitted = {r.evidence.id: r for r in basis["submitted"]}
+        if not submitted:
+            return state
+        return state_for(repository, replace(snapshot, reviews=tuple(
+            submitted.get(r.evidence.id, r) for r in snapshot.reviews
+        )))
+
     outcome = review_outcome(
         repository.root, base, head, verdict, inputs, ids,
-        state["reviews"], position, existing is not None, published,
+        existing is not None, basis, earlier,
     )
     if existing is None:
         if verdict == "approved" and (
@@ -1074,7 +1071,7 @@ def post_review(
                     "changes_requested requires a blocking finding or NOT"
                     " FIXED during this pass"
                 )
-        forge.prepare_review(
+        basis["submitted"] = forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
         comments = tuple(
@@ -1098,18 +1095,18 @@ def post_review(
         review_id = review.evidence.id
     else:
         # Forgejo refuses here over a pending draft: no outcome (REV-4).
-        forge.prepare_review(
+        basis["submitted"] = forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
         review_id = existing["id"]
     # Published, or found by --resume: the event describes this review
     # whatever follows, such as a root that cannot be posted.
-    published["id"] = review_id
+    basis["id"] = review_id
     events.outcome(outcome)
     # Read after publication: partial success is recoverable by this exact
     # review ID.
     current = state_for(repository, forge.snapshot(number))
-    published["state"] = current
+    basis["current"] = current
     failed = []
     for fid, item in zip(ids, inputs):
         finding = find_finding(current, fid)
