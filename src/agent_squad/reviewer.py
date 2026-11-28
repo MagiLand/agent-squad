@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 
+from . import events
 from .commands import state_for
 from .forge import Forge
 from .herdr import (
@@ -657,9 +658,19 @@ def launch(
             raise HerdrError(
                 f"unsupported review delivery mechanism: {delivery}"
             )
-        started = start_reviewer(
-            worktree, client, resource, config.reviewer.start_args
+        # Herdr keeps a Reviewer that is not ready running for adopt (§8.4).
+        started_outcome = events.launch_outcome(
+            config.reviewer.kind, config.reviewer.start_args
         )
+        try:
+            started = start_reviewer(
+                worktree, client, resource, config.reviewer.start_args
+            )
+        except HerdrCommandError as error:
+            if error.code == "agent_not_ready":
+                events.outcome(started_outcome)
+            raise
+        events.outcome(started_outcome)
         if verify_agent(started.get("agent"), worktree, resource) == "blocked":
             raise RetainedError(
                 "Reviewer is blocked; answer in its pane, then adopt"

@@ -76,7 +76,9 @@ def parse_diff(diff: str) -> dict[str, set[int]]:
     return result
 
 
-def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+def right_side_lines(
+    root: Path, base: str, head: str, context: int
+) -> dict[str, set[int]]:
     return parse_diff(
         git_output(
             root,
@@ -88,13 +90,37 @@ def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
             "--no-color",
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "--unified=3",
+            f"--unified={context}",
             "--find-renames",
             base,
             head,
             "--",
         )
     )
+
+
+def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+    return right_side_lines(root, base, head, 3)
+
+
+def changed_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+    """Lines added or changed on the head side: the diff without context."""
+    return right_side_lines(root, base, head, 0)
+
+
+def changed_line_count(root: Path, base: str, head: str) -> int:
+    """Added plus deleted lines, as the anchor diff finds renames.
+
+    ``--numstat`` reports a binary file as ``-`` twice, which counts 0.
+    """
+    total = 0
+    for row in git_output(
+        root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+        "--numstat", "--find-renames", base, head, "--",
+    ).splitlines():
+        added, deleted, _ = row.split("\t", 2)
+        total += sum(int(count) for count in (added, deleted) if count != "-")
+    return total
 
 
 def validate_anchor(anchor: Anchor, lines: dict[str, set[int]]) -> None:

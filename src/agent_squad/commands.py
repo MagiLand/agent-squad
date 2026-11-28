@@ -9,7 +9,14 @@ import re
 import time
 from typing import TypeVar
 
-from .anchors import Anchor, commentable_lines, validate_anchor
+from . import events
+from .anchors import (
+    Anchor,
+    changed_line_count,
+    changed_lines,
+    commentable_lines,
+    validate_anchor,
+)
 from .conventions import (
     DECISION_RECORD,
     GENERAL_KINDS,
@@ -880,6 +887,47 @@ def compose_review(
     return body
 
 
+def review_outcome(
+    root: Path,
+    base: str,
+    head: str,
+    previous: str | None,
+    verdict: str,
+    inputs: list[FindingInput],
+    position: int,
+    resumed: bool,
+) -> events.Outcome:
+    """Describe a published review; the diffs run only when recorded."""
+    def compute() -> dict[str, object]:
+        since = on_changed = None
+        if previous == head:
+            since = on_changed = 0
+        elif previous is not None and is_ancestor(root, previous, head):
+            since = changed_line_count(root, previous, head)
+            changed = changed_lines(root, previous, head)
+            on_changed = sum(
+                any(
+                    number in changed.get(item.anchor.path, ())
+                    for number in range(
+                        item.anchor.start_line or item.anchor.line,
+                        item.anchor.line + 1,
+                    )
+                )
+                for item in inputs
+            )
+        return {
+            "verdict": verdict,
+            "blocking": sum(i.severity == "blocking" for i in inputs),
+            "optional": sum(i.severity == "optional" for i in inputs),
+            "pass": position,
+            "resumed": resumed,
+            "diff_lines": changed_line_count(root, base, head),
+            "diff_lines_since_previous": since,
+            "findings_on_changed_lines": on_changed,
+        }
+    return compute
+
+
 def post_review(
     repository: Repository,
     forge: Forge,
@@ -921,9 +969,15 @@ def post_review(
             "review base must be an ancestor of head and the base branch"
         )
     existing = None
+    # The review's place among the tagged reviews before it (docs/events.md).
+    position = len(state["reviews"])
     if resume is not None:
-        existing = next(
-            (r for r in state["reviews"] if r["id"] == resume), None
+        position, existing = next(
+            (
+                (index, r) for index, r in enumerate(state["reviews"])
+                if r["id"] == resume
+            ),
+            (position, None),
         )
         if existing is None or first_line(existing["body"]) != header:
             raise AgentSquadError(
@@ -986,7 +1040,14 @@ def post_review(
         )
         review = forge.post_review(number, publication)
         review_id = review.evidence.id
-    else:
+    # Published, or found by --resume: the event describes this review
+    # whatever follows, such as a root that cannot be posted.
+    events.outcome(review_outcome(
+        repository.root, base, head,
+        state["reviews"][position - 1]["head"] if position else None,
+        verdict, inputs, position + 1, existing is not None,
+    ))
+    if existing is not None:
         forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
@@ -1127,7 +1188,16 @@ def reply_thread(
                 "fixed SHA must name a local commit absent from the finding"
                 " opening head"
             )
-    return asdict(forge.reply(number, finding["root"]["id"], body))
+    reply = forge.reply(number, finding["root"]["id"], body)
+    events.outcome(lambda: {
+        "disposition": disposition,
+        "verification": verification,
+        "rejection": (
+            "not-pursued" if not_pursued
+            else "deferred" if deferred_to is not None else None
+        ),
+    })
+    return asdict(reply)
 
 
 def open_thread(
@@ -1281,6 +1351,14 @@ def post_decision(
             full_body += "\n\n" + task
         decision = asdict(forge.comment(number, full_body))
         reused = False
+    events.outcome(lambda: {
+        "kind": kind,
+        "merge_instruction": merge_instruction,
+        "recommendation": recommendation,
+        "budget": budget,
+        "task_amended": task is not None,
+        "reused": reused,
+    })
     if task is not None:
         try:
             # Re-read before mirroring so a newer report is retained.
@@ -1309,4 +1387,6 @@ def post_stop(
             "stop body must summarize the remaining problems without a"
             " protocol header"
         )
-    return asdict(forge.comment(number, header + "\n\n" + body.strip()))
+    comment = forge.comment(number, header + "\n\n" + body.strip())
+    events.outcome(lambda: {"reason": reason})
+    return asdict(comment)
