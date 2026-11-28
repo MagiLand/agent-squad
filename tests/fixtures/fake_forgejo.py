@@ -307,6 +307,10 @@ class Handler(BaseHTTPRequestHandler):
         settings = model.get("settings", {})
         if settings.get("redirect_to"):
             return 302, {"message": "redirect refused"}
+        # fail_read_after_write: the first read after an accepted review or
+        # review comment fails, as a dropped connection would (#184 REV-5).
+        if self.command == "GET" and settings.pop("fail_next_read", False):
+            return 503, {"message": "injected read-back failure"}
         parsed = urlsplit(self.path)
         api_prefix = self.server.path_prefix + "/api/v1"
         if not parsed.path.startswith(api_prefix + "/"):
@@ -547,6 +551,8 @@ class Handler(BaseHTTPRequestHandler):
                     return 503, {
                         "message": f"review {row['id']} stored; interrupted",
                     }
+                if settings.get("fail_read_after_write"):
+                    settings["fail_next_read"] = True
                 return 200, review_wire(row)
             rows = [
                 review_wire(r) for r in reviews
@@ -592,6 +598,8 @@ class Handler(BaseHTTPRequestHandler):
                     row["diff_hunk"] = ""
                 if not settings.get("drop_root"):
                     pr.setdefault("comments", []).append(row)
+                if settings.get("fail_read_after_write"):
+                    settings["fail_next_read"] = True
                 return 200, comment_wire(row, pr, settings)
             rows = [comment_wire(c, pr, settings)
                     for c in pr.get("comments", [])

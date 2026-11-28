@@ -6,16 +6,23 @@ across every repository it runs in: how often commands fail or are refused,
 how long they take, and how often a loop stops or a merge leaves cleanup
 incomplete. Humans read what those agents write, not the files.
 
-An event holds no free text. It names the command, numbers taken from the
-`--pr` and `--issue` options, the exit code, and a hash that identifies the
-repository without naming it. No title, body, path, branch, account name,
-commit id, or other argument value is stored, so no content of a client
-repository leaves that repository through this file.
+An event holds no free text. Every value is a number, a boolean, `null`, or
+a word from a fixed set the CLI defines. An event names the command, numbers
+taken from the `--pr` and `--issue` options, the exit code, a hash that
+identifies the repository without naming it, and, for five commands, an
+outcome: what the command's write did, such as a review's verdict and its
+number of findings. No title, body, path, branch, account name, finding ID,
+or commit ID is stored. The only argument values stored are the Reviewer's
+model and reasoning-effort level, and only in the form that
+[Reviewer configuration](#reviewer-configuration) allows. No content of a
+client repository leaves that repository through this file.
 
-This is schema version 1, introduced by
-[#148](https://github.com/MagiLand/agent-squad/issues/148). It records CLI
-runs only. Reviews, decisions, and stops stay on the forge and can be joined
-to these events later by `project` and PR or issue number.
+This is schema version 2. Version 1, introduced by
+[#148](https://github.com/MagiLand/agent-squad/issues/148), recorded CLI runs
+only; version 2 adds `outcome`
+([#184](https://github.com/MagiLand/agent-squad/issues/184)). An outcome
+describes a write but is not the record of it: reviews, decisions, and stops
+stay on the forge, which remains their record.
 
 ## Location
 
@@ -56,7 +63,7 @@ Each event has exactly these keys, in this order:
 
 | Field | Value |
 | --- | --- |
-| `schema_version` | `1` |
+| `schema_version` | `2` |
 | `id` | a random version 4 UUID in its lowercase hyphenated form |
 | `time` | UTC time at the end of the run, `YYYY-MM-DDTHH:MM:SS.mmmZ` |
 | `tool_version` | the package version, such as `0.7.0` |
@@ -69,6 +76,7 @@ Each event has exactly these keys, in this order:
 | `issue` | the number given to `--issue`, or `null`. Other numeric options, such as `--from-issue`, are not recorded |
 | `exit_code` | the process exit code (§10.1 of the specification) |
 | `duration_ms` | wall time in whole milliseconds from the start of the CLI's entry point to the end of the run; Python start-up and module imports are not included |
+| `outcome` | an object describing what the run's write did ([Outcomes](#outcomes)); `null` for every other run |
 
 The command names are those of the specification's
 [command table](agent-squad-spec.md#102-command-table).
@@ -90,13 +98,154 @@ printf 'github\n\nMagiLand\nagent-squad' | shasum -a 256 | cut -c1-16
 The configuration is the one the run read. `init` records the configuration
 it wrote or found; `skill install` and a usage error read none.
 
+## Outcomes
+
+Five commands record an outcome. Each records it when its write happened,
+whatever the exit code, so a run that writes and then fails still describes
+its write:
+
+- `review post`: when the run published the review, or found it with
+  `--resume`. This includes a run that published the review and then could
+  not post a thread root (exit code `1`). A `--resume` run that the forge
+  refuses over a pending draft (exit code `4`) records none.
+- `thread reply`: when the reply was posted.
+- `decision post`: when the decision was posted, or an identical Task
+  amendment was reused. This includes a run that posted the decision and then
+  could not mirror the Task (exit code `3`).
+- `stop post`: when the `STOPPED` comment was posted.
+- `reviewer launch`: when Herdr started the Reviewer. This includes a run that
+  leaves a blocked Reviewer, or one Herdr reports not ready, for
+  `reviewer adopt` (exit code `3`).
+
+A refused run (exit code `4`), a usage error, and a run that fails before its
+write have `outcome: null`, and so does every other command. A write counts
+as happened once the forge's answer to it shows the submitted review or the
+posted reply, even when reading it back then fails (exit code `1`), as
+Forgejo's review and reply read-backs can. A run whose write cannot be
+confirmed has `outcome: null`: one interrupted before the forge answered,
+and one whose answer or read-back shows something else, such as a review
+Forgejo kept as a draft.
+
+Each outcome has exactly these keys, in this order:
+
+| Command | Key | Value |
+| --- | --- | --- |
+| `review post` | `verdict` | `approved`, `changes_requested`, or `needs_human` |
+| `review post` | `blocking` | the number of this review's findings of severity `blocking` |
+| `review post` | `optional` | the number of this review's findings of severity `optional` |
+| `review post` | `pass` | the review's position among the PR's tagged reviews, counting itself: `1` for the first |
+| `review post` | `resumed` | `true` when the run found the review with `--resume`, otherwise `false` |
+| `review post` | `diff_lines` | added plus deleted lines of `git diff <base> <head>` |
+| `review post` | `diff_lines_since_previous` | added plus deleted lines of `git diff <previous> <head>`; `null` without a previous reviewed head or when it is not an ancestor of `head` |
+| `review post` | `findings_on_changed_lines` | how many of this review's findings have an anchored line added or changed since the previous reviewed head; `null` when `diff_lines_since_previous` is |
+| `thread reply` | `disposition` | `fixed`, `rejected`, or `needs-human`, as given; otherwise `null` |
+| `thread reply` | `verification` | `fixed`, `rejection-accepted`, or `not-fixed`, as given; otherwise `null` |
+| `thread reply` | `rejection` | `not-pursued` for `--not-pursued`, `deferred` for `--deferred-to` (the issue number is not recorded), otherwise `null` |
+| `decision post` | `kind` | the kind on the Decision record line: `finding`, `task-approval`, `task-amendment`, `continuation`, `budget`, `hold-release`, or `answer`; `null` for a standing merge instruction or its withdrawal |
+| `decision post` | `merge_instruction` | `record` or `withdraw`, as given; otherwise `null` |
+| `decision post` | `recommendation` | `followed`, `changed`, or `none`, as given; `null` for a standing merge instruction or its withdrawal |
+| `decision post` | `budget` | the number given to `--budget`, or `null` |
+| `decision post` | `task_amended` | `true` when the decision carries a Task amendment, otherwise `false` |
+| `decision post` | `reused` | `true` when the run reused an identical Task amendment instead of posting, otherwise `false` |
+| `stop post` | `reason` | `budget`, `repeat`, `scope`, `design`, `ambiguity`, or `judgement` |
+| `reviewer launch` | `reviewer_kind` | `claude` or `codex`, from `reviewer.kind` |
+| `reviewer launch` | `model` | the model named in `reviewer.start_args`, or `null` ([Reviewer configuration](#reviewer-configuration)) |
+| `reviewer launch` | `effort` | the reasoning-effort level named in `reviewer.start_args`, or `null` |
+| `reviewer launch` | `reviewer_skill` | the first 16 lowercase hexadecimal characters of the SHA-256 digest of the installed `~/.agents/skills/squad-reviewer/SKILL.md`; `null` when that file cannot be read or is not a regular file |
+
+### Review measures
+
+- **Previous reviewed head.** The `head` of the latest tagged review before
+  this one, from the reviews `review post` already reads. The read after
+  publication decides, so a stranded draft that the run submitted before
+  publishing counts as an earlier review. When that read fails, the reviews
+  read before publication decide, with each draft the run submitted as the
+  forge answered its submission. For `--resume`, it is the latest one
+  before the resumed review. For `--resume`, `blocking`, `optional`, and
+  `pass` also describe the resumed review.
+- **Line counts.** `diff_lines` and `diff_lines_since_previous` sum the
+  added and deleted lines of `git diff --numstat` with the rename detection
+  that anchor validation uses. A binary file counts `0`.
+- **Findings on changed lines.** A finding counts when at least one of its
+  anchored lines is added or changed on the head side of
+  `git diff <previous> <head>`. For a finding with `start_line`, that is any
+  line from `start_line` to `line`. A finding whose thread root is already
+  published, as on `--resume`, is counted at that root's anchor, from the
+  read after publication or, when that read fails, the read before it.
+  Context lines never count. Both diffs run with Git's default
+  `diff.suppressBlankEmpty` and `diff.interHunkContext`, whatever the
+  repository sets, and only a line feed ends a patch line, so a carriage
+  return inside a source line does not split it. This
+  separates findings in fix code from findings in code an earlier pass could
+  have reviewed.
+- **Edge cases.** With no earlier tagged review, or a previous reviewed head
+  that is not an ancestor of `head`, `diff_lines_since_previous` and
+  `findings_on_changed_lines` are `null`. When the previous reviewed head
+  equals `head`, both are `0`. A Git error, as opposed to a "not an
+  ancestor" answer, makes the whole outcome `null`.
+
+### Reviewer configuration
+
+`model` and `effort` are read from `reviewer.start_args` only, never from a
+harness configuration file, profile, or environment variable, and only from
+the arguments before a `--` separator: what follows it is positional, such
+as a prompt, even where an option before it still lacked its value. No other
+element of `reviewer.start_args` is ever recorded, because it can hold a
+credential.
+
+| `reviewer.kind` | `model` forms | `effort` forms |
+| --- | --- | --- |
+| `claude` | `--model X`, `--model=X` | `--effort X`, `--effort=X` |
+| `codex` | `--model X`, `--model=X`, `-m X`, `-c model=X`, `--config model=X` | `-c model_reasoning_effort=X`, `--config model_reasoning_effort=X` |
+
+- **Quotes.** For a `-c` or `--config` value, one pair of matching single or
+  double quotes around the whole value `X` is removed, so `-c model="o3"`
+  records `o3`.
+- **When the value is `null`:**
+  - the arguments name the setting in none of these forms, including another
+    spelling such as `--config=model=X`;
+  - they name it more than once, even with the same value;
+  - they select a Codex profile (`-p`, `--profile`) or Claude settings
+    (`--settings`) and name the setting nowhere else;
+  - after quote removal, the value does not match
+    `^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,63}$` in full, which keeps a path, a
+    space, or any longer text out of the store.
+
+## Reading the events
+
+- **Versions.** A version 1 event has no `outcome` key. One month's file can
+  hold both versions, because the version changes with the installed CLI.
+- **Counting each write once.** Count each review once by `project`, `pr`,
+  and `outcome.pass`: a `--resume` run repeats the pass of the run that
+  published it. Count each decision once by skipping events whose
+  `outcome.reused` is `true`.
+- **Passes.** A pass's `review post` or `stop post` event belongs to the
+  latest `reviewer launch` event for the same `project` and `pr` before it.
+  Pass duration and loop time follow from the `time` of the `reviewer
+  launch`, `review post`, and `handoff` events of the same PR.
+- **Reviewer rules.** To match a `reviewer_skill` value to a commit of this
+  repository, hash `src/agent_squad/skills/squad-reviewer/SKILL.md` at that
+  commit:
+
+  ```bash
+  git show <commit>:src/agent_squad/skills/squad-reviewer/SKILL.md \
+    | shasum -a 256 | cut -c1-16
+  ```
+
 ## Rules
 
 - No command reads the store, and nothing in it is ever authority for any
   decision. Loop state is derived from the PR, Git, and Herdr alone (§3.2 of
-  the specification).
+  the specification), and the forge remains the record of reviews,
+  decisions, and stops.
 - A store that cannot be written, for any reason, changes neither the exit
   code nor the output of the command; the event is lost.
+- An outcome never changes a command. Computing it makes no forge or Herdr
+  call beyond the command's own. Any error while computing it, such as a
+  failing `git diff`, records `outcome: null` and leaves the exit code,
+  standard output, and standard error unchanged. With
+  `AGENT_SQUAD_EVENTS=off`, no outcome is computed: no extra `git` process
+  runs and the skill file is not read.
 - `doctor` reports the store's path in an `event store` row: `pass` when it
   is writable, a warning when it is not (never a failure), or `pass` naming
   `AGENT_SQUAD_EVENTS=off` when recording is disabled. The check creates the

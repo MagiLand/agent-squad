@@ -1488,18 +1488,17 @@ class GitHub:
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
         discard_draft: int | None = None,
-    ) -> None:
+    ) -> tuple[Review, ...]:
         if discard_draft is not None:
             raise ForgeError("--discard-draft is not supported on this forge")
         # Preserve stranded drafts and replies before publishing a new review.
         # Reuse the command's snapshot to preserve the existing read sequence.
-        for review in reviews:
-            if (
-                review.state == ReviewState.PENDING
-                and review.evidence.author.casefold()
-                == self.account.casefold()
-            ):
-                self.submit_pending(number, review.evidence.id)
+        return tuple(
+            self.submit_pending(number, review.evidence.id)
+            for review in reviews
+            if review.state == ReviewState.PENDING
+            and review.evidence.author.casefold() == self.account.casefold()
+        )
 
     def post_review(
         self, number: int, publication: ReviewPublication,

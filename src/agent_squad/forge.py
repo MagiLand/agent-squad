@@ -35,9 +35,17 @@ def requested_state(verdict: str) -> ReviewState:
 
 
 class ForgeError(AgentSquadError):
-    def __init__(self, message: str, status: int | None = None) -> None:
+    """A forge failure. ``written`` marks one raised after the forge's
+    answer showed the write, so it happened although the command failed
+    (docs/events.md)."""
+
+    def __init__(
+        self, message: str, status: int | None = None, *,
+        written: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.written = written
 
 
 class MergeRefused(ForgeError):
@@ -563,7 +571,9 @@ class Forge(Protocol):
     def prepare_review(
         self, number: int, *, reviews: tuple[Review, ...],
         discard_draft: int | None = None,
-    ) -> None: ...
+    ) -> tuple[Review, ...]:
+        """Clear the way to publish; return the drafts it submitted."""
+        ...
 
     def post_review(
         self, number: int, publication: ReviewPublication,

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 
 from .forge import Anchor
-from .initialization import AgentSquadError, git_output
+from .initialization import AgentSquadError
 
 
 def unquote_path(value: str) -> str:
@@ -43,7 +44,12 @@ def unquote_path(value: str) -> str:
     return raw.decode("utf-8")
 
 
-def parse_diff(diff: str) -> dict[str, set[int]]:
+def parse_diff(diff: str, added_only: bool = False) -> dict[str, set[int]]:
+    """Map each head-side path to its right-side lines.
+
+    With ``added_only``, only ``+`` lines count: context lines, including
+    any that ``diff.interHunkContext`` adds between hunks, do not.
+    """
     result: dict[str, set[int]] = {}
     path = None
     line_number = 0
@@ -54,7 +60,9 @@ def parse_diff(diff: str) -> dict[str, set[int]]:
             remaining = 0
         elif remaining:
             if line.startswith((" ", "+")):
-                if path is not None:
+                if path is not None and (
+                    not added_only or line.startswith("+")
+                ):
                     result[path].add(line_number)
                 line_number += 1
                 remaining -= 1
@@ -76,25 +84,87 @@ def parse_diff(diff: str) -> dict[str, set[int]]:
     return result
 
 
-def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+def patch_output(root: Path, *arguments: str) -> str:
+    """Git's output, decoded without universal newlines (REV-7).
+
+    Only LF separates the lines of a patch; a carriage return inside a
+    source line stays part of it. A Git failure raises.
+    """
+    try:
+        result = subprocess.run(
+            ["git", *arguments], cwd=root, shell=False, capture_output=True,
+            timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AgentSquadError(f"git {arguments[0]} failed: {error}") from None
+    if result.returncode:
+        raise AgentSquadError(
+            result.stderr.decode("utf-8", "replace").strip()
+            or f"git exited {result.returncode}"
+        )
+    return result.stdout.decode("utf-8", "replace").rstrip("\n")
+
+
+def right_side_lines(
+    root: Path, base: str, head: str, context: int, added_only: bool = False
+) -> dict[str, set[int]]:
+    # Settings that change a patch's shape are fixed here: a blank context
+    # line keeps its space prefix, and hunks are joined only by --unified.
     return parse_diff(
-        git_output(
+        patch_output(
             root,
             "-c",
             "core.quotePath=true",
+            "-c",
+            "diff.suppressBlankEmpty=false",
+            "-c",
+            "diff.interHunkContext=0",
             "diff",
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "--unified=3",
+            f"--unified={context}",
             "--find-renames",
             base,
             head,
             "--",
-        )
+        ),
+        added_only,
     )
+
+
+def commentable_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+    return right_side_lines(root, base, head, 3)
+
+
+def changed_lines(root: Path, base: str, head: str) -> dict[str, set[int]]:
+    """Lines added or changed on the head side, without any context."""
+    return right_side_lines(root, base, head, 0, added_only=True)
+
+
+def changed_line_count(root: Path, base: str, head: str) -> int:
+    """Added plus deleted lines, as the anchor diff finds renames.
+
+    ``--numstat`` reports a binary file as ``-`` twice, which counts 0.
+    With ``-z`` each record ends at a NUL, so no character a path may hold
+    splits one (REV-3); a rename's record has an empty path followed by
+    its source and destination.
+    """
+    fields = iter(patch_output(
+        root, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+        "--numstat", "-z", "--find-renames", base, head, "--",
+    ).split("\0"))
+    total = 0
+    for record in fields:
+        if not record:
+            continue  # The empty field after the final NUL.
+        added, deleted, path = record.split("\t", 2)
+        if not path:
+            next(fields), next(fields)
+        total += sum(int(count) for count in (added, deleted) if count != "-")
+    return total
 
 
 def validate_anchor(anchor: Anchor, lines: dict[str, set[int]]) -> None:

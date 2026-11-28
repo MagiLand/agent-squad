@@ -1,6 +1,7 @@
 """The event store's location, fields, and silence on failure (#148)."""
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -15,16 +16,52 @@ from tests._support import PROJECT_ROOT, add_src_to_path
 
 add_src_to_path()
 
-from agent_squad import __version__, events  # noqa: E402
+from agent_squad import __version__, conventions, events  # noqa: E402
 from agent_squad.cli import main, parser  # noqa: E402
-from agent_squad.initialization import ForgeConfiguration  # noqa: E402
+from agent_squad.initialization import (  # noqa: E402
+    AgentKind, ForgeConfiguration,
+)
+
+
+STOP = ("stop", "post", "--as", "reviewer", "--pr", "1", "--head", "h",
+        "--reason")
+
+
+def documented_section(name: str) -> str:
+    text = (PROJECT_ROOT / "docs/events.md").read_text(encoding="utf-8")
+    return text.split(f"## {name}\n", 1)[1].split("\n## ", 1)[0]
 
 
 def documented_fields() -> list[str]:
     """The first column of the field table in docs/events.md."""
-    text = (PROJECT_ROOT / "docs/events.md").read_text(encoding="utf-8")
-    table = text.split("## Fields\n", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"^\| `([a-z_]+)` \|", table, re.MULTILINE)
+    return re.findall(r"^\| `([a-z_]+)` \|", documented_section("Fields"),
+                      re.MULTILINE)
+
+
+def documented_outcomes() -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Each command's outcome keys and value texts, in documented order."""
+    rows: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for match in re.finditer(
+        r"^\| `([a-z-]+) ([a-z-]+)` \| `([a-z_]+)` \| (.*) \|$",
+        documented_section("Outcomes"), re.MULTILINE,
+    ):
+        rows.setdefault((match[1], match[2]), []).append((match[3], match[4]))
+    return rows
+
+
+def words(text: str) -> list[str]:
+    """The fixed words a documented value names, without null or booleans."""
+    return [
+        value for value in re.findall(r"`([^`]+)`", text)
+        if re.fullmatch(r"[a-z][a-z_-]*", value)
+        and value not in ("null", "true", "false")
+    ]
+
+
+def pattern_words(kind: str, group: str) -> list[str]:
+    """The alternatives of one named group of a tagged-line pattern."""
+    source = conventions.PATTERNS[kind].pattern
+    return re.search(rf"\(\?P<{group}>([a-z_|-]+)\)", source)[1].split("|")
 
 
 class StoreTests(unittest.TestCase):
@@ -41,7 +78,7 @@ class StoreTests(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         execute = (
             patch("agent_squad.cli.execute", side_effect=result)
-            if isinstance(result, BaseException)
+            if isinstance(result, BaseException) or callable(result)
             else patch("agent_squad.cli.execute", return_value=result or {})
         )
         values = dict(self.environ if environ is None else environ)
@@ -79,8 +116,10 @@ class StoreTests(unittest.TestCase):
                 if value != "null"
             ]
             for match in re.finditer(
-                r"^\| `([a-z_]+)` \| (.*) \|$", text, re.MULTILINE)
+                r"^\| `([a-z_]+)` \| (.*) \|$", documented_section("Fields"),
+                re.MULTILINE)
         }
+        self.assertIn("schema version 2", text)
         groups = events.subcommands(parser())
         self.assertEqual(rows["group"], list(groups))
         roles = {
@@ -100,6 +139,74 @@ class StoreTests(unittest.TestCase):
                    if not events.subcommands(p)),
             ["doctor", "init", "status"],
         )
+
+    def test_documented_outcomes_equal_the_cli_fields_and_words(
+        self,
+    ) -> None:
+        documented = documented_outcomes()
+        self.assertEqual(
+            {command: [key for key, _ in rows]
+             for command, rows in documented.items()},
+            {command: list(keys)
+             for command, keys in events.OUTCOME_FIELDS.items()},
+        )
+        groups = events.subcommands(parser())
+        for group, command in events.OUTCOME_FIELDS:
+            self.assertIn(command, events.subcommands(groups[group]))
+        choices = {
+            action.dest: list(action.choices)
+            for group in groups.values()
+            for leaf in events.subcommands(group).values()
+            for action in leaf._actions if action.choices
+        }
+        values = {
+            (command, key): words(text)
+            for command, rows in documented.items() for key, text in rows
+        }
+        for key, expected in (
+            (("review", "post", "verdict"), list(conventions.VERDICTS)),
+            (("thread", "reply", "disposition"), choices["disposition"]),
+            (("thread", "reply", "verification"), choices["verification"]),
+            (("thread", "reply", "rejection"), ["not-pursued", "deferred"]),
+            (("decision", "post", "kind"),
+             ["finding", *conventions.GENERAL_KINDS]),
+            (("decision", "post", "merge_instruction"),
+             choices["merge_instruction"]),
+            (("decision", "post", "recommendation"),
+             choices["recommendation"]),
+            (("stop", "post", "reason"), pattern_words("stop", "reason")),
+            (("reviewer", "launch", "reviewer_kind"),
+             [kind.value for kind in AgentKind]),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(values[(key[0], key[1]), key[2]], expected)
+        self.assertEqual(pattern_words("review", "verdict"),
+                         list(conventions.VERDICTS))
+        self.assertEqual(choices["recommendation"],
+                         list(conventions.RECOMMENDATIONS))
+        self.assertEqual(list(conventions.DISPOSITIONS),
+                         choices["disposition"])
+        self.assertEqual(choices["kind"], list(conventions.GENERAL_KINDS))
+        # The documented forms and pattern are the ones the parser applies.
+        configuration = documented_section("Outcomes").split(
+            "### Reviewer configuration\n", 1)[1]
+        forms = {
+            match[1]: (match[2], match[3])
+            for match in re.finditer(
+                r"^\| `([a-z]+)` \| (.*) \| (.*) \|$", configuration,
+                re.MULTILINE)
+        }
+        self.assertEqual(sorted(forms), sorted(events.SETTING_OPTIONS))
+        for kind, texts in forms.items():
+            for setting, text in zip(("model", "effort"), texts):
+                with self.subTest(kind=kind, setting=setting):
+                    for form in re.findall(r"`([^`]+)`", text):
+                        arguments = tuple(form.replace("=X", "=v1").replace(
+                            " X", " v1").split(" "))
+                        self.assertEqual(events.named_setting(
+                            kind, arguments, setting), "v1")
+        self.assertIn(
+            f"`^{events.SETTING_VALUE.pattern}$`", configuration)
 
     def test_location_follows_the_xdg_state_directory(self) -> None:
         home = self.root / "home"
@@ -152,10 +259,10 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(
             {k: event[k] for k in events.FIELDS
              if k not in ("id", "time", "duration_ms")},
-            {"schema_version": 1, "tool_version": __version__,
+            {"schema_version": 2, "tool_version": __version__,
              "project": None, "forge": None,
              "group": "pr", "command": "head", "role": None, "pr": 7,
-             "issue": None, "exit_code": 0},
+             "issue": None, "exit_code": 0, "outcome": None},
         )
         self.assertRegex(event["id"], r"^[0-9a-f]{8}-[0-9a-f]{4}-4")
         self.assertRegex(
@@ -252,6 +359,218 @@ class StoreTests(unittest.TestCase):
                             result=result)
                     self.assertEqual(actual, expected)
         self.assertEqual(self.events(), [])
+
+    def test_an_outcome_is_recorded_only_for_its_documented_command(
+        self,
+    ) -> None:
+        reason = {"reason": "scope"}
+
+        def stopped(args: object) -> dict:
+            events.outcome(lambda: dict(reason))
+            return {"id": 1}
+
+        self.run_cli(*STOP, "scope", "--body", "b.md", result=stopped)
+        # A command without an outcome ignores one handed over anyway.
+        self.run_cli("pr", "head", "--pr", "1", result=stopped)
+        # The next run starts without the previous run's outcome.
+        self.run_cli(*STOP, "scope", "--body", "b.md", result={"id": 2})
+        self.assertEqual([e["outcome"] for e in self.events()],
+                         [reason, None, None])
+
+    def test_an_outcome_of_the_wrong_shape_is_null(self) -> None:
+        for value in (
+            {"reason": "scope", "extra": 1}, {}, ["scope"], None,
+            {"reason": 1.5}, {"reason": ["scope"]}, {"reason": {"x": 1}},
+            # A string subclass, such as the configuration's StrEnum.
+            {"reason": AgentKind.CLAUDE},
+        ):
+            with self.subTest(value=value):
+                events.forget()
+                events.outcome(lambda: value)
+                self.assertIsNone(events.computed_outcome("stop", "post"))
+        events.outcome(lambda: {"reason": None})
+        self.assertEqual(events.computed_outcome("stop", "post"),
+                         {"reason": None})
+        self.assertIsNone(events.computed_outcome("status", None))
+        events.forget()
+        self.assertIsNone(events.computed_outcome("stop", "post"))
+
+    def test_an_outcome_is_computed_last_and_only_when_recorded(
+        self,
+    ) -> None:
+        clock = [0.0]
+        calls = []
+
+        def compute() -> dict:
+            calls.append(True)
+            clock[0] = 100.0  # Ten seconds of git would not be counted.
+            return {"reason": "budget"}
+
+        def stopped(args: object) -> dict:
+            events.outcome(compute)
+            return {}
+
+        arguments = (*STOP, "budget", "--body", "b.md")
+        disabled = {**self.environ, "AGENT_SQUAD_EVENTS": "off"}
+        with patch("agent_squad.events.time.monotonic",
+                   side_effect=lambda: clock[0]), \
+                patch("agent_squad.cli.time.monotonic",
+                      side_effect=lambda: clock[0]):
+            self.run_cli(*arguments, environ=disabled, result=stopped)
+            self.assertEqual(calls, [])
+            self.run_cli(*arguments, result=stopped)
+        self.assertEqual(calls, [True])
+        [event] = self.events()
+        self.assertEqual((event["duration_ms"], event["outcome"]),
+                         (0, {"reason": "budget"}))
+
+    def test_a_failing_outcome_changes_no_output_or_exit_code(self) -> None:
+        disabled = {**self.environ, "AGENT_SQUAD_EVENTS": "off"}
+
+        def failing(error: BaseException, value: object) -> object:
+            def compute() -> dict:
+                raise error
+
+            def run(args: object) -> object:
+                events.outcome(compute)
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+            return run
+
+        arguments = (*STOP, "repeat", "--body", "b.md")
+        for error in (OSError("git failed"), ValueError("bad"),
+                      RuntimeError("no home")):
+            for value in ({"id": 1}, ValueError("forge failed")):
+                with self.subTest(error=error, value=value):
+                    expected = self.run_cli(
+                        *arguments, environ=disabled,
+                        result=failing(error, value))
+                    actual = self.run_cli(
+                        *arguments, result=failing(error, value))
+                    self.assertEqual(actual, expected)
+                    self.assertIsNone(self.events()[-1]["outcome"])
+        self.assertEqual(
+            [e["exit_code"] for e in self.events()], [0, 1] * 3)
+
+    def test_named_settings_take_only_the_documented_forms(self) -> None:
+        for kind, arguments, model, effort in (
+            ("claude", ("--model", "opus", "--effort", "high"),
+             "opus", "high"),
+            ("claude", ("--model=claude-opus-5-5", "--effort=max"),
+             "claude-opus-5-5", "max"),
+            ("codex", ("--model", "gpt-6.2-sol"), "gpt-6.2-sol", None),
+            ("codex", ("--model=o3",), "o3", None),
+            ("codex", ("-m", "o3", "-c", "model_reasoning_effort=high"),
+             "o3", "high"),
+            ("codex", ("-c", 'model="o3"', "--config",
+                       "model_reasoning_effort='low'"), "o3", "low"),
+            ("codex", ("--config", "model='vendor/m:1@v+2'"),
+             "vendor/m:1@v+2", None),
+            # A profile or settings file beside a named setting is ignored.
+            ("codex", ("-p", "fast", "-m", "o3"), "o3", None),
+            ("claude", ("--settings", "s.json", "--model", "opus"),
+             "opus", None),
+            # Other options and their values are skipped, never recorded.
+            ("codex", ("--add-dir", "/secret", "-c", "api_key=SECRET",
+                       "-m", "o3"), "o3", None),
+            # The kind decides the forms.
+            ("claude", ("-m", "o3", "-c", "model=o3", "--config",
+                        "model_reasoning_effort=high"), None, None),
+            ("codex", ("--effort", "high", "--effort=high"), None, None),
+            # Not named, or named another way.
+            ("codex", (), None, None),
+            ("codex", ("-p", "fast"), None, None),
+            ("codex", ("--profile", "fast"), None, None),
+            ("claude", ("--settings", "s.json"), None, None),
+            ("codex", ("--config=model=o3", "-m=o3", "-mo3", "-c",
+                       "model =o3"), None, None),
+            ("claude", ("--model-x=o3", "--modelo3"), None, None),
+            # Named more than once, even with the same value.
+            ("codex", ("-m", "o3", "--model", "o3"), None, None),
+            ("codex", ("-c", "model=o3", "-c", "model=o3"), None, None),
+            ("claude", ("--effort", "high", "--effort=high"), "x", None),
+            # A missing value.
+            ("claude", ("--model",), None, None),
+            ("codex", ("-c",), None, None),
+            # After the separator every argument is positional (REV-1).
+            ("claude", ("--", "--model", "opus", "--effort=high"),
+             None, None),
+            ("codex", ("--", "-m", "o3", "-c", "model=o3", "--config",
+                       "model_reasoning_effort=high"), None, None),
+            ("claude", ("--model", "opus", "--effort", "high", "--",
+                        "--model=other", "--effort", "low"), "opus", "high"),
+            ("codex", ("-m", "o3", "--", "-m", "o4"), "o3", None),
+            # The separator ends the options even where a value was due.
+            ("claude", ("--model", "--", "opus"), None, None),
+            ("codex", ("-c", "--", "model=o3"), None, None),
+            ("codex", ("--config", "--", "model_reasoning_effort=high"),
+             None, None),
+        ):
+            if model == "x":  # Only the effort is repeated here.
+                arguments = (*arguments, "--model", "x")
+            with self.subTest(kind=kind, arguments=arguments):
+                self.assertEqual(
+                    (events.named_setting(kind, arguments, "model"),
+                     events.named_setting(kind, arguments, "effort")),
+                    (model, effort),
+                )
+
+    def test_a_named_setting_must_match_the_value_pattern(self) -> None:
+        for value, expected in (
+            ("a", "a"), ("A" * 64, "A" * 64), ("A" * 65, None),
+            ("", None), ("-high", None), (".o3", None), ("o3\n", None),
+            ("o3 high", None), ("o3\tx", None), ("model_x", "model_x"),
+            ("o3;rm", None), ("tête", None), ("o3=4", None),
+            ("~/.secret", None), ("/etc/token", None),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    events.named_setting("claude", ("--model", value),
+                                         "model"), expected)
+        # Quotes are removed once, and only from a -c or --config value.
+        for item, expected in (
+            ('model="o3"', "o3"), ("model='o3'", "o3"),
+            ("model=\"'o3'\"", None), ("model=\"o3'", None),
+            ('model="', None), ('model=""', None), ("model=o3", "o3"),
+        ):
+            with self.subTest(item=item):
+                self.assertEqual(events.named_setting(
+                    "codex", ("-c", item), "model"), expected)
+        self.assertIsNone(events.named_setting(
+            "claude", ("--model", '"o3"'), "model"))
+        self.assertIsNone(events.named_setting("other", ("--model", "o3"),
+                                               "model"))
+
+    def test_the_skill_fingerprint_reads_only_a_regular_file(self) -> None:
+        path = self.root / "SKILL.md"
+        path.write_bytes(b"skill text\n")
+        self.assertEqual(
+            events.skill_digest(path),
+            hashlib.sha256(b"skill text\n").hexdigest()[:16])
+        self.assertIsNone(events.skill_digest(self.root / "missing.md"))
+        self.assertIsNone(events.skill_digest(self.root))
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        self.assertIsNone(events.skill_digest(fifo))
+        home = self.root / "home"
+        installed = home / ".agents/skills/squad-reviewer/SKILL.md"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(b"installed\n")
+        compute = events.launch_outcome(
+            AgentKind.CODEX, ("-m", "o3", "--add-dir", "/secret"))
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertEqual(compute(), {
+                "reviewer_kind": "codex", "model": "o3", "effort": None,
+                "reviewer_skill":
+                    hashlib.sha256(b"installed\n").hexdigest()[:16],
+            })
+            self.assertIs(type(compute()["reviewer_kind"]), str)
+            installed.unlink()
+            self.assertIsNone(compute()["reviewer_skill"])
+        with patch("agent_squad.events.Path.home",
+                   side_effect=RuntimeError("no home")):
+            self.assertIsNone(compute()["reviewer_skill"])
 
     def test_doctor_row_reports_writable_unwritable_and_disabled(
         self,

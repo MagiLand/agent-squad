@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 import re
 import time
 from typing import TypeVar
 
-from .anchors import Anchor, commentable_lines, validate_anchor
+from . import events
+from .anchors import (
+    Anchor,
+    changed_line_count,
+    changed_lines,
+    commentable_lines,
+    validate_anchor,
+)
 from .conventions import (
     DECISION_RECORD,
     GENERAL_KINDS,
@@ -880,6 +887,85 @@ def compose_review(
     return body
 
 
+def strictly_ancestor(root: Path, earlier: str, later: str) -> bool:
+    """Like ``is_ancestor``, but a Git error is an error, not a no (REV-3)."""
+    code = run_git(
+        root, "merge-base", "--is-ancestor", earlier, later
+    ).returncode
+    if code not in (0, 1):
+        raise AgentSquadError(f"git merge-base failed with exit {code}")
+    return code == 0
+
+
+def review_outcome(
+    root: Path,
+    base: str,
+    head: str,
+    verdict: str,
+    inputs: list[FindingInput],
+    ids: list[str],
+    resumed: bool,
+    basis: dict,
+    earlier: Callable[[], dict],
+) -> events.Outcome:
+    """Describe a published review; the diffs run only when recorded.
+
+    ``basis`` gains the review's ``id`` and the ``current`` state read after
+    publication as the command proceeds. That state, when read, decides the
+    pass, the previous reviewed head, and the anchor of each root already
+    published (REV-2). Without it ``earlier()`` decides: the state read
+    before publication, with any draft the run submitted first.
+    """
+    def compute() -> dict[str, object]:
+        current = basis["current"]
+        state = current if current is not None else earlier()
+        reviews = state["reviews"]
+        at = next(
+            (index for index, review in enumerate(reviews)
+             if review["id"] == basis["id"]),
+            len(reviews),  # A new review the state does not yet list.
+        )
+        roots = {
+            f["finding"]: f["anchor"] for f in state["findings"]
+            if f["finding"] in ids and f["root"] is not None
+            and f["anchor"] is not None and f["anchor"]["line"]
+        }
+        anchors = [
+            Anchor(
+                roots[fid]["path"], roots[fid]["line"],
+                roots[fid]["start_line"],
+            ) if fid in roots else item.anchor
+            for fid, item in zip(ids, inputs)
+        ]
+        previous = reviews[at - 1]["head"] if at else None
+        since = on_changed = None
+        if previous == head:
+            since = on_changed = 0
+        elif previous is not None and strictly_ancestor(root, previous, head):
+            since = changed_line_count(root, previous, head)
+            changed = changed_lines(root, previous, head)
+            on_changed = sum(
+                any(
+                    number in changed.get(anchor.path, ())
+                    for number in range(
+                        anchor.start_line or anchor.line, anchor.line + 1,
+                    )
+                )
+                for anchor in anchors
+            )
+        return {
+            "verdict": verdict,
+            "blocking": sum(i.severity == "blocking" for i in inputs),
+            "optional": sum(i.severity == "optional" for i in inputs),
+            "pass": at + 1,
+            "resumed": resumed,
+            "diff_lines": changed_line_count(root, base, head),
+            "diff_lines_since_previous": since,
+            "findings_on_changed_lines": on_changed,
+        }
+    return compute
+
+
 def post_review(
     repository: Repository,
     forge: Forge,
@@ -923,7 +1009,7 @@ def post_review(
     existing = None
     if resume is not None:
         existing = next(
-            (r for r in state["reviews"] if r["id"] == resume), None
+            (r for r in state["reviews"] if r["id"] == resume), None,
         )
         if existing is None or first_line(existing["body"]) != header:
             raise AgentSquadError(
@@ -943,6 +1029,22 @@ def post_review(
         start = allocate_id(snapshot)
         ids = [f"REV-{start + i}" for i in range(len(inputs))]
     complete_body = header + "\n\n" + compose_review(sections, inputs, ids)
+    # What the outcome reads (docs/events.md): the review's ID, the drafts
+    # prepare_review submitted, and the state read after publication.
+    basis: dict = {"id": resume, "submitted": (), "current": None}
+
+    def earlier() -> dict:
+        submitted = {r.evidence.id: r for r in basis["submitted"]}
+        if not submitted:
+            return state
+        return state_for(repository, replace(snapshot, reviews=tuple(
+            submitted.get(r.evidence.id, r) for r in snapshot.reviews
+        )))
+
+    outcome = review_outcome(
+        repository.root, base, head, verdict, inputs, ids,
+        existing is not None, basis, earlier,
+    )
     if existing is None:
         if verdict == "approved" and (
             any(f.severity == "blocking" for f in inputs)
@@ -969,7 +1071,7 @@ def post_review(
                     "changes_requested requires a blocking finding or NOT"
                     " FIXED during this pass"
                 )
-        forge.prepare_review(
+        basis["submitted"] = forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
         comments = tuple(
@@ -984,16 +1086,27 @@ def post_review(
             + "\n\n".join(comment.body for comment in comments),
             comments, base,
         )
-        review = forge.post_review(number, publication)
+        try:
+            review = forge.post_review(number, publication)
+        except ForgeError as error:
+            if error.written:  # Published, though its read-back failed.
+                events.outcome(outcome)
+            raise
         review_id = review.evidence.id
     else:
-        forge.prepare_review(
+        # Forgejo refuses here over a pending draft: no outcome (REV-4).
+        basis["submitted"] = forge.prepare_review(
             number, reviews=snapshot.reviews, discard_draft=discard_draft,
         )
         review_id = existing["id"]
+    # Published, or found by --resume: the event describes this review
+    # whatever follows, such as a root that cannot be posted.
+    basis["id"] = review_id
+    events.outcome(outcome)
     # Read after publication: partial success is recoverable by this exact
     # review ID.
     current = state_for(repository, forge.snapshot(number))
+    basis["current"] = current
     failed = []
     for fid, item in zip(ids, inputs):
         finding = find_finding(current, fid)
@@ -1127,7 +1240,25 @@ def reply_thread(
                 "fixed SHA must name a local commit absent from the finding"
                 " opening head"
             )
-    return asdict(forge.reply(number, finding["root"]["id"], body))
+
+    def outcome() -> dict[str, object]:
+        return {
+            "disposition": disposition,
+            "verification": verification,
+            "rejection": (
+                "not-pursued" if not_pursued
+                else "deferred" if deferred_to is not None else None
+            ),
+        }
+
+    try:
+        reply = forge.reply(number, finding["root"]["id"], body)
+    except ForgeError as error:
+        if error.written:  # Posted, though its read-back failed.
+            events.outcome(outcome)
+        raise
+    events.outcome(outcome)
+    return asdict(reply)
 
 
 def open_thread(
@@ -1281,6 +1412,14 @@ def post_decision(
             full_body += "\n\n" + task
         decision = asdict(forge.comment(number, full_body))
         reused = False
+    events.outcome(lambda: {
+        "kind": kind,
+        "merge_instruction": merge_instruction,
+        "recommendation": recommendation,
+        "budget": budget,
+        "task_amended": task is not None,
+        "reused": reused,
+    })
     if task is not None:
         try:
             # Re-read before mirroring so a newer report is retained.
@@ -1309,4 +1448,6 @@ def post_stop(
             "stop body must summarize the remaining problems without a"
             " protocol header"
         )
-    return asdict(forge.comment(number, header + "\n\n" + body.strip()))
+    comment = forge.comment(number, header + "\n\n" + body.strip())
+    events.outcome(lambda: {"reason": reason})
+    return asdict(comment)
