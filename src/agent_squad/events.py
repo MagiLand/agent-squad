@@ -99,7 +99,7 @@ def computed_outcome(
     group: str | None, command: str | None
 ) -> dict[str, object] | None:
     """Return the documented outcome, or None on any error or mismatch."""
-    fields = OUTCOME_FIELDS.get((group, command))  # type: ignore[arg-type]
+    fields = OUTCOME_FIELDS.get((group, command))
     if _outcome is None or fields is None:
         return None
     try:
